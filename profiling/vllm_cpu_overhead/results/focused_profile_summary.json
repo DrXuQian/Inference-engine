@@ -1,0 +1,926 @@
+{
+  "c1": {
+    "run": {
+      "concurrency": 1,
+      "total_requests": 8,
+      "max_tokens": 32,
+      "profile_elapsed_s": 23.12986958771944,
+      "total_completion_tokens": 256,
+      "completion_tokens_per_s": 11.067939619336224,
+      "avg_prompt_tokens": 33,
+      "avg_completion_tokens": 32
+    },
+    "focus_functions": {
+      "scheduler_schedule": {
+        "cum_s": 0.052434,
+        "self_s": 0.009924,
+        "calls": 264,
+        "per_output_token_ms": 0.2048
+      },
+      "scheduler_update_from_output": {
+        "cum_s": 0.015489,
+        "self_s": 0.00662,
+        "calls": 264,
+        "per_output_token_ms": 0.0605
+      },
+      "kv_allocate_slots": {
+        "cum_s": 0.026532,
+        "self_s": 0.001629,
+        "calls": 256,
+        "per_output_token_ms": 0.1036
+      },
+      "kv_get_blocks": {
+        "cum_s": 0.012646,
+        "self_s": 0.001363,
+        "calls": 264,
+        "per_output_token_ms": 0.0494
+      },
+      "model_runner_execute": {
+        "cum_s": 22.831843,
+        "self_s": 0.024064,
+        "calls": 264,
+        "per_output_token_ms": 89.1869
+      },
+      "model_runner_prepare_inputs": {
+        "cum_s": 0.247175,
+        "self_s": 0.052244,
+        "calls": 256,
+        "per_output_token_ms": 0.9655
+      },
+      "model_runner_build_attn_metadata": {
+        "cum_s": 0.111855,
+        "self_s": 0.015903,
+        "calls": 256,
+        "per_output_token_ms": 0.4369
+      },
+      "model_runner_update_states": {
+        "cum_s": 0.049619,
+        "self_s": 0.005312,
+        "calls": 264,
+        "per_output_token_ms": 0.1938
+      },
+      "block_table_slot_mapping": {
+        "cum_s": 0.059175,
+        "self_s": 0.004284,
+        "calls": 1024,
+        "per_output_token_ms": 0.2312
+      },
+      "gpu_sample_tokens": {
+        "cum_s": 0.095122,
+        "self_s": 0.008415,
+        "calls": 256,
+        "per_output_token_ms": 0.3716
+      },
+      "sampler_forward": {
+        "cum_s": 0.021847,
+        "self_s": 0.003066,
+        "calls": 256,
+        "per_output_token_ms": 0.0853
+      },
+      "detokenizer_update": {
+        "cum_s": 0.005985,
+        "self_s": 0.000839,
+        "calls": 256,
+        "per_output_token_ms": 0.0234
+      },
+      "output_process_outputs": {
+        "cum_s": 0.009284,
+        "self_s": 0.002472,
+        "calls": 264,
+        "per_output_token_ms": 0.0363
+      },
+      "input_process_inputs": {
+        "cum_s": 0.001516,
+        "self_s": 0.000104,
+        "calls": 8,
+        "per_output_token_ms": 0.0059
+      },
+      "hf_encode": {
+        "cum_s": 0.001403,
+        "self_s": 6.4e-05,
+        "calls": 8,
+        "per_output_token_ms": 0.0055
+      }
+    },
+    "focus_groups": {
+      "scheduler": {
+        "cum_sum_s": 0.080078,
+        "self_sum_s": 0.022044,
+        "calls": 2176,
+        "cum_per_output_token_ms": 0.3128
+      },
+      "kv_cache_core": {
+        "cum_sum_s": 0.196032,
+        "self_sum_s": 0.052714,
+        "calls": 25802,
+        "cum_per_output_token_ms": 0.7658
+      },
+      "worker_gpu_model_runner": {
+        "cum_sum_s": 45.977617,
+        "self_sum_s": 0.176796,
+        "calls": 14144,
+        "cum_per_output_token_ms": 179.6001
+      },
+      "worker_block_table": {
+        "cum_sum_s": 0.193346,
+        "self_sum_s": 0.014706,
+        "calls": 5752,
+        "cum_per_output_token_ms": 0.7553
+      },
+      "engine_output_processor": {
+        "cum_sum_s": 0.010987,
+        "self_sum_s": 0.003457,
+        "calls": 1361,
+        "cum_per_output_token_ms": 0.0429
+      },
+      "engine_detokenizer": {
+        "cum_sum_s": 0.015928,
+        "self_sum_s": 0.001461,
+        "calls": 816,
+        "cum_per_output_token_ms": 0.0622
+      },
+      "engine_input_processor": {
+        "cum_sum_s": 0.001932,
+        "self_sum_s": 0.000212,
+        "calls": 88,
+        "cum_per_output_token_ms": 0.0075
+      },
+      "sampler": {
+        "cum_sum_s": 0.044449,
+        "self_sum_s": 0.008345,
+        "calls": 4736,
+        "cum_per_output_token_ms": 0.1736
+      },
+      "hf_transformers_tokenizer": {
+        "cum_sum_s": 0.003126,
+        "self_sum_s": 0.000448,
+        "calls": 144,
+        "cum_per_output_token_ms": 0.0122
+      }
+    },
+    "top_vllm_cumulative": [
+      {
+        "function": "vllm/v1/worker/worker_base.py:332:execute_model",
+        "cum_s": 22.95012,
+        "self_s": 0.001935,
+        "calls": 264
+      },
+      {
+        "function": "vllm/v1/worker/gpu_worker.py:752:execute_model",
+        "cum_s": 22.892866,
+        "self_s": 0.001956,
+        "calls": 264
+      },
+      {
+        "function": "vllm/v1/worker/gpu_model_runner.py:3786:execute_model",
+        "cum_s": 22.831843,
+        "self_s": 0.024064,
+        "calls": 264
+      },
+      {
+        "function": "vllm/v1/worker/gpu_model_runner.py:3500:_model_forward",
+        "cum_s": 22.351001,
+        "self_s": 0.000951,
+        "calls": 256
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_5.py:660:forward",
+        "cum_s": 22.347182,
+        "self_s": 0.001887,
+        "calls": 256
+      },
+      {
+        "function": "vllm/compilation/decorators.py:462:__call__",
+        "cum_s": 22.344536,
+        "self_s": 0.001631,
+        "calls": 256
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:495:forward",
+        "cum_s": 22.242763,
+        "self_s": 0.074798,
+        "calls": 256
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:393:forward",
+        "cum_s": 22.126326,
+        "self_s": 0.144859,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:167:forward",
+        "cum_s": 9.47832,
+        "self_s": 0.065251,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/layer.py:1545:forward",
+        "cum_s": 9.260638,
+        "self_s": 0.032915,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:531:forward",
+        "cum_s": 9.228603,
+        "self_s": 0.19833,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:117:_moe_forward_shared",
+        "cum_s": 8.694736,
+        "self_s": 0.029652,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:680:_forward_impl",
+        "cum_s": 8.629508,
+        "self_s": 0.1035,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:436:_apply_quant_method",
+        "cum_s": 7.282894,
+        "self_s": 0.047849,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/gdn_linear_attn.py:512:forward",
+        "cum_s": 6.669738,
+        "self_s": 0.038203,
+        "calls": 7680
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/gdn_linear_attn.py:519:forward_cuda",
+        "cum_s": 6.631534,
+        "self_s": 0.334632,
+        "calls": 7680
+      },
+      {
+        "function": "vllm/model_executor/custom_op.py:135:forward",
+        "cum_s": 6.002358,
+        "self_s": 0.060173,
+        "calls": 46576
+      },
+      {
+        "function": "vllm/model_executor/layers/layernorm.py:396:forward_cuda",
+        "cum_s": 3.854424,
+        "self_s": 0.046453,
+        "calls": 25856
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:427:_maybe_apply_shared_experts",
+        "cum_s": 3.83679,
+        "self_s": 0.015411,
+        "calls": 20480
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/shared_experts.py:159:apply",
+        "cum_s": 3.82138,
+        "self_s": 0.038979,
+        "calls": 20480
+      },
+      {
+        "function": "vllm/model_executor/layers/layernorm.py:375:forward_native",
+        "cum_s": 3.807972,
+        "self_s": 0.659445,
+        "calls": 25856
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/shared_experts.py:135:_run_in_aux_stream",
+        "cum_s": 3.669561,
+        "self_s": 0.060281,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py:541:apply",
+        "cum_s": 2.86665,
+        "self_s": 0.137714,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/gdn_linear_attn.py:1066:gdn_attention_core",
+        "cum_s": 2.781638,
+        "self_s": 0.025279,
+        "calls": 7680
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/gdn_linear_attn.py:752:_forward_core",
+        "cum_s": 2.747982,
+        "self_s": 0.072657,
+        "calls": 7680
+      },
+      {
+        "function": "vllm/ir/op.py:271:__call__",
+        "cum_s": 2.695588,
+        "self_s": 0.030758,
+        "calls": 25856
+      },
+      {
+        "function": "vllm/ir/op.py:210:_inner_call",
+        "cum_s": 2.664829,
+        "self_s": 0.094862,
+        "calls": 25856
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/fused_marlin_moe.py:224:fused_marlin_moe",
+        "cum_s": 2.634246,
+        "self_s": 0.235121,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/models/qwen2_moe.py:114:forward",
+        "cum_s": 2.570152,
+        "self_s": 0.212406,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py:941:apply",
+        "cum_s": 2.444816,
+        "self_s": 0.038047,
+        "calls": 40960
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py:225:apply_weights",
+        "cum_s": 2.406769,
+        "self_s": 0.046735,
+        "calls": 40960
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/gdn_linear_attn.py:1011:_forward_core_decode_non_spec",
+        "cum_s": 2.388008,
+        "self_s": 0.215031,
+        "calls": 7440
+      },
+      {
+        "function": "vllm/model_executor/kernels/linear/mixed_precision/marlin.py:173:apply_weights",
+        "cum_s": 2.360034,
+        "self_s": 0.133728,
+        "calls": 40960
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:276:forward",
+        "cum_s": 2.288478,
+        "self_s": 0.134408,
+        "calls": 2560
+      },
+      {
+        "function": "vllm/ir/ops/layernorm.py:9:rms_norm",
+        "cum_s": 2.283497,
+        "self_s": 0.821559,
+        "calls": 25856
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/utils/marlin_utils.py:506:apply_gptq_marlin_linear",
+        "cum_s": 2.043188,
+        "self_s": 0.291844,
+        "calls": 40960
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:579:forward",
+        "cum_s": 1.87287,
+        "self_s": 0.056352,
+        "calls": 28160
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:220:apply",
+        "cum_s": 1.579725,
+        "self_s": 0.080086,
+        "calls": 28160
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/fused_marlin_moe.py:56:_fused_marlin_moe",
+        "cum_s": 1.537191,
+        "self_s": 0.173062,
+        "calls": 10240
+      },
+      {
+        "function": "vllm/model_executor/layers/utils.py:92:default_unquantized_gemm",
+        "cum_s": 1.437061,
+        "self_s": 0.026929,
+        "calls": 28416
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/utils.py:88:wrapper",
+        "cum_s": 1.412025,
+        "self_s": 0.113957,
+        "calls": 8400
+      },
+      {
+        "function": "vllm/_custom_ops.py:1388:marlin_gemm",
+        "cum_s": 1.333285,
+        "self_s": 0.111751,
+        "calls": 40960
+      },
+      {
+        "function": "vllm/model_executor/parameter.py:122:__torch_function__",
+        "cum_s": 1.303341,
+        "self_s": 0.057612,
+        "calls": 51200
+      },
+      {
+        "function": "vllm/model_executor/layers/layernorm.py:505:forward_cuda",
+        "cum_s": 1.270155,
+        "self_s": 0.036468,
+        "calls": 7680
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:387:forward",
+        "cum_s": 1.206228,
+        "self_s": 0.031777,
+        "calls": 20480
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:1538:forward",
+        "cum_s": 1.115041,
+        "self_s": 0.038881,
+        "calls": 20480
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/ops/causal_conv1d.py:1071:causal_conv1d_update",
+        "cum_s": 1.041803,
+        "self_s": 0.131019,
+        "calls": 7440
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/layernorm_guard.py:318:rmsnorm_fn",
+        "cum_s": 1.013237,
+        "self_s": 0.020772,
+        "calls": 7680
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/layernorm_guard.py:253:_layer_norm_fn_impl",
+        "cum_s": 0.992465,
+        "self_s": 0.041632,
+        "calls": 7680
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/fused_recurrent.py:339:fused_recurrent_gated_delta_rule_packed_decode",
+        "cum_s": 0.897185,
+        "self_s": 0.183757,
+        "calls": 7440
+      }
+    ]
+  },
+  "c64": {
+    "run": {
+      "concurrency": 64,
+      "total_requests": 64,
+      "max_tokens": 32,
+      "profile_elapsed_s": 3.4926318041980267,
+      "total_completion_tokens": 2048,
+      "completion_tokens_per_s": 586.3772979271312,
+      "avg_prompt_tokens": 33.84375,
+      "avg_completion_tokens": 32
+    },
+    "focus_functions": {
+      "scheduler_schedule": {
+        "cum_s": 0.057237,
+        "self_s": 0.003588,
+        "calls": 33,
+        "per_output_token_ms": 0.0279
+      },
+      "scheduler_update_from_output": {
+        "cum_s": 0.032022,
+        "self_s": 0.008916,
+        "calls": 33,
+        "per_output_token_ms": 0.0156
+      },
+      "kv_allocate_slots": {
+        "cum_s": 0.128887,
+        "self_s": 0.00625,
+        "calls": 2048,
+        "per_output_token_ms": 0.0629
+      },
+      "kv_get_blocks": {
+        "cum_s": 0.061119,
+        "self_s": 0.005397,
+        "calls": 2112,
+        "per_output_token_ms": 0.0298
+      },
+      "model_runner_execute": {
+        "cum_s": 0.0,
+        "self_s": 0.002923,
+        "calls": 31,
+        "per_output_token_ms": 0.0
+      },
+      "model_runner_prepare_inputs": {
+        "cum_s": 0.056163,
+        "self_s": 0.00739,
+        "calls": 32,
+        "per_output_token_ms": 0.0274
+      },
+      "model_runner_build_attn_metadata": {
+        "cum_s": 0.014579,
+        "self_s": 0.001967,
+        "calls": 32,
+        "per_output_token_ms": 0.0071
+      },
+      "model_runner_update_states": {
+        "cum_s": 0.0,
+        "self_s": 0.003199,
+        "calls": 32,
+        "per_output_token_ms": 0.0
+      },
+      "block_table_slot_mapping": {
+        "cum_s": 0.012375,
+        "self_s": 0.00061,
+        "calls": 128,
+        "per_output_token_ms": 0.006
+      },
+      "gpu_sample_tokens": {
+        "cum_s": 0.016564,
+        "self_s": 0.00111,
+        "calls": 32,
+        "per_output_token_ms": 0.0081
+      },
+      "sampler_forward": {
+        "cum_s": 0.002747,
+        "self_s": 0.000393,
+        "calls": 32,
+        "per_output_token_ms": 0.0013
+      },
+      "detokenizer_update": {
+        "cum_s": 0.008913,
+        "self_s": 0.002283,
+        "calls": 2048,
+        "per_output_token_ms": 0.0044
+      },
+      "output_process_outputs": {
+        "cum_s": 0.01447,
+        "self_s": 0.003635,
+        "calls": 33,
+        "per_output_token_ms": 0.0071
+      },
+      "input_process_inputs": {
+        "cum_s": 0.010605,
+        "self_s": 0.000663,
+        "calls": 64,
+        "per_output_token_ms": 0.0052
+      },
+      "hf_encode": {
+        "cum_s": 0.009046,
+        "self_s": 0.000357,
+        "calls": 64,
+        "per_output_token_ms": 0.0044
+      }
+    },
+    "focus_groups": {
+      "scheduler": {
+        "cum_sum_s": 0.115315,
+        "self_sum_s": 0.019098,
+        "calls": 2918,
+        "cum_per_output_token_ms": 0.0563
+      },
+      "kv_cache_core": {
+        "cum_sum_s": 0.592311,
+        "self_sum_s": 0.121393,
+        "calls": 137347,
+        "cum_per_output_token_ms": 0.2892
+      },
+      "worker_gpu_model_runner": {
+        "cum_sum_s": 0.275618,
+        "self_sum_s": 0.038968,
+        "calls": 1889,
+        "cum_per_output_token_ms": 0.1346
+      },
+      "worker_block_table": {
+        "cum_sum_s": 0.035854,
+        "self_sum_s": 0.002963,
+        "calls": 1664,
+        "cum_per_output_token_ms": 0.0175
+      },
+      "engine_output_processor": {
+        "cum_sum_s": 0.018614,
+        "self_sum_s": 0.005278,
+        "calls": 4644,
+        "cum_per_output_token_ms": 0.0091
+      },
+      "engine_detokenizer": {
+        "cum_sum_s": 0.021322,
+        "self_sum_s": 0.00423,
+        "calls": 6528,
+        "cum_per_output_token_ms": 0.0104
+      },
+      "engine_input_processor": {
+        "cum_sum_s": 0.013216,
+        "self_sum_s": 0.001322,
+        "calls": 704,
+        "cum_per_output_token_ms": 0.0065
+      },
+      "sampler": {
+        "cum_sum_s": 0.005905,
+        "self_sum_s": 0.001244,
+        "calls": 970,
+        "cum_per_output_token_ms": 0.0029
+      },
+      "hf_transformers_tokenizer": {
+        "cum_sum_s": 0.020382,
+        "self_sum_s": 0.002889,
+        "calls": 1152,
+        "cum_per_output_token_ms": 0.01
+      }
+    },
+    "top_vllm_cumulative": [
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:167:forward",
+        "cum_s": 1.206366,
+        "self_s": 0.008228,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/layer.py:1545:forward",
+        "cum_s": 1.178533,
+        "self_s": 0.003604,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:531:forward",
+        "cum_s": 1.174929,
+        "self_s": 0.025487,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:117:_moe_forward_shared",
+        "cum_s": 1.107112,
+        "self_s": 0.003913,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:680:_forward_impl",
+        "cum_s": 1.098723,
+        "self_s": 0.012881,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:436:_apply_quant_method",
+        "cum_s": 0.926897,
+        "self_s": 0.006614,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/custom_op.py:135:forward",
+        "cum_s": 0.768109,
+        "self_s": 0.007468,
+        "calls": 5822
+      },
+      {
+        "function": "vllm/model_executor/layers/layernorm.py:396:forward_cuda",
+        "cum_s": 0.494698,
+        "self_s": 0.005794,
+        "calls": 3232
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py:427:_maybe_apply_shared_experts",
+        "cum_s": 0.490852,
+        "self_s": 0.001947,
+        "calls": 2560
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/shared_experts.py:159:apply",
+        "cum_s": 0.488905,
+        "self_s": 0.004858,
+        "calls": 2560
+      },
+      {
+        "function": "vllm/model_executor/layers/layernorm.py:375:forward_native",
+        "cum_s": 0.488904,
+        "self_s": 0.083725,
+        "calls": 3232
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/runner/shared_experts.py:135:_run_in_aux_stream",
+        "cum_s": 0.459745,
+        "self_s": 0.007593,
+        "calls": 1240
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py:541:apply",
+        "cum_s": 0.362744,
+        "self_s": 0.017712,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/ir/op.py:271:__call__",
+        "cum_s": 0.347473,
+        "self_s": 0.003806,
+        "calls": 3232
+      },
+      {
+        "function": "vllm/ir/op.py:210:_inner_call",
+        "cum_s": 0.343668,
+        "self_s": 0.013092,
+        "calls": 3232
+      },
+      {
+        "function": "vllm/model_executor/models/qwen2_moe.py:114:forward",
+        "cum_s": 0.333856,
+        "self_s": 0.028856,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/fused_marlin_moe.py:224:fused_marlin_moe",
+        "cum_s": 0.33278,
+        "self_s": 0.030117,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py:941:apply",
+        "cum_s": 0.317028,
+        "self_s": 0.00404,
+        "calls": 5120
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py:225:apply_weights",
+        "cum_s": 0.312988,
+        "self_s": 0.005826,
+        "calls": 5120
+      },
+      {
+        "function": "vllm/model_executor/kernels/linear/mixed_precision/marlin.py:173:apply_weights",
+        "cum_s": 0.307162,
+        "self_s": 0.017785,
+        "calls": 5120
+      },
+      {
+        "function": "vllm/ir/ops/layernorm.py:9:rms_norm",
+        "cum_s": 0.294619,
+        "self_s": 0.105627,
+        "calls": 3232
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:276:forward",
+        "cum_s": 0.293706,
+        "self_s": 0.017181,
+        "calls": 320
+      },
+      {
+        "function": "vllm/model_executor/layers/quantization/utils/marlin_utils.py:506:apply_gptq_marlin_linear",
+        "cum_s": 0.265895,
+        "self_s": 0.035859,
+        "calls": 5120
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:579:forward",
+        "cum_s": 0.241948,
+        "self_s": 0.007106,
+        "calls": 3520
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:220:apply",
+        "cum_s": 0.208821,
+        "self_s": 0.009157,
+        "calls": 3520
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/fused_marlin_moe.py:56:_fused_marlin_moe",
+        "cum_s": 0.194713,
+        "self_s": 0.022128,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/utils.py:92:default_unquantized_gemm",
+        "cum_s": 0.192838,
+        "self_s": 0.003526,
+        "calls": 3552
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/utils.py:88:wrapper",
+        "cum_s": 0.180401,
+        "self_s": 0.013908,
+        "calls": 1050
+      },
+      {
+        "function": "vllm/_custom_ops.py:1388:marlin_gemm",
+        "cum_s": 0.17669,
+        "self_s": 0.013353,
+        "calls": 5120
+      },
+      {
+        "function": "vllm/model_executor/parameter.py:122:__torch_function__",
+        "cum_s": 0.175638,
+        "self_s": 0.007193,
+        "calls": 6400
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:387:forward",
+        "cum_s": 0.160812,
+        "self_s": 0.003988,
+        "calls": 2560
+      },
+      {
+        "function": "vllm/model_executor/layers/layernorm.py:505:forward_cuda",
+        "cum_s": 0.159858,
+        "self_s": 0.0044,
+        "calls": 960
+      },
+      {
+        "function": "vllm/model_executor/layers/linear.py:1538:forward",
+        "cum_s": 0.145085,
+        "self_s": 0.004992,
+        "calls": 2560
+      },
+      {
+        "function": "vllm/v1/core/kv_cache_manager.py:264:allocate_slots",
+        "cum_s": 0.128887,
+        "self_s": 0.00625,
+        "calls": 2048
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/layernorm_guard.py:318:rmsnorm_fn",
+        "cum_s": 0.128216,
+        "self_s": 0.002894,
+        "calls": 960
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/layernorm_guard.py:253:_layer_norm_fn_impl",
+        "cum_s": 0.125322,
+        "self_s": 0.005496,
+        "calls": 960
+      },
+      {
+        "function": "vllm/v1/worker/gpu_model_runner.py:3500:_model_forward",
+        "cum_s": 0.124058,
+        "self_s": 0.000118,
+        "calls": 31
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_5.py:660:forward",
+        "cum_s": 0.124037,
+        "self_s": 0.000194,
+        "calls": 31
+      },
+      {
+        "function": "vllm/compilation/decorators.py:462:__call__",
+        "cum_s": 0.124016,
+        "self_s": 0.000158,
+        "calls": 31
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:495:forward",
+        "cum_s": 0.124008,
+        "self_s": 0.009557,
+        "calls": 31
+      },
+      {
+        "function": "vllm/model_executor/models/qwen3_next.py:393:forward",
+        "cum_s": 0.123073,
+        "self_s": 0.018624,
+        "calls": 1279
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/fused_recurrent.py:339:fused_recurrent_gated_delta_rule_packed_decode",
+        "cum_s": 0.114456,
+        "self_s": 0.023407,
+        "calls": 930
+      },
+      {
+        "function": "vllm/model_executor/layers/fla/ops/layernorm_guard.py:178:layer_norm_fwd",
+        "cum_s": 0.111621,
+        "self_s": 0.013163,
+        "calls": 960
+      },
+      {
+        "function": "vllm/_custom_ops.py:2583:moe_wna16_marlin_gemm",
+        "cum_s": 0.09495,
+        "self_s": 0.007411,
+        "calls": 2560
+      },
+      {
+        "function": "vllm/model_executor/layers/attention/attention.py:457:forward",
+        "cum_s": 0.069555,
+        "self_s": 0.003891,
+        "calls": 320
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/moe_align_block_size.py:11:moe_align_block_size",
+        "cum_s": 0.066147,
+        "self_s": 0.009115,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/fused_moe/router/base_router.py:250:select_experts",
+        "cum_s": 0.064715,
+        "self_s": 0.005305,
+        "calls": 1280
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/gdn_linear_attn.py:512:forward",
+        "cum_s": 0.06452,
+        "self_s": 0.005941,
+        "calls": 959
+      },
+      {
+        "function": "vllm/model_executor/layers/mamba/gdn_linear_attn.py:519:forward_cuda",
+        "cum_s": 0.064319,
+        "self_s": 0.04108,
+        "calls": 959
+      },
+      {
+        "function": "vllm/v1/core/kv_cache_coordinator.py:80:get_num_blocks_to_allocate",
+        "cum_s": 0.061119,
+        "self_s": 0.005397,
+        "calls": 2112
+      }
+    ]
+  }
+}

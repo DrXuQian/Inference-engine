@@ -1,0 +1,10 @@
+# Python/cache noise
+__pycache__/
+*.py[cod]
+
+# Raw profiler captures and logs can be very large.
+profiling/vllm_cpu_overhead/raw/
+*.nsys-rep
+*.prof
+*.sqlite
+*.log
