@@ -1,0 +1,69 @@
+{
+  "started_at": "2026-05-12T05:52:31Z",
+  "model": "/root/autodl-tmp/qwen35_quant_experiment/models/qwen35-a3b-r3-gptq-g32-w4a16",
+  "concurrency": 1,
+  "total_requests": 8,
+  "max_tokens": 32,
+  "max_model_len": 512,
+  "max_num_batched_tokens": 512,
+  "quantization": "compressed-tensors",
+  "enforce_eager": false,
+  "vllm_enable_v1_multiprocessing": "0",
+  "profile_elapsed_s": 2.1306300796568394,
+  "total_completion_tokens": 256,
+  "completion_tokens_per_s": 120.1522509441111,
+  "avg_prompt_tokens": 33,
+  "avg_completion_tokens": 32,
+  "cprofile_out": null,
+  "cprofile_top_cumulative": [],
+  "responses": [
+    {
+      "request_id": 0,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    },
+    {
+      "request_id": 1,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    },
+    {
+      "request_id": 2,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    },
+    {
+      "request_id": 3,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    },
+    {
+      "request_id": 4,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    },
+    {
+      "request_id": 5,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    },
+    {
+      "request_id": 6,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    },
+    {
+      "request_id": 7,
+      "prompt_token_count": 33,
+      "completion_token_count": 32,
+      "finish_reason": "length"
+    }
+  ]
+}

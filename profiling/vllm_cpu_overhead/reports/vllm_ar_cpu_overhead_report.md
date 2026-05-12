@@ -4,9 +4,11 @@ Date: 2026-05-12 UTC
 
 ## Summary
 
-This run profiles vLLM's autoregressive generation path after model load and warmup. The key finding is that the dominant host-side cost is not tokenization or detokenization; it is the per-decode-step control path that prepares the batch, updates KV/block metadata, launches many CUDA kernels, samples the next token, updates request state, and emits outputs.
+This run profiles vLLM's autoregressive generation path after model load and warmup. The key finding is that the dominant host-side cost is not tokenization or detokenization; it is the per-decode-step control path that prepares the batch, updates KV/block metadata, launches GPU work, samples the next token, updates request state, and emits outputs.
 
 For `concurrency=1`, each output token effectively pays for one full decode step, so CUDA launch overhead is large per output token. For `concurrency=64`, the same decode step serves 64 requests, so scheduler/KV/launch overhead is amortized: measured host CUDA launch API time drops from ~11.48 ms/output-token to ~0.17 ms/output-token.
+
+With CUDA Graph enabled (`enforce_eager=False`), vLLM captures graph variants for the decode shapes and replays them in the measured window. This cuts the nsys window from 25.77 s to 2.13 s for c1 and from 3.18 s to 0.53 s for c64. The remaining host-side CUDA time is dominated less by thousands of individual kernel launches and more by graph replay, metadata copies, and `cudaEventSynchronize` waits for GPU work to finish.
 
 ## Environment
 
@@ -19,7 +21,7 @@ For `concurrency=1`, each output token effectively pays for one full decode step
 - Architecture: `Qwen3_5MoeForConditionalGeneration`
 - Text config: 40 layers, hidden size 2048, 16 attention heads, 2 KV heads, 256 experts, top-8 experts/token
 - Quantization: compressed-tensors, W4A16 style, group size 32
-- vLLM flags: `enforce_eager=True`, `language_model_only=True`, `gdn_prefill_backend=triton`
+- vLLM flags: eager baseline uses `enforce_eager=True`; CUDA Graph runs use `enforce_eager=False`; both use `language_model_only=True`, `gdn_prefill_backend=triton`
 - Profiling mode: `VLLM_ENABLE_V1_MULTIPROCESSING=0`, so EngineCore runs in-process and `cProfile` can attribute Python functions inside the autoregressive window.
 
 ## Method
@@ -29,14 +31,18 @@ I used two profilers against the same steady-state generation window:
 1. `cProfile` around only `llm.generate(...)`, after model load and warmup. This gives Python/vLLM function call counts, self time, and cumulative time.
 2. `nsys profile` with an NVTX capture range named `vllm_profile_window`, emitted only around `llm.generate(...)`. This gives CUDA API, OS runtime, and GPU kernel summaries without model-loading noise.
 
+Each scenario was run in eager mode and CUDA Graph mode. CUDA Graph initialization, torch.compile, and graph capture happen before the profiled `llm.generate(...)` window. For c1 vLLM captured `PIECEWISE=2` and `FULL=1` graph variants; for c64 it captured `PIECEWISE=19` and `FULL=11`, with full decode graph coverage up to batch size 64.
+
 Important caveat: `cProfile` cumulative time includes time spent inside child calls and can include blocking native/CUDA calls. For pure Python overhead, use self time and the smaller control-plane functions. For host CUDA launch overhead, use the `nsys` CUDA API table.
 
 ## Scenarios
 
-| Scenario | Requests | Output tokens/request | Total output tokens | cProfile window | cProfile tok/s | nsys window | nsys tok/s |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `concurrency=1` | 8 | 32 | 256 | 23.13 s | 11.07 | 25.77 s | 9.93 |
-| `concurrency=64` | 64 | 32 | 2048 | 3.49 s | 586.38 | 3.18 s | 644.79 |
+| Scenario | Mode | Requests | Output tokens/request | Total output tokens | cProfile window | cProfile tok/s | nsys window | nsys tok/s |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `concurrency=1` | eager | 8 | 32 | 256 | 23.13 s | 11.07 | 25.77 s | 9.93 |
+| `concurrency=1` | CUDA Graph | 8 | 32 | 256 | 2.20 s | 116.23 | 2.13 s | 120.15 |
+| `concurrency=64` | eager | 64 | 32 | 2048 | 3.49 s | 586.38 | 3.18 s | 644.79 |
+| `concurrency=64` | CUDA Graph | 64 | 32 | 2048 | 0.87 s | 2365.86 | 0.53 s | 3858.99 |
 
 ## Decode Call Path
 
@@ -64,7 +70,7 @@ Relevant source entry points:
 - `vllm/v1/engine/detokenizer.py:95:update`
 - `vllm/v1/engine/output_processor.py:572:process_outputs`
 
-## CPU Function Attribution
+## Eager CPU Function Attribution
 
 Values below are cumulative `cProfile` time in the profiled generation window. Per-token numbers divide by output tokens. The rows are not additive because cumulative times overlap through call nesting.
 
@@ -91,16 +97,42 @@ Interpretation:
 - `concurrency=64` has more absolute KV/request metadata work, but much lower per-output-token overhead because each decode iteration handles a batch.
 - The most important per-token amortization is in model-runner preparation and CUDA launch overhead, not in tokenization.
 
+## CUDA Graph CPU Function Attribution
+
+With CUDA Graph enabled, the Python call path still schedules requests, updates KV metadata, prepares inputs, samples tokens, and processes outputs. The model forward path changes: vLLM calls `vllm/compilation/cuda_graph.py:233:__call__` and `vllm/compilation/piecewise_backend.py:358:__call__`, which replay captured graph pieces instead of launching every model kernel individually from Python/PyTorch.
+
+| Function / group | What it does | c1 calls | c1 ms/output-token | c64 calls | c64 ms/output-token |
+|---|---|---:|---:|---:|---:|
+| `scheduler.schedule` | Select running/waiting requests; assign per-step token budget; coordinate KV allocation | 264 | 0.178 | 33 | 0.046 |
+| `scheduler.update_from_output` | Append sampled tokens; stop checks; mark/free finished requests | 264 | 0.047 | 33 | 0.014 |
+| `kv_cache_manager.allocate_slots` | Allocate KV cache slots for newly computed/generated tokens | 256 | 0.091 | 2,048 | 0.060 |
+| `kv_cache_coordinator.get_num_blocks_to_allocate` | Compute required KV blocks across cache groups | 264 | 0.044 | 2,112 | 0.030 |
+| `gpu_model_runner._prepare_inputs` | Commit block table, build request indices, positions, slot mapping, copy metadata | 256 | 0.767 | 31 | ~0.001 |
+| `gpu_model_runner._build_attention_metadata` | Build backend attention metadata and block-table views | 256 | 0.527 | 32 | 0.010 |
+| `cuda_graph.__call__` | Replay captured CUDA Graph for matching decode shape | 584 | 3.489 | 73 | 0.057 |
+| `piecewise_backend.__call__` | Execute compiled piecewise graph partitions | 328 | 2.007 | 41 | 0.032 |
+| `gpu_model_runner.sample_tokens` | Apply grammar/logits hooks and sample next tokens | 256 | 0.342 | 32 | 0.009 |
+| `detokenizer.update` | Incrementally decode new token ids and check stop strings | 256 | 0.015 | 2,048 | 0.004 |
+| `output_processor.process_outputs` | Stats, detokenization, `RequestOutput` creation | 264 | 0.025 | 33 | 0.006 |
+
+Interpretation:
+
+- CUDA Graph does not remove scheduler/KV/output bookkeeping; those functions remain in the per-token path.
+- It removes most per-kernel Python/CUDA launch overhead from model execution. In c1 the profiled window improves roughly 10.5x in cProfile and 12.1x in nsys. In c64 it improves roughly 4.0x in cProfile and 6.0x in nsys.
+- For c1, `torch.Event.synchronize` and CUDA event synchronization become visible because the CPU now spends less time launching kernels and more time waiting for graph-executed GPU work to finish.
+
 ## CUDA Host API / nsys
 
-`nsys` shows the host repeatedly launching CUDA kernels and managing CUDA events. This is expected in eager mode without CUDA graphs.
+`nsys` shows the host repeatedly launching CUDA kernels and managing CUDA events in eager mode. With CUDA Graph, many launches collapse into graph replays, so `cudaGraphLaunch_v10000` appears and the raw launch API count falls sharply.
 
-| Scenario | CUDA launch API calls | Launch API total | Launch API ms/output-token | CUDA memcpy total | CUDA event/stream total |
-|---|---:|---:|---:|---:|---:|
-| `concurrency=1` | 540,520 | 2,939.13 ms | 11.481 | 180.77 ms | 350.34 ms |
-| `concurrency=64` | 69,315 | 350.33 ms | 0.171 | 21.48 ms | 38.24 ms |
+| Scenario | Mode | Kernel launch API calls | Kernel launch API total | Kernel launch ms/output-token | Graph launches | Graph launch total | Graph launch ms/output-token | CUDA memcpy total | `cudaEventSynchronize` total |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `concurrency=1` | eager | 540,520 | 2,939.13 ms | 11.481 | 0 | 0 ms | 0 | 180.77 ms | 3.41 ms |
+| `concurrency=1` | CUDA Graph | 17,960 | 110.75 ms | 0.433 | 248 | 45.71 ms | 0.179 | 41.12 ms | 1,251.07 ms |
+| `concurrency=64` | eager | 69,315 | 350.33 ms | 0.171 | 0 | 0 ms | 0 | 21.48 ms | 0.58 ms |
+| `concurrency=64` | CUDA Graph | 2,445 | 16.14 ms | 0.008 | 31 | 6.44 ms | 0.003 | 5.86 ms | 351.07 ms |
 
-The per-decode-step launch count is similar:
+In eager mode, the per-decode-step launch count is similar:
 
 - c1: 540,520 launch API calls / 256 decode steps ~= 2,111 launches/step
 - c64: 69,315 launch API calls / 32 decode steps ~= 2,166 launches/step
@@ -111,8 +143,10 @@ Top CUDA API calls:
 
 | Scenario | Top APIs |
 |---|---|
-| c1 | `cudaLaunchKernel_v7000` 494,272 calls / 2,650.79 ms; `cuLaunchKernelEx` 46,248 / 288.33 ms; `cudaMemcpyAsync_v3020` 14,424 / 180.77 ms |
-| c64 | `cudaLaunchKernel_v7000` 62,294 calls / 309.64 ms; `cuLaunchKernelEx` 7,021 / 40.69 ms; `cudaMemcpyAsync_v3020` 1,803 / 21.48 ms |
+| c1 eager | `cudaLaunchKernel_v7000` 494,272 calls / 2,650.79 ms; `cuLaunchKernelEx` 46,248 / 288.33 ms; `cudaMemcpyAsync_v3020` 14,424 / 180.77 ms |
+| c1 CUDA Graph | `cudaEventSynchronize_v3020` 520 / 1,251.07 ms; `cudaLaunchKernel_v7000` 11,936 / 76.43 ms; `cudaGraphLaunch_v10000` 248 / 45.71 ms |
+| c64 eager | `cudaLaunchKernel_v7000` 62,294 calls / 309.64 ms; `cuLaunchKernelEx` 7,021 / 40.69 ms; `cudaMemcpyAsync_v3020` 1,803 / 21.48 ms |
+| c64 CUDA Graph | `cudaEventSynchronize_v3020` 65 / 351.07 ms; `cudaLaunchKernel_v7000` 1,692 / 10.85 ms; `cudaGraphLaunch_v10000` 31 / 6.44 ms |
 
 Top GPU kernels are model-specific and dominated by Qwen3.5 MoE/GDN/quantized execution:
 
@@ -141,12 +175,12 @@ For each token step, CPU-side vLLM work is:
 1. Scheduling: update per-request token counts and choose which requests advance.
 2. KV metadata: calculate required blocks, allocate/free slots, update block tables and slot mappings.
 3. Input prep: construct CPU numpy metadata for request indices, positions, sequence lengths, and attention metadata; copy some metadata to GPU.
-4. Kernel launch orchestration: call many PyTorch/custom/Triton ops, each causing CUDA kernel launches and CUDA event/stream calls.
+4. GPU orchestration: in eager mode call many PyTorch/custom/Triton ops, each causing CUDA kernel launches and CUDA event/stream calls; in CUDA Graph mode replay captured graph variants and launch only the non-captured pieces.
 5. Sampling: run logits processing and greedy argmax/top-k/top-p path as configured.
 6. State update: move sampled token ids into request state, stop checks, free completed requests.
 7. Output path: incremental detokenization and `RequestOutput` construction.
 
-In these measurements, tokenization/detokenization are not the bottleneck. The CPU overhead that matters most is per-step orchestration and CUDA launch/event overhead, especially at low concurrency.
+In these measurements, tokenization/detokenization are not the bottleneck. The CPU overhead that matters most is per-step orchestration and CUDA launch/event overhead, especially at low concurrency. CUDA Graph removes most of the launch overhead but not scheduler, KV metadata, sampling, output, or GPU completion waits.
 
 ## Artifacts
 
@@ -161,14 +195,20 @@ Committed profile summaries:
 
 - `profiling/vllm_cpu_overhead/results/offline_c1_result.json`
 - `profiling/vllm_cpu_overhead/results/offline_c64_result.json`
+- `profiling/vllm_cpu_overhead/results/offline_c1_cudagraph_result.json`
+- `profiling/vllm_cpu_overhead/results/offline_c64_cudagraph_result.json`
 - `profiling/vllm_cpu_overhead/results/nsys_offline_c1_result.json`
 - `profiling/vllm_cpu_overhead/results/nsys_offline_c64_result.json`
+- `profiling/vllm_cpu_overhead/results/nsys_cudagraph_c1_result.json`
+- `profiling/vllm_cpu_overhead/results/nsys_cudagraph_c64_result.json`
 - `profiling/vllm_cpu_overhead/results/nsys_offline_c1_summary.json`
 - `profiling/vllm_cpu_overhead/results/nsys_offline_c64_summary.json`
+- `profiling/vllm_cpu_overhead/results/nsys_cudagraph_c1_summary.json`
+- `profiling/vllm_cpu_overhead/results/nsys_cudagraph_c64_summary.json`
 - `profiling/vllm_cpu_overhead/results/focused_profile_summary.json`
 - `profiling/vllm_cpu_overhead/results/focused_nsys_summary.json`
 
-Raw local captures were generated as `.prof`, `.nsys-rep`, `.sqlite`, and stdout log files. They are intentionally not committed because the two main Nsight SQLite exports alone are hundreds of MiB; regenerate them with the commands below when needed.
+Raw local captures were generated as `.prof`, `.nsys-rep`, `.sqlite`, and stdout log files. They are intentionally not committed because Nsight SQLite exports and raw profiler traces can be large; regenerate them with the commands below when needed.
 
 ## Reproduction Commands
 
@@ -204,7 +244,24 @@ mkdir -p $PROFILE_ROOT/raw
   --cprofile-out $PROFILE_ROOT/raw/offline_c64.prof
 ```
 
-`nsys`, concurrency 64 example:
+Add `--disable-eager` to the script command to run CUDA Graph mode. For example:
+
+```bash
+source /root/autodl-tmp/qwen35_quant_experiment/scripts/env.sh
+REPO=/root/autodl-tmp/Inference-engine
+PROFILE_ROOT=$REPO/profiling/vllm_cpu_overhead
+mkdir -p $PROFILE_ROOT/raw
+/root/autodl-tmp/qwen35-quant-venv/bin/python \
+  $PROFILE_ROOT/scripts/run_vllm_offline_case.py \
+  --model /root/autodl-tmp/qwen35_quant_experiment/models/qwen35-a3b-r3-gptq-g32-w4a16 \
+  --concurrency 64 --total-requests 64 --max-tokens 32 \
+  --max-model-len 512 --max-num-batched-tokens 4096 --warmup-requests 4 \
+  --result-json $PROFILE_ROOT/results/offline_c64_cudagraph_result.json \
+  --cprofile-out $PROFILE_ROOT/raw/offline_c64_cudagraph.prof \
+  --disable-eager
+```
+
+`nsys`, CUDA Graph concurrency 64 example:
 
 ```bash
 source /root/autodl-tmp/qwen35_quant_experiment/scripts/env.sh
@@ -212,7 +269,7 @@ REPO=/root/autodl-tmp/Inference-engine
 PROFILE_ROOT=$REPO/profiling/vllm_cpu_overhead
 mkdir -p $PROFILE_ROOT/raw
 nsys profile \
-  -o $PROFILE_ROOT/raw/nsys_offline_c64 \
+  -o $PROFILE_ROOT/raw/nsys_cudagraph_c64 \
   --force-overwrite=true \
   --capture-range=nvtx \
   --nvtx-capture=vllm_profile_window \
@@ -228,12 +285,13 @@ nsys profile \
     --model /root/autodl-tmp/qwen35_quant_experiment/models/qwen35-a3b-r3-gptq-g32-w4a16 \
     --concurrency 64 --total-requests 64 --max-tokens 32 \
     --max-model-len 512 --max-num-batched-tokens 4096 --warmup-requests 4 \
-    --result-json $PROFILE_ROOT/results/nsys_offline_c64_result.json \
-    --emit-nvtx
+    --result-json $PROFILE_ROOT/results/nsys_cudagraph_c64_result.json \
+    --emit-nvtx \
+    --disable-eager
 ```
 
 ## Limitations
 
 - This report profiles the vLLM engine autoregressive path, not full OpenAI HTTP serving overhead. I added a server harness, but kernel ptrace restrictions prevented clean `py-spy` attach after server warmup. Profiling the full server path should be done either with relaxed ptrace permissions or with in-process instrumentation.
-- `enforce_eager=True` disables torch.compile/CUDA graphs, so launch overhead is intentionally visible. With CUDA graphs enabled, host launch behavior can change materially.
+- The eager runs intentionally disable CUDA Graph to expose per-kernel launch overhead. The CUDA Graph runs include graph replay behavior, but still use the same offline `LLM.generate(...)` harness rather than full OpenAI HTTP serving.
 - The model is Qwen3.5-MoE with GDN/linear attention and compressed-tensors W4A16. Function mix and kernel counts will differ for dense Transformer models.

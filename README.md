@@ -1,6 +1,6 @@
 # Inference Engine Notes
 
-This repository currently contains profiling notes for vLLM autoregressive CPU overhead.
+This repository currently contains profiling notes for vLLM autoregressive CPU overhead, including eager and CUDA Graph decode runs.
 
 - Report: `profiling/vllm_cpu_overhead/reports/vllm_ar_cpu_overhead_report.md`
 - Reproduction scripts: `profiling/vllm_cpu_overhead/scripts/`
