@@ -6,7 +6,13 @@
 
 set -euo pipefail
 
-DATASETS_PY=$(python3 -c "import vllm.benchmarks.datasets; print(vllm.benchmarks.datasets.__file__)")
+DATASETS_PY=$(python3 -c "
+import importlib, sys
+sys.stdout = open('/dev/null','w')  # suppress vllm import noise
+mod = importlib.import_module('vllm.benchmarks.datasets')
+sys.stdout = sys.__stdout__
+print(mod.__file__)
+" 2>/dev/null)
 echo "Patching: $DATASETS_PY"
 
 # Check if already patched
@@ -25,4 +31,13 @@ fi
 COUNT=$(grep -c "vocab_size = tokenizer.vocab_size" "$DATASETS_PY" || true)
 sed -i "s/vocab_size = tokenizer.vocab_size/vocab_size = int(os.environ.get('VLLM_BENCH_VOCAB_CAP', tokenizer.vocab_size))/g" "$DATASETS_PY"
 echo "Patched $COUNT occurrences."
+
+# Verify
+AFTER=$(grep -c "VLLM_BENCH_VOCAB_CAP" "$DATASETS_PY" || true)
+if [ "$AFTER" -gt 0 ]; then
+    echo "Verify OK: found $AFTER patched lines."
+else
+    echo "ERROR: patch failed, VLLM_BENCH_VOCAB_CAP not found in $DATASETS_PY"
+    exit 1
+fi
 echo "Done. Set VLLM_BENCH_VOCAB_CAP=<split_vocab_size> when running vllm bench serve."
