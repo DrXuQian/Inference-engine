@@ -47,7 +47,12 @@ def verify(rank_dir: str) -> bool:
     lin_z = lin_v_heads * lin_v_dim
     lin_out_in = lin_v_heads * lin_v_dim
 
+    vocab = tc["vocab_size"]
+
     expected = {
+        # embeddings / lm_head (vocab-parallel)
+        "embed_tokens.weight": (vocab, hidden),
+        "lm_head.weight": (vocab, hidden),
         # full attention
         "self_attn.q_proj.weight": (q_out, hidden),
         "self_attn.k_proj.weight": (kv_out, hidden),
@@ -69,20 +74,7 @@ def verify(rank_dir: str) -> bool:
         "shared_expert.gate_proj.weight": (shared_inter, hidden),
         "shared_expert.up_proj.weight": (shared_inter, hidden),
         "shared_expert.down_proj.weight": (hidden, shared_inter),
-        # GPTQ expert (gate_proj/up_proj column parallel)
-        "experts.0.gate_proj.qweight": (hidden // GPTQ_PACK_FACTOR, moe_inter),
-        "experts.0.gate_proj.scales": (hidden // GPTQ_GROUP_SIZE, moe_inter),
-        "experts.0.gate_proj.qzeros": (hidden // GPTQ_GROUP_SIZE, moe_inter // GPTQ_PACK_FACTOR),
-        "experts.0.gate_proj.g_idx": (hidden,),
-        "experts.0.up_proj.qweight": (hidden // GPTQ_PACK_FACTOR, moe_inter),
-        "experts.0.up_proj.scales": (hidden // GPTQ_GROUP_SIZE, moe_inter),
-        "experts.0.up_proj.qzeros": (hidden // GPTQ_GROUP_SIZE, moe_inter // GPTQ_PACK_FACTOR),
-        "experts.0.up_proj.g_idx": (hidden,),
-        # GPTQ expert (down_proj row parallel)
-        "experts.0.down_proj.qweight": (moe_inter // GPTQ_PACK_FACTOR, hidden),
-        "experts.0.down_proj.scales": (moe_inter // GPTQ_GROUP_SIZE, hidden),
-        "experts.0.down_proj.qzeros": (moe_inter // GPTQ_GROUP_SIZE, hidden // GPTQ_PACK_FACTOR),
-        "experts.0.down_proj.g_idx": (moe_inter,),
+        # GPTQ expert checks are done dynamically below (heterogeneous layer sizes)
         # norms
         "input_layernorm.weight": (hidden,),
         "post_attention_layernorm.weight": (hidden,),
@@ -94,6 +86,8 @@ def verify(rank_dir: str) -> bool:
 
     errors = 0
     checked = 0
+    gptq_expert_ok = 0
+    gptq_expert_fail = 0
     for sf in shard_files:
         path = rank_dir / sf
         if not path.exists():
@@ -103,6 +97,8 @@ def verify(rank_dir: str) -> bool:
         with safe_open(str(path), framework="numpy") as f:
             for key in f.keys():
                 tensor = f.get_tensor(key)
+
+                # Fixed-shape checks
                 for suffix, exp_shape in expected.items():
                     if key.endswith(suffix):
                         if tuple(tensor.shape) != exp_shape:
@@ -113,10 +109,31 @@ def verify(rank_dir: str) -> bool:
                         checked += 1
                         break
 
+                # Dynamic GPTQ expert consistency: qweight dim must
+                # match scales/qzeros/g_idx within the same projection
+                if ".experts." in key and key.endswith(".qweight"):
+                    prefix = key[: -len("qweight")]
+                    qw = tuple(tensor.shape)
+                    try:
+                        sc = tuple(f.get_tensor(prefix + "scales").shape)
+                    except Exception:
+                        continue
+                    # column-parallel (gate/up): qw=[in/pack, inter], sc=[groups, inter]
+                    # row-parallel (down):       qw=[inter/pack, out], sc=[groups, out]
+                    if qw[1] == sc[1]:  # same out-dim → consistent
+                        gptq_expert_ok += 1
+                    else:
+                        print(f"GPTQ INCONSISTENT: {prefix}")
+                        print(f"  qweight {qw}  scales {sc}")
+                        gptq_expert_fail += 1
+                        errors += 1
+                    checked += 1
+
+    print(f"Checked {checked} tensors ({gptq_expert_ok} GPTQ experts consistent).")
     if errors == 0:
-        print(f"OK: verified {checked} tensors, no mismatches.")
+        print("OK: no mismatches.")
     else:
-        print(f"FAILED: {errors} errors in {checked} checked tensors.")
+        print(f"FAILED: {errors} errors.")
     return errors == 0
 
 

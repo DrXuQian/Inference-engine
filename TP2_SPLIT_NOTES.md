@@ -1,6 +1,6 @@
 # Qwen3.5-35B-A3B-GPTQ-Int4 TP=2 Split Notes
 
-## Config Changes (6 fields)
+## Config Changes (7 fields)
 
 | Field | Original | After Split |
 |---|---|---|
@@ -10,35 +10,50 @@
 | `linear_num_value_heads` | 32 | 16 |
 | `moe_intermediate_size` | 512 | 256 |
 | `shared_expert_intermediate_size` | 512 | 256 |
+| `vocab_size` | 248320 | 124160 |
 
-All other fields unchanged (hidden_size, head_dim, num_experts, vocab_size, vision_config, etc.).
+All other fields unchanged (hidden_size, head_dim, num_experts, vision_config, etc.).
 
 ## Weight Size Breakdown
 
 | | Size |
 |---|---|
 | Original model | 24.40 GB |
-| Each rank | 13.78 GB (56.5% of original) |
-| Two ranks total | 27.56 GB |
-| Redundancy (replicated) | 3.16 GB |
+| Each rank | 12.55 GB (51.4% of original) |
+| Two ranks total | 25.10 GB |
+| Redundancy (replicated) | 0.70 GB |
 
-Each rank is not exactly half because **3.16 GB of weights are fully replicated** to both ranks:
+Remaining replicated weights (~0.70 GB):
 
 | Replicated Component | Size | Reason |
 |---|---|---|
-| embed_tokens | 1.0 GB | Both ranks need full vocab embedding for independent inference |
-| lm_head | 1.0 GB | Same as above |
-| visual encoder | 0.9 GB | Vision model replicated entirely (not split by TP) |
+| visual encoder | 0.9 GB | Vision model replicated entirely |
 | GPTQ g_idx | 0.17 GB | g_idx replicated for column-parallel gate/up_proj |
-| MoE router + norms + misc | 0.05 GB | Routing weights and layer norms are not split |
+| MoE router + norms + misc | 0.05 GB | Routing weights and layer norms not split |
 
-To achieve exact 50/50 split, embed_tokens and lm_head would need vocab-parallel splitting, but then each rank alone could not correctly index tokens for independent inference.
+`embed_tokens` and `lm_head` are now vocab-parallel split (dim 0), halving vocab_size per rank. This is correct for perf testing but means each rank alone cannot produce valid token predictions.
+
+## Heterogeneous Expert Sizes
+
+The model has **non-uniform** `moe_intermediate_size` across layers:
+
+| Layers | Original intermediate | After TP=2 split |
+|---|---|---|
+| 0-5, 7-12, 14-16, 18-21, 23-27, 29-33, 35-39 (34 layers) | 512 | 256 |
+| 6, 13, 17, 22, 28, 34 (6 layers) | 256 | 128 |
+
+The config field `moe_intermediate_size=512` only reflects the majority. The 6 smaller layers are implicitly defined by their weight shapes. The split script handles both sizes correctly (uniform dim-0/dim-1 split regardless of size).
 
 ## Splitting Strategy Per Component
 
+### Embeddings / LM Head — bf16, vocab-parallel
+
+- `embed_tokens.weight` [248320, 2048] → [124160, 2048]: column-parallel (dim 0)
+- `lm_head.weight` [248320, 2048] → [124160, 2048]: column-parallel (dim 0)
+
 ### Full Attention (self_attn) — bf16, not GPTQ-quantized
 
-- `q_proj.weight` [8192, 2048] → [4096, 2048]: column-parallel (dim 0). Note: 8192 = num_heads × head_dim × 2 due to `attn_output_gate=true`.
+- `q_proj.weight` [8192, 2048] → [4096, 2048]: column-parallel (dim 0). Note: 8192 = num_heads x head_dim x 2 due to `attn_output_gate=true`.
 - `k_proj.weight` [512, 2048] → [256, 2048]: column-parallel (dim 0)
 - `v_proj.weight` [512, 2048] → [256, 2048]: column-parallel (dim 0)
 - `o_proj.weight` [2048, 4096] → [2048, 2048]: row-parallel (dim 1)
@@ -56,7 +71,7 @@ To achieve exact 50/50 split, embed_tokens and lm_head would need vocab-parallel
 - `dt_bias` [32] → [16]: split heads
 - `norm.weight` [128]: replicated (per value_head_dim)
 
-### MoE Experts — GPTQ int4
+### MoE Experts — GPTQ int4 (majority layers, intermediate=512)
 
 For each of the 256 experts:
 
@@ -70,6 +85,8 @@ For each of the 256 experts:
 - `down_proj.qzeros` [4, 256] → [2, 256]: GPTQ row-parallel
 - `down_proj.g_idx` [512] → [256]: split + regenerated sequential (desc_act=false)
 
+For the 6 smaller layers (intermediate=256), shapes are halved proportionally.
+
 ### Shared Expert — bf16 (not quantized)
 
 - `gate_proj.weight` [512, 2048] → [256, 2048]: column-parallel
@@ -78,7 +95,6 @@ For each of the 256 experts:
 
 ### Replicated (no split)
 
-- `embed_tokens.weight`, `lm_head.weight`: full vocab needed per rank
 - All visual encoder weights
 - Layer norms (`input_layernorm`, `post_attention_layernorm`, `norm`)
 - MoE router (`mlp.gate.weight`)
