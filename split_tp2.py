@@ -63,8 +63,10 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
         return "replicate", None
     if n.endswith(".norm.weight"):
         return "replicate", None
-    if "embed_tokens" in n or n.startswith("lm_head."):
-        return "col", 0  # vocab-parallel split for perf testing
+    if "embed_tokens" in n:
+        return "replicate", None
+    if n.startswith("lm_head."):
+        return "col", 0  # column-parallel split on output dim
     if ".mlp.gate.weight" in n:
         return "replicate", None
     if "shared_expert_gate" in n:
@@ -170,7 +172,6 @@ def modify_config(config: dict) -> dict:
         "linear_num_value_heads",
         "moe_intermediate_size",
         "shared_expert_intermediate_size",
-        "vocab_size",
     ):
         if key in tc:
             tc[key] = tc[key] // TP_SIZE
