@@ -63,10 +63,8 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
         return "replicate", None
     if n.endswith(".norm.weight"):
         return "replicate", None
-    if "embed_tokens" in n:
+    if "embed_tokens" in n or n.startswith("lm_head."):
         return "replicate", None
-    if n.startswith("lm_head."):
-        return "col", 0  # column-parallel split on output dim
     if ".mlp.gate.weight" in n:
         return "replicate", None
     if "shared_expert_gate" in n:
