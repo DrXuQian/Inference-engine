@@ -64,7 +64,7 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
     if n.endswith(".norm.weight"):
         return "replicate", None
     if "embed_tokens" in n or n.startswith("lm_head."):
-        return "col", 0  # vocab-parallel; input token IDs must stay < vocab_size//TP
+        return "replicate", None
     if ".mlp.gate.weight" in n:
         return "replicate", None
     if "shared_expert_gate" in n:
@@ -170,7 +170,6 @@ def modify_config(config: dict) -> dict:
         "linear_num_value_heads",
         "moe_intermediate_size",
         "shared_expert_intermediate_size",
-        "vocab_size",
     ):
         if key in tc:
             tc[key] = tc[key] // TP_SIZE
@@ -241,7 +240,7 @@ def main():
     # ---- copy auxiliary files ----
     aux = [
         "tokenizer.json", "tokenizer_config.json", "merges.txt",
-        "vocab.json", "chat_template.jinja", "generation_config.json",
+        "vocab.json", "chat_template.jinja",
         "preprocessor_config.json", "video_preprocessor_config.json",
         "configuration.json",
     ]
@@ -250,6 +249,12 @@ def main():
         if src.exists():
             for r in range(TP_SIZE):
                 shutil.copy2(str(src), os.path.join(rank_dirs[r], fname))
+
+    # ---- copy generation_config.json ----
+    gc_src = model_dir / "generation_config.json"
+    if gc_src.exists():
+        for r in range(TP_SIZE):
+            shutil.copy2(str(gc_src), os.path.join(rank_dirs[r], "generation_config.json"))
 
     # ---- load weight index ----
     with open(model_dir / "model.safetensors.index.json") as f:

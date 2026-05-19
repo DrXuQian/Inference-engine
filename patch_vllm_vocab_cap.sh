@@ -27,9 +27,10 @@ if ! grep -q "^import os" "$DATASETS_PY"; then
     echo "Added: import os"
 fi
 
-# Replace all occurrences
+# Replace all occurrences, with runtime print
 COUNT=$(grep -c "vocab_size = tokenizer.vocab_size" "$DATASETS_PY" || true)
-sed -i "s/vocab_size = tokenizer.vocab_size/vocab_size = int(os.environ.get('VLLM_BENCH_VOCAB_CAP', tokenizer.vocab_size))/g" "$DATASETS_PY"
+PATCH_LINE="vocab_size = int(os.environ.get('VLLM_BENCH_VOCAB_CAP', tokenizer.vocab_size)); print(f'[VOCAB_CAP] using vocab_size={vocab_size} (tokenizer={tokenizer.vocab_size})')"
+sed -i "s/vocab_size = tokenizer.vocab_size/${PATCH_LINE}/g" "$DATASETS_PY"
 echo "Patched $COUNT occurrences."
 
 # Verify
