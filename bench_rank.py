@@ -22,14 +22,13 @@ def make_safe_prompts(
     input_len: int,
     vocab_size: int,
     safe_token_id: int = 256,
-) -> list[list[int]]:
-    """Generate prompts as token ID lists, all IDs guaranteed < vocab_size."""
-    # Use a fixed safe token ID that's well within range.
-    # Token 256 is typically a common token in any tokenizer.
+) -> list[dict]:
+    """Generate TokensPrompt dicts with IDs guaranteed < vocab_size."""
     assert safe_token_id < vocab_size, (
         f"safe_token_id {safe_token_id} >= vocab_size {vocab_size}"
     )
-    return [[safe_token_id] * input_len for _ in range(num_prompts)]
+    return [{"prompt_token_ids": [safe_token_id] * input_len}
+            for _ in range(num_prompts)]
 
 
 def main():
@@ -72,13 +71,13 @@ def main():
 
     # Warmup
     print("Warmup ...")
-    llm.generate(prompt_token_ids=prompts[:1], sampling_params=sampling)
+    llm.generate(prompts[:1], sampling_params=sampling)
 
     # Benchmark
     print(f"Benchmarking: {args.num_prompts} prompts, "
           f"input_len={args.input_len}, output_len={args.output_len}")
     t0 = time.perf_counter()
-    outputs = llm.generate(prompt_token_ids=prompts, sampling_params=sampling)
+    outputs = llm.generate(prompts, sampling_params=sampling)
     elapsed = time.perf_counter() - t0
 
     total_input = args.num_prompts * args.input_len
