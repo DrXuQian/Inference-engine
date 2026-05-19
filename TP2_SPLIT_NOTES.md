@@ -19,9 +19,9 @@ All other fields unchanged (hidden_size, head_dim, num_experts, vision_config, e
 | | Size |
 |---|---|
 | Original model | 24.40 GB |
-| Each rank | 12.55 GB (51.4% of original) |
-| Two ranks total | 25.10 GB |
-| Redundancy (replicated) | 0.70 GB |
+| Each rank | 12.76 GB (52.3% of original) |
+| Two ranks total | 25.52 GB |
+| Redundancy (replicated) | 1.12 GB |
 
 Remaining replicated weights (~0.70 GB):
 
@@ -32,17 +32,6 @@ Remaining replicated weights (~0.70 GB):
 | MoE router + norms + misc | 0.05 GB | Routing weights and layer norms not split |
 
 `embed_tokens` and `lm_head` are now vocab-parallel split (dim 0), halving vocab_size per rank. This is correct for perf testing but means each rank alone cannot produce valid token predictions.
-
-## Heterogeneous Expert Sizes
-
-The model has **non-uniform** `moe_intermediate_size` across layers:
-
-| Layers | Original intermediate | After TP=2 split |
-|---|---|---|
-| 0-5, 7-12, 14-16, 18-21, 23-27, 29-33, 35-39 (34 layers) | 512 | 256 |
-| 6, 13, 17, 22, 28, 34 (6 layers) | 256 | 128 |
-
-The config field `moe_intermediate_size=512` only reflects the majority. The 6 smaller layers are implicitly defined by their weight shapes. The split script handles both sizes correctly (uniform dim-0/dim-1 split regardless of size).
 
 ## Splitting Strategy Per Component
 
@@ -84,8 +73,6 @@ For each of the 256 experts:
 - `down_proj.scales` [4, 2048] → [2, 2048]: GPTQ row-parallel
 - `down_proj.qzeros` [4, 256] → [2, 256]: GPTQ row-parallel
 - `down_proj.g_idx` [512] → [256]: split + regenerated sequential (desc_act=false)
-
-For the 6 smaller layers (intermediate=256), shapes are halved proportionally.
 
 ### Shared Expert — bf16 (not quantized)
 
