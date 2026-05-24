@@ -167,24 +167,20 @@ def measure_comm_ppu(hidden: int, vocab: int, num_layers: int,
                "-d", "bf16", "-o", "sum", "-n", str(iters), "-w", str(warmup),
                "-g", str(tp_size), "-c", "0", "-a", "1"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        # Parse output for avg time (us)
+        # nccl-tests / pccl_tools output format:
+        #   size  count  type  redop  root  time  algbw  busbw  #wrong  time  algbw  busbw  #wrong
+        # The "time" column (index 5 for out-of-place) is in microseconds
         for line in result.stdout.split("\n"):
             line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("="):
-                parts = line.split()
-                if len(parts) >= 7:
-                    try:
-                        return float(parts[6])  # busbw column position varies; use time column
-                    except ValueError:
-                        continue
-                # Try parsing "time" column (usually column 5 or 6)
-                for p in parts:
-                    try:
-                        val = float(p)
-                        if 0.1 < val < 100000:  # reasonable us range
-                            return val
-                    except ValueError:
-                        continue
+            if not line or line.startswith("#") or line.startswith("="):
+                continue
+            parts = line.split()
+            if len(parts) >= 8:
+                try:
+                    # Column 5 is out-of-place time (us)
+                    return float(parts[5])
+                except (ValueError, IndexError):
+                    pass
         return 0.0
 
     ar_us = run_pccl(ar_tool, ar_size)
