@@ -22,6 +22,7 @@ sleep 2
 # Start server under nsys
 echo "[1/4] Starting vllm serve under nsys..."
 nsys profile -t cuda --cuda-trace-scope=system-wide \
+    --cuda-graph-trace=node \
     --force-overwrite=true -o "${NSYS_OUT}" \
     vllm serve "${RANK_DIR}" \
     --host 127.0.0.1 --port 8000 \
