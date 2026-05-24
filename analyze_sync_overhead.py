@@ -175,43 +175,23 @@ def classify_prefill_decode(pairs: list[dict]) -> tuple[list, list]:
 
 
 def print_stats(pairs: list[dict], label: str):
-    """Print sync overhead statistics."""
+    """Print all-reduce timing statistics."""
     if not pairs:
         print(f"\n{label}: no data")
         return
 
-    sync_walls = [p["sync_wall_us"] for p in pairs]
-    kernel_maxs = [p["kernel_max_us"] for p in pairs]
-    overheads = [p["sync_overhead_us"] for p in pairs]
-    start_diffs = [p["start_diff_us"] for p in pairs]
-
-    sync_walls.sort()
-    kernel_maxs.sort()
-    overheads.sort()
-    start_diffs.sort()
+    sync_walls = sorted(p["sync_wall_us"] for p in pairs)
+    kernel_maxs = sorted(p["kernel_max_us"] for p in pairs)
 
     n = len(pairs)
     med = lambda xs: xs[len(xs) // 2]
-    p99 = lambda xs: xs[int(len(xs) * 0.99)]
     mean = lambda xs: sum(xs) / len(xs)
 
-    print(f"\n{'='*65}")
-    print(f"{label} ({n} AR calls)")
-    print(f"{'='*65}")
-    print(f"  {'':>25} {'mean':>10} {'median':>10} {'p99':>10} {'max':>10}")
-    print(f"  {'kernel_max (us)':>25} {mean(kernel_maxs):>10.1f} {med(kernel_maxs):>10.1f} "
-          f"{p99(kernel_maxs):>10.1f} {max(kernel_maxs):>10.1f}")
-    print(f"  {'sync_wall (us)':>25} {mean(sync_walls):>10.1f} {med(sync_walls):>10.1f} "
-          f"{p99(sync_walls):>10.1f} {max(sync_walls):>10.1f}")
-    print(f"  {'sync_overhead (us)':>25} {mean(overheads):>10.1f} {med(overheads):>10.1f} "
-          f"{p99(overheads):>10.1f} {max(overheads):>10.1f}")
-    print(f"  {'start_diff (us)':>25} {mean(start_diffs):>10.1f} {med(start_diffs):>10.1f} "
-          f"{p99(start_diffs):>10.1f} {max(start_diffs):>10.1f}")
-    print()
-    print(f"  mean(max(dev0,dev1)):    {mean(sync_walls):.1f} us")
-    print(f"  mean(kernel_only):       {mean(kernel_maxs):.1f} us")
-    print(f"  mean(sync_overhead):     {mean(overheads):.1f} us "
-          f"({mean(overheads)/mean(sync_walls)*100:.0f}% of wall)")
+    print(f"\n{label} ({n} calls):")
+    print(f"  mean(max(dev0,dev1)): {mean(sync_walls):.1f} us")
+    print(f"  median:               {med(sync_walls):.1f} us")
+    print(f"  kernel_only mean:     {mean(kernel_maxs):.1f} us")
+    print(f"  kernel_only median:   {med(kernel_maxs):.1f} us")
 
 
 def main():
