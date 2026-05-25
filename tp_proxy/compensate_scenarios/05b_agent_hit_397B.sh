@@ -1,0 +1,20 @@
+#!/bin/bash
+# Agent hit: Qwen 397B-A17B, TP=2 and TP=4
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+BASE=./results/05b_agent_hit_397B
+
+for TP in 2 4; do
+    echo "--- TP=$TP ---"
+    DIR="$BASE/tp${TP}"
+    MODEL=$(ls -d "$DIR/model/rank_0_"*L 2>/dev/null | head -1)
+    [ -z "$MODEL" ] && echo "Model not found for TP=$TP" && continue
+
+    python3 "$SCRIPT_DIR/compensate_ppu.py" \
+        --bench-results "$DIR/bench.json" \
+        --model-dir "$MODEL" \
+        --asys-sqlite "$DIR/trace/trace.sqlite" \
+        --comm-json "$DIR/comm.json" \
+        --output-json "$DIR/compensated.json"
+    echo ""
+done
