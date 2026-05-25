@@ -45,14 +45,16 @@ def run_bench(model_dir: str, input_len: int, output_len: int,
 
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
 
-    # Print stderr if failed
-    if result.returncode != 0 and result.stderr:
-        print(f"  STDERR: {result.stderr[-500:]}")
-    if result.stdout:
-        # Show server log hint if present
-        for line in result.stdout.split("\n"):
-            if "ERROR" in line or "server failed" in line.lower():
-                print(f"  {line}")
+    # Always show output on failure
+    if result.returncode != 0:
+        print(f"  STDERR:\n{result.stderr[-2000:]}" if result.stderr else "  (no stderr)")
+        print(f"  STDOUT:\n{result.stdout[-2000:]}" if result.stdout else "  (no stdout)")
+        # Also show server log if exists
+        try:
+            with open("/tmp/generate_bench_server.log") as f:
+                print(f"  SERVER LOG:\n{f.read()[-2000:]}")
+        except FileNotFoundError:
+            pass
 
     if result.returncode != 0:
         print(f"  ERROR: generate_bench failed for input_len={input_len}")
