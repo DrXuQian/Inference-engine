@@ -1,44 +1,220 @@
 #!/usr/bin/env python3
 """
-Controlled generation benchmark for nsys/asys profiling.
-Uses vllm.LLM directly (no HTTP server) with exact input/output lengths.
-NVTX markers separate warmup from bench for clean profiling.
+Controlled generation benchmark.
+
+Two modes:
+  serve (default): starts vllm serve → sends HTTP streaming requests → measures TTFT/TPOT
+  offline:         uses vllm.LLM directly (faster but may not work on all platforms)
 
 Usage:
+    # Default (serve mode, most compatible)
     python generate_bench.py --model /path/to/model --input-len 512 --output-len 256
 
-    # Under nsys (NVIDIA)
-    nsys profile -t cuda,nvtx --cuda-trace-scope=system-wide --cuda-graph-trace=node \
-        -o profile python generate_bench.py --model /path/to/model ...
+    # Offline mode (if vllm.LLM works on your platform)
+    python generate_bench.py --model /path/to/model --input-len 512 --output-len 256 --mode offline
 
-    # Under asys (PPU)
-    asys profile -o profile -f true -t hggc,acdnn,acblas \
-        python generate_bench.py --model /path/to/model ...
+    # Under nsys/asys profiling (offline mode recommended)
+    nsys profile ... python generate_bench.py --model /path/to/model --mode offline ...
 """
 
 import argparse
 import json
+import os
+import subprocess
+import sys
 import time
 
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# NVTX helpers
+# ---------------------------------------------------------------------------
+
 def nvtx_range(name):
-    """Context manager for NVTX range (no-op if unavailable)."""
     import contextlib
     try:
         import torch
         @contextlib.contextmanager
         def _range():
             torch.cuda.nvtx.range_push(name)
-            try:
-                yield
-            finally:
-                torch.cuda.nvtx.range_pop()
+            try: yield
+            finally: torch.cuda.nvtx.range_pop()
         return _range()
     except Exception:
         return contextlib.nullcontext()
 
+
+# ---------------------------------------------------------------------------
+# Serve mode: vllm serve + HTTP streaming
+# ---------------------------------------------------------------------------
+
+def wait_for_server(port, timeout=180):
+    import urllib.request
+    for _ in range(timeout):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+
+def http_generate(port, prompt_ids, max_tokens, model_name):
+    """Send streaming completion request, measure TTFT and per-token times."""
+    import urllib.request
+    payload = json.dumps({
+        "model": model_name,
+        "prompt": prompt_ids,
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "ignore_eos": True,
+        "stream": True,
+    }).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/completions",
+        data=payload, headers={"Content-Type": "application/json"})
+
+    t0 = time.perf_counter()
+    ttft = None
+    n_tokens = 0
+    with urllib.request.urlopen(req, timeout=600) as resp:
+        for line in resp:
+            line = line.decode().strip()
+            if not line.startswith("data: "): continue
+            if line[6:] == "[DONE]": break
+            try:
+                chunk = json.loads(line[6:])
+                if chunk.get("choices") and chunk["choices"][0].get("text"):
+                    if ttft is None:
+                        ttft = (time.perf_counter() - t0) * 1000
+                    n_tokens += 1
+            except json.JSONDecodeError:
+                continue
+
+    total_ms = (time.perf_counter() - t0) * 1000
+    ttft = ttft or total_ms
+    tpot = (total_ms - ttft) / max(n_tokens - 1, 1) if n_tokens > 1 else 0
+    return {"ttft_ms": ttft, "tpot_ms": tpot, "total_ms": total_ms, "n_output": n_tokens}
+
+
+def run_serve_mode(args):
+    port = 8199
+    mml = args.max_model_len or (args.input_len + args.output_len + 64)
+    env = os.environ.copy()
+    env["TRITON_BACKENDS_IN_TREE"] = "1"
+
+    server = subprocess.Popen(
+        [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+         "--model", args.model, "--host", "127.0.0.1", "--port", str(port),
+         "--tensor-parallel-size", str(args.tp),
+         "--max-model-len", str(mml),
+         "--trust-remote-code",
+         "--gpu-memory-utilization", str(args.gpu_mem)],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def cleanup():
+        server.terminate()
+        try: server.wait(timeout=10)
+        except: server.kill()
+
+    try:
+        print(f"Starting vllm serve (port {port})...")
+        if not wait_for_server(port):
+            print("ERROR: server failed to start")
+            cleanup(); sys.exit(1)
+        print("Server ready")
+
+        prompts = [np.random.randint(0, 10000, size=args.input_len).tolist()
+                   for _ in range(args.num_prompts + args.num_warmup)]
+
+        print(f"Warmup ({args.num_warmup})...")
+        for i in range(args.num_warmup):
+            http_generate(port, prompts[i], args.output_len, args.model)
+
+        print(f"Benchmarking ({args.num_prompts} prompts)...")
+        results = []
+        for i in range(args.num_prompts):
+            r = http_generate(port, prompts[args.num_warmup + i],
+                              args.output_len, args.model)
+            results.append(r)
+
+        mid = len(results) // 2
+        ttfts = sorted(r["ttft_ms"] for r in results)
+        tpots = sorted(r["tpot_ms"] for r in results)
+        totals = sorted(r["total_ms"] for r in results)
+        n_outs = sorted(r["n_output"] for r in results)
+
+        return {
+            "ttft_median_ms": round(ttfts[mid], 3),
+            "tpot_median_ms": round(tpots[mid], 3),
+            "total_median_ms": round(totals[mid], 3),
+            "output_tokens": n_outs[mid],
+        }
+    finally:
+        cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Offline mode: vllm.LLM directly
+# ---------------------------------------------------------------------------
+
+def run_offline_mode(args):
+    os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
+    from vllm import LLM, SamplingParams
+
+    mml = args.max_model_len or (args.input_len + args.output_len + 64)
+    llm = LLM(model=args.model, tensor_parallel_size=args.tp, dtype="auto",
+              max_model_len=mml, trust_remote_code=True,
+              gpu_memory_utilization=args.gpu_mem)
+
+    prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=args.input_len).tolist()}
+               for _ in range(args.num_prompts + args.num_warmup + 5)]
+    sp = SamplingParams(max_tokens=args.output_len, temperature=0, ignore_eos=True)
+
+    with nvtx_range("warmup"):
+        print(f"Warmup ({args.num_warmup})...")
+        for i in range(args.num_warmup):
+            llm.generate([prompts[i]], sampling_params=sp)
+
+    with nvtx_range("bench"):
+        print(f"Benchmarking ({args.num_prompts} prompts)...")
+        results = []
+        for i in range(args.num_prompts):
+            with nvtx_range(f"request_{i}"):
+                t0 = time.perf_counter()
+                outputs = llm.generate([prompts[args.num_warmup + i]], sampling_params=sp)
+                total_ms = (time.perf_counter() - t0) * 1000
+            n_output = len(outputs[0].outputs[0].token_ids)
+            results.append({"total_ms": total_ms, "n_output": n_output})
+
+    with nvtx_range("ttft_measure"):
+        print("Measuring TTFT...")
+        sp_short = SamplingParams(max_tokens=1, temperature=0)
+        ttft_times = []
+        for i in range(min(5, args.num_prompts)):
+            t0 = time.perf_counter()
+            llm.generate([prompts[args.num_warmup + args.num_prompts + i]], sampling_params=sp_short)
+            ttft_times.append((time.perf_counter() - t0) * 1000)
+
+    ttft_times.sort()
+    totals = sorted(r["total_ms"] for r in results)
+    n_outs = sorted(r["n_output"] for r in results)
+    mid = len(results) // 2
+    ttft_median = ttft_times[len(ttft_times) // 2]
+    tpot = (totals[mid] - ttft_median) / max(n_outs[mid] - 1, 1)
+
+    return {
+        "ttft_median_ms": round(ttft_median, 3),
+        "tpot_median_ms": round(tpot, 3),
+        "total_median_ms": round(totals[mid], 3),
+        "output_tokens": n_outs[mid],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
@@ -50,95 +226,34 @@ def main():
     ap.add_argument("--max-model-len", type=int, default=None)
     ap.add_argument("--gpu-mem", type=float, default=0.9)
     ap.add_argument("--tp", type=int, default=1)
+    ap.add_argument("--mode", choices=["serve", "offline"], default="serve",
+                    help="serve: HTTP (compatible); offline: vllm.LLM (fast, needs platform support)")
     ap.add_argument("--output-json", type=str, default=None)
     args = ap.parse_args()
 
-    if args.max_model_len is None:
-        args.max_model_len = args.input_len + args.output_len + 64
-
-    import os
-    os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
-
-    from vllm import LLM, SamplingParams
-
-    print(f"Loading model: {args.model}")
+    print(f"Model: {args.model}")
     print(f"Config: input={args.input_len}, output={args.output_len}, "
-          f"prompts={args.num_prompts}, warmup={args.num_warmup}, tp={args.tp}")
+          f"prompts={args.num_prompts}, mode={args.mode}")
 
-    llm = LLM(
-        model=args.model,
-        tensor_parallel_size=args.tp,
-        dtype="auto",
-        max_model_len=args.max_model_len,
-        trust_remote_code=True,
-        gpu_memory_utilization=args.gpu_mem,
-    )
+    if args.mode == "offline":
+        result = run_offline_mode(args)
+    else:
+        result = run_serve_mode(args)
 
-    prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=args.input_len).tolist()}
-               for _ in range(args.num_prompts + args.num_warmup + 5)]
-    sp = SamplingParams(max_tokens=args.output_len, temperature=0, ignore_eos=True)
-
-    # ---- Warmup (NVTX: "warmup") ----
-    with nvtx_range("warmup"):
-        print(f"Warmup ({args.num_warmup} prompts)...")
-        for i in range(args.num_warmup):
-            llm.generate([prompts[i]], sampling_params=sp)
-
-    # ---- Benchmark (NVTX: "bench") ----
-    with nvtx_range("bench"):
-        print(f"Benchmarking ({args.num_prompts} prompts)...")
-        results = []
-        for i in range(args.num_prompts):
-            p = prompts[args.num_warmup + i]
-            with nvtx_range(f"request_{i}"):
-                t0 = time.perf_counter()
-                outputs = llm.generate([p], sampling_params=sp)
-                t1 = time.perf_counter()
-            n_output = len(outputs[0].outputs[0].token_ids)
-            results.append({"total_ms": (t1 - t0) * 1000, "n_output": n_output})
-
-    # ---- TTFT measurement (NVTX: "ttft") ----
-    with nvtx_range("ttft_measure"):
-        print("Measuring TTFT (1-token generation)...")
-        sp_short = SamplingParams(max_tokens=1, temperature=0)
-        ttft_times = []
-        for i in range(min(5, args.num_prompts)):
-            p = prompts[args.num_warmup + args.num_prompts + i]
-            t0 = time.perf_counter()
-            llm.generate([p], sampling_params=sp_short)
-            t1 = time.perf_counter()
-            ttft_times.append((t1 - t0) * 1000)
-
-    # ---- Compute results ----
-    totals_sorted = sorted(r["total_ms"] for r in results)
-    n_sorted = sorted(r["n_output"] for r in results)
-    median_total = totals_sorted[len(totals_sorted) // 2]
-    median_n = n_sorted[len(n_sorted) // 2]
-
-    ttft_times.sort()
-    ttft_median = ttft_times[len(ttft_times) // 2]
-    tpot = (median_total - ttft_median) / max(median_n - 1, 1)
+    result.update({"input_len": args.input_len, "output_len": args.output_len,
+                   "num_prompts": args.num_prompts, "mode": args.mode})
 
     print(f"\n{'='*50}")
     print(f"Results (input={args.input_len}, output={args.output_len}):")
-    print(f"  Median TTFT:  {ttft_median:.2f} ms")
-    print(f"  Median TPOT:  {tpot:.3f} ms")
-    print(f"  Median total: {median_total:.2f} ms")
-    print(f"  Output tokens: {median_n}")
+    print(f"  Median TTFT:  {result['ttft_median_ms']:.2f} ms")
+    print(f"  Median TPOT:  {result['tpot_median_ms']:.3f} ms")
+    print(f"  Median total: {result['total_median_ms']:.2f} ms")
+    print(f"  Output tokens: {result['output_tokens']}")
     print(f"{'='*50}")
 
     if args.output_json:
-        out = {
-            "input_len": args.input_len,
-            "output_len": args.output_len,
-            "num_prompts": args.num_prompts,
-            "ttft_median_ms": round(ttft_median, 3),
-            "tpot_median_ms": round(tpot, 3),
-            "total_median_ms": round(median_total, 3),
-            "output_tokens": median_n,
-        }
         with open(args.output_json, "w") as f:
-            json.dump(out, f, indent=2)
+            json.dump(result, f, indent=2)
         print(f"Saved to {args.output_json}")
 
 
