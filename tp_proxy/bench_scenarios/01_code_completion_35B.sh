@@ -4,7 +4,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4}
-GPU_MEM=${GPU_MEM:-24}
+GPU_MEM=${GPU_MEM:-16}
 OUT=./results/01_code_completion_35B
 mkdir -p "$OUT"
 

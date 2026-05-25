@@ -159,14 +159,17 @@ def compute_max_layers(per_layer_bytes: float, base_bytes: float,
 
     Accounts for: weights + KV cache + activation overhead.
     """
+    # gpu_memory_gb is the USABLE budget (not total GPU memory).
+    # Caller should pass actual usable memory (e.g., 16GB on a 24GB card,
+    # accounting for CUDA context, CUDA Graph, vLLM overhead).
     available = gpu_memory_gb * 1e9
 
     # After TP split: per-layer shrinks proportionally, base stays same (replicated)
     per_layer_tp = per_layer_bytes / tp_size if tp_size > 1 else per_layer_bytes
     base_tp = base_bytes  # replicated (embed, lm_head, visual, norms)
 
-    # Activation overhead: ~500MB fixed
-    activation_overhead = 500 * 1024 * 1024
+    # Activation + CUDA Graph + vLLM overhead
+    activation_overhead = 1 * 1024 * 1024 * 1024  # 1GB conservative
 
     # Find max layers that fit, aligned to attention cycle
     cycle = _get_attn_cycle(model_dir)
