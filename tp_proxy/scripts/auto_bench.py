@@ -43,23 +43,11 @@ def run_bench(model_dir: str, input_len: int, output_len: int,
     env = os.environ.copy()
     env["TRITON_BACKENDS_IN_TREE"] = "1"
 
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-
-    # Always show output on failure
-    if result.returncode != 0:
-        print(f"  STDERR:\n{result.stderr[-2000:]}" if result.stderr else "  (no stderr)")
-        print(f"  STDOUT:\n{result.stdout[-2000:]}" if result.stdout else "  (no stdout)")
-        # Also show server log if exists
-        try:
-            with open("/tmp/generate_bench_server.log") as f:
-                print(f"  SERVER LOG:\n{f.read()[-2000:]}")
-        except FileNotFoundError:
-            pass
+    result = subprocess.run(cmd, env=env)
 
     if result.returncode != 0:
         print(f"  ERROR: generate_bench failed for input_len={input_len}")
-        print(f"  stderr: {result.stderr[-500:]}")
-        return {"input_len": input_len, "error": result.stderr[-200:]}
+        return {"input_len": input_len, "error": "see output above"}
 
     with open(tmp) as f:
         data = json.load(f)
