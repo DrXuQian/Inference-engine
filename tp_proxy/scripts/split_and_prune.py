@@ -59,7 +59,7 @@ def estimate_layer_size(model_dir: str, num_layers: int) -> tuple[float, float]:
         else:
             shard_sizes[shard_file].setdefault("base", []).append(tensor_name)
 
-    # Measure actual tensor sizes from a sample shard
+    # Measure actual tensor sizes from all shards
     total_layer = 0
     total_base = 0
     counted_layers = set()
@@ -77,12 +77,9 @@ def estimate_layer_size(model_dir: str, num_layers: int) -> tuple[float, float]:
                     counted_layers.add(int(m.group(1)))
                 else:
                     total_base += nbytes
-        # Only need to scan enough shards to see all layers
-        if len(counted_layers) >= num_layers:
-            break
 
     if not counted_layers:
-        # Fallback: divide total evenly
+        # Fallback: use metadata total_size
         total = index.get("metadata", {}).get("total_size", 0)
         return total / num_layers, 0
 
