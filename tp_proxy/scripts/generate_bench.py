@@ -124,11 +124,15 @@ def run_serve_mode(args):
     try:
         print(f"Starting vllm serve (port {port})...")
         if not wait_for_server(port):
-            print("ERROR: server failed to start. Check /tmp/generate_bench_server.log")
+            print("ERROR: server failed to start.", file=sys.stderr)
             try:
                 with open("/tmp/generate_bench_server.log") as f:
-                    print(f.read()[-1000:])
-            except: pass
+                    log = f.read()
+                    print(log[-2000:], file=sys.stderr)
+            except FileNotFoundError:
+                # Server process may have died before creating log
+                ret = server.poll()
+                print(f"Server process exited with code: {ret}", file=sys.stderr)
             cleanup(); sys.exit(1)
         print("Server ready")
 

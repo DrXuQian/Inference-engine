@@ -45,6 +45,15 @@ def run_bench(model_dir: str, input_len: int, output_len: int,
 
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
 
+    # Print stderr if failed
+    if result.returncode != 0 and result.stderr:
+        print(f"  STDERR: {result.stderr[-500:]}")
+    if result.stdout:
+        # Show server log hint if present
+        for line in result.stdout.split("\n"):
+            if "ERROR" in line or "server failed" in line.lower():
+                print(f"  {line}")
+
     if result.returncode != 0:
         print(f"  ERROR: generate_bench failed for input_len={input_len}")
         print(f"  stderr: {result.stderr[-500:]}")
