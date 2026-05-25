@@ -112,7 +112,9 @@ def run_serve_mode(args):
          "--trust-remote-code",
          "--no-enable-prefix-caching",
          "--gpu-memory-utilization", str(args.gpu_mem)],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env=env,
+        stdout=open("/tmp/generate_bench_server.log", "w"),
+        stderr=subprocess.STDOUT)
 
     def cleanup():
         server.terminate()
@@ -122,7 +124,11 @@ def run_serve_mode(args):
     try:
         print(f"Starting vllm serve (port {port})...")
         if not wait_for_server(port):
-            print("ERROR: server failed to start")
+            print("ERROR: server failed to start. Check /tmp/generate_bench_server.log")
+            try:
+                with open("/tmp/generate_bench_server.log") as f:
+                    print(f.read()[-1000:])
+            except: pass
             cleanup(); sys.exit(1)
         print("Server ready")
 
