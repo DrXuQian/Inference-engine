@@ -251,9 +251,29 @@ def measure_comm_asys(sqlite_path: str, num_layers: int) -> dict:
 # c) Encoder block compensation (differential — same as NVIDIA)
 # ---------------------------------------------------------------------------
 
+def _get_attn_cycle(model_dir: str) -> int:
+    """Get attention type cycle length from config."""
+    cfg_path = os.path.join(model_dir, "config.json")
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    tc = cfg.get("text_config", cfg)
+    interval = tc.get("full_attention_interval")
+    if interval:
+        return interval
+    layer_types = tc.get("layer_types", [])
+    if not layer_types:
+        return 1
+    for cycle in range(1, len(layer_types) + 1):
+        pattern = layer_types[:cycle]
+        if all(layer_types[i] == pattern[i % cycle] for i in range(len(layer_types))):
+            return cycle
+    return 1
+
+
 def measure_encoder_block(model_dir: str, pruned_layers: int,
                           input_len: int, output_len: int,
                           gpu_mem: float) -> dict:
+    """Differential method aligned to attention cycle."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     prune_script = os.path.join(script_dir, "prune_layers.py")
     bench_script = os.path.join(script_dir, "generate_bench.py")
@@ -261,8 +281,13 @@ def measure_encoder_block(model_dir: str, pruned_layers: int,
     import tempfile, shutil
     tmp_dir = tempfile.mkdtemp(prefix="encoder_comp_")
 
-    n_hi = pruned_layers
-    n_lo = max(pruned_layers // 2, 1)
+    cycle = _get_attn_cycle(model_dir)
+    n_hi = (pruned_layers // cycle) * cycle
+    n_lo = max(n_hi // 2, cycle)
+    n_lo = (n_lo // cycle) * cycle
+    if n_lo == n_hi:
+        n_lo = max(n_hi - cycle, cycle)
+    print(f"  Attention cycle: {cycle} (using {n_lo}L and {n_hi}L for differential)")
 
     results = {}
     for n in [n_lo, n_hi]:

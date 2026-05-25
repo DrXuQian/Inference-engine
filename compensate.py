@@ -203,10 +203,40 @@ def measure_comm_ppu(hidden: int, vocab: int, num_layers: int,
 # c) Encoder block compensation (differential)
 # ---------------------------------------------------------------------------
 
+def _get_attn_cycle(model_dir: str) -> int:
+    """Get attention type cycle length from config (e.g., 4 for [lin,lin,lin,full])."""
+    cfg_path = os.path.join(model_dir, "config.json")
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    tc = cfg.get("text_config", cfg)
+
+    # Try full_attention_interval first
+    interval = tc.get("full_attention_interval")
+    if interval:
+        return interval
+
+    # Fall back to layer_types pattern detection
+    layer_types = tc.get("layer_types", [])
+    if not layer_types:
+        return 1  # no mixed attention, every layer is the same
+
+    # Find the repeating cycle length
+    for cycle in range(1, len(layer_types) + 1):
+        pattern = layer_types[:cycle]
+        if all(layer_types[i] == pattern[i % cycle] for i in range(len(layer_types))):
+            return cycle
+    return 1
+
+
 def measure_encoder_block(model_dir: str, pruned_layers: int,
                           input_len: int, output_len: int,
                           gpu_mem: float) -> dict:
-    """Differential method: bench at N/2 and N layers to get per-layer time."""
+    """Differential method: bench at two layer counts to get per-layer time.
+
+    Uses layer counts that are multiples of the attention cycle
+    (e.g., multiples of 4 for [lin,lin,lin,full]) so that the
+    linear:full attention ratio is consistent across measurements.
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     prune_script = os.path.join(script_dir, "prune_layers.py")
     bench_script = os.path.join(script_dir, "generate_bench.py")
@@ -214,8 +244,15 @@ def measure_encoder_block(model_dir: str, pruned_layers: int,
     import tempfile
     tmp_dir = tempfile.mkdtemp(prefix="encoder_comp_")
 
-    n_hi = pruned_layers
-    n_lo = max(pruned_layers // 2, 1)
+    # Align to attention cycle so lin:full ratio is consistent
+    cycle = _get_attn_cycle(model_dir)
+    n_hi = (pruned_layers // cycle) * cycle
+    n_lo = max(n_hi // 2, cycle)
+    # Ensure n_lo is also a multiple of cycle
+    n_lo = (n_lo // cycle) * cycle
+    if n_lo == n_hi:
+        n_lo = max(n_hi - cycle, cycle)
+    print(f"  Attention cycle: {cycle} (using {n_lo}L and {n_hi}L for differential)")
 
     results = {}
     for n in [n_lo, n_hi]:
