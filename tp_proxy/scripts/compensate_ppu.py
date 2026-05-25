@@ -245,39 +245,50 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
     serve_start = t_min + (best_start + best_len) * 1_000_000_000
 
     events = [(s, d, n) for s, d, n in all_events if s >= serve_start]
-    name_durations = defaultdict(list)
-    for s, d, n in events:
-        name_durations[n].append(d)
-
     total_ns = sum(d for _, d, _ in events)
 
-    # LM head
-    lm_head_ns = 0; lm_head_count = 0
-    if lm_head_kernel and lm_head_kernel in name_durations:
-        all_durs = sorted(name_durations[lm_head_kernel])
-        median = all_durs[len(all_durs) // 2]
-        threshold = median * 10
-        large = [d for d in all_durs if d > threshold]
-        lm_head_ns = sum(large)
-        lm_head_count = len(large)
-    else:
-        # Auto-detect
-        for name, durs in name_durations.items():
-            if any(kw in name.lower() for kw in ["gemv", "gemm", "matmul"]):
-                all_durs = sorted(durs)
-                median = all_durs[len(all_durs) // 2]
-                threshold = median * 10
-                large = [d for d in all_durs if d > threshold]
-                if len(large) > 0:
-                    lm_head_ns = sum(large)
-                    lm_head_count = len(large)
+    # Find lm_head: for each sampling kernel, walk backward to find the
+    # nearest lm_head_kernel. That gemv is the lm_head call.
+    # Everything between lm_head and end of sampling = non-encoder.
+
+    # Build index of sampling kernel positions
+    sampling_indices = set()
+    for i, (s, d, n) in enumerate(events):
+        if n in sampling_kernels:
+            sampling_indices.add(i)
+
+    # For each sampling position, find the nearest lm_head_kernel before it
+    lm_head_indices = set()
+    lm_head_kernel_name = lm_head_kernel  # e.g., "gemvt_op"
+    for si in sorted(sampling_indices):
+        for j in range(si - 1, max(si - 50, -1), -1):
+            if lm_head_kernel_name and events[j][2] == lm_head_kernel_name:
+                lm_head_indices.add(j)
+                break
+            elif not lm_head_kernel_name:
+                # Auto-detect: first gemv/gemm before sampling
+                if any(kw in events[j][2].lower() for kw in ["gemv", "gemm"]):
+                    lm_head_indices.add(j)
                     break
 
-    # Sampling
-    sampling_ns = 0
-    for name in sampling_kernels:
-        if name in name_durations:
-            sampling_ns += sum(name_durations[name])
+    # Mark non-encoder: lm_head + everything between lm_head and sampling (inclusive)
+    non_encoder_indices = set()
+    for si in sorted(sampling_indices):
+        # Find matching lm_head
+        lm_idx = None
+        for j in range(si - 1, max(si - 50, -1), -1):
+            if j in lm_head_indices:
+                lm_idx = j
+                break
+        if lm_idx is not None:
+            for k in range(lm_idx, si + 1):
+                non_encoder_indices.add(k)
+        else:
+            non_encoder_indices.add(si)
+
+    lm_head_ns = sum(events[i][1] for i in lm_head_indices)
+    lm_head_count = len(lm_head_indices)
+    sampling_ns = sum(events[i][1] for i in non_encoder_indices if i not in lm_head_indices)
 
     # Encoder
     encoder_ns = total_ns - lm_head_ns - sampling_ns
