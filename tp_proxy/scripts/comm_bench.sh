@@ -9,9 +9,10 @@
 
 set -euo pipefail
 
-MODEL_DIR="${1:?Usage: $0 <model_dir> <tp_size> <output_json>}"
+MODEL_DIR="${1:?Usage: $0 <model_dir> <tp_size> <input_len> <output_json>}"
 TP_SIZE="${2:?}"
-OUTPUT_JSON="${3:?}"
+INPUT_LEN="${3:?}"
+OUTPUT_JSON="${4:?}"
 
 # Tool paths (override via env)
 AR=${PCCL_AR:-/usr/local/PPU_SDK/pccl_tools/all_reduce_perf}
@@ -42,18 +43,27 @@ print(tc['num_hidden_layers'])
 
 echo "Model: hidden=$HIDDEN, vocab=$VOCAB, layers=$NUM_LAYERS, TP=$TP_SIZE"
 
-# AR size: decode = hidden × 2 bytes (bf16)
-AR_SIZE=$((HIDDEN * 2))
-# AG size: lm_head = (vocab / tp) × 2 bytes (bf16)
+# Sizes
+# Decode AR: batch=1 × hidden × bf16
+AR_DECODE_SIZE=$((HIDDEN * 2))
+# Prefill AR: input_len × hidden × bf16
+AR_PREFILL_SIZE=$((INPUT_LEN * HIDDEN * 2))
+# AG: lm_head = (vocab / tp) × bf16
 AG_SIZE=$(python3 -c "print(($VOCAB // $TP_SIZE) * 2)")
 
 echo ""
-echo "=== All-Reduce (decode, ${AR_SIZE} bytes) ==="
-AR_OUTPUT=$($AR -b $AR_SIZE -e $AR_SIZE -f 2 -d bf16 -o sum \
+echo "=== All-Reduce DECODE (${AR_DECODE_SIZE} bytes) ==="
+AR_DEC_OUTPUT=$($AR -b $AR_DECODE_SIZE -e $AR_DECODE_SIZE -f 2 -d bf16 -o sum \
     -n 500 -w 100 -g $TP_SIZE -c 0 -a 1 2>&1)
-echo "$AR_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
-# Parse time (column 5, us)
-AR_US=$(echo "$AR_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
+echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
+AR_DECODE_US=$(echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
+
+echo ""
+echo "=== All-Reduce PREFILL (${AR_PREFILL_SIZE} bytes, input_len=$INPUT_LEN) ==="
+AR_PRE_OUTPUT=$($AR -b $AR_PREFILL_SIZE -e $AR_PREFILL_SIZE -f 2 -d bf16 -o sum \
+    -n 100 -w 20 -g $TP_SIZE -c 0 -a 1 2>&1)
+echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
+AR_PREFILL_US=$(echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
 
 echo ""
 echo "=== All-Gather (lm_head, ${AG_SIZE} bytes) ==="
@@ -68,26 +78,38 @@ N_AG=2
 
 python3 -c "
 import json
-ar_us = float('${AR_US}') if '${AR_US}' else 0
+ar_decode_us = float('${AR_DECODE_US}') if '${AR_DECODE_US}' else 0
+ar_prefill_us = float('${AR_PREFILL_US}') if '${AR_PREFILL_US}' else 0
 ag_us = float('${AG_US}') if '${AG_US}' else 0
 n_ar = $N_AR
 n_ag = $N_AG
-total = (n_ar * ar_us + n_ag * ag_us) / 1000
+decode_total = (n_ar * ar_decode_us + n_ag * ag_us) / 1000
+prefill_total = (n_ar * ar_prefill_us + n_ag * ag_us) / 1000
 
 print()
-print(f'AR: {ar_us:.1f} us/call × {n_ar} = {n_ar*ar_us/1000:.3f} ms')
-print(f'AG: {ag_us:.1f} us/call × {n_ag} = {n_ag*ag_us/1000:.3f} ms')
-print(f'Total/step: {total:.3f} ms')
+print(f'DECODE:')
+print(f'  AR: {ar_decode_us:.1f} us/call × {n_ar} = {n_ar*ar_decode_us/1000:.3f} ms')
+print(f'  AG: {ag_us:.1f} us/call × {n_ag} = {n_ag*ag_us/1000:.3f} ms')
+print(f'  Total/step: {decode_total:.3f} ms')
+print(f'PREFILL:')
+print(f'  AR: {ar_prefill_us:.1f} us/call × {n_ar} = {n_ar*ar_prefill_us/1000:.3f} ms')
+print(f'  AG: {ag_us:.1f} us/call × {n_ag} = {n_ag*ag_us/1000:.3f} ms')
+print(f'  Total/step: {prefill_total:.3f} ms')
 
 result = {
     'method': 'pccl_standalone',
-    'ar_us': round(ar_us, 1),
+    'decode_ar_us': round(ar_decode_us, 1),
+    'prefill_ar_us': round(ar_prefill_us, 1),
     'ag_us': round(ag_us, 1),
-    'ar_size_bytes': $AR_SIZE,
+    'decode_ar_size_bytes': $AR_DECODE_SIZE,
+    'prefill_ar_size_bytes': $AR_PREFILL_SIZE,
+    'input_len': $INPUT_LEN,
     'ag_size_bytes': $AG_SIZE,
     'n_ar_per_step': n_ar,
     'n_ag_per_step': n_ag,
-    'total_per_step_ms': round(total, 3),
+    'decode_total_per_step_ms': round(decode_total, 3),
+    'prefill_total_per_step_ms': round(prefill_total, 3),
+    'total_per_step_ms': round(decode_total, 3),
     'tp_size': $TP_SIZE,
     'hidden_size': $HIDDEN,
     'vocab_size': $VOCAB,
