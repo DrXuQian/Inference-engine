@@ -238,6 +238,39 @@ def main():
     print(f"  Total estimated: {(weight_pruned + kv_pruned + 500*1024*1024) / 1e9:.2f} GB / {args.gpu_memory_gb} GB")
     print(f"  Max layers for {args.gpu_memory_gb}GB: {max_layers} / {num_layers}")
 
+    # Build expected metadata for this run
+    meta = {
+        "original_model": os.path.abspath(args.model_dir),
+        "tp_size": args.tp_size,
+        "gpu_memory_gb": args.gpu_memory_gb,
+        "max_seq_len": args.max_seq_len,
+        "original_layers": num_layers,
+        "pruned_layers": min(max_layers, num_layers),
+        "per_layer_bytes": per_layer,
+        "base_bytes": base,
+    }
+
+    # Check if output already exists with matching metadata
+    meta_path = os.path.join(args.output_dir, "split_meta.json")
+    rank0_pruned = os.path.join(args.output_dir, f"rank_0_{max_layers}L")
+    if max_layers >= num_layers and args.tp_size <= 1:
+        rank0_pruned = args.model_dir
+
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            existing_meta = json.load(f)
+        # Compare key fields
+        match = all(
+            existing_meta.get(k) == meta.get(k)
+            for k in ["original_model", "tp_size", "original_layers", "pruned_layers", "max_seq_len"]
+        )
+        if match and os.path.exists(existing_meta.get("output_dir", "")):
+            rank0_pruned = existing_meta["output_dir"]
+            print(f"\nSkipping split & prune: output already exists with matching config")
+            print(f"  Model: {rank0_pruned}")
+            print(f"  Layers: {existing_meta['pruned_layers']} / {existing_meta['original_layers']}")
+            return
+
     # Step 3: Split (skip if TP=1)
     if args.tp_size > 1:
         split_dir = os.path.join(args.output_dir, "split")
@@ -265,17 +298,7 @@ def main():
         rank0_pruned = source_dir
 
     # Save metadata
-    meta = {
-        "original_model": args.model_dir,
-        "tp_size": args.tp_size,
-        "gpu_memory_gb": args.gpu_memory_gb,
-        "original_layers": num_layers,
-        "pruned_layers": min(max_layers, num_layers),
-        "per_layer_bytes": per_layer,
-        "base_bytes": base,
-        "output_dir": rank0_pruned,
-    }
-    meta_path = os.path.join(args.output_dir, "split_meta.json")
+    meta["output_dir"] = rank0_pruned
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
