@@ -110,6 +110,7 @@ def run_serve_mode(args):
          "--tensor-parallel-size", str(args.tp),
          "--max-model-len", str(mml),
          "--trust-remote-code",
+         "--no-enable-prefix-caching",
          "--gpu-memory-utilization", str(args.gpu_mem)],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
