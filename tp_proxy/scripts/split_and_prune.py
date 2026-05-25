@@ -112,21 +112,61 @@ def _estimate_from_config(model_dir: str, num_layers: int) -> tuple[float, float
     return per_layer, base
 
 
+def estimate_kv_cache(model_dir: str, num_layers: int, tp_size: int,
+                      max_seq_len: int) -> float:
+    """Estimate KV cache size in bytes for a given sequence length."""
+    tc, _ = load_config(model_dir)
+
+    # Only full_attention layers have KV cache
+    # Linear attention (Mamba/SSM) has state cache but much smaller
+    layer_types = tc.get("layer_types", ["full_attention"] * num_layers)
+    n_full_attn = sum(1 for lt in layer_types[:num_layers] if lt == "full_attention")
+    n_linear_attn = num_layers - n_full_attn
+
+    # Full attention KV cache: 2 (K+V) × n_kv_heads/tp × head_dim × 2 bytes × seq_len
+    n_kv_heads = tc.get("num_key_value_heads", 2)
+    head_dim = tc.get("head_dim", 256)
+    kv_per_token_per_layer = 2 * (n_kv_heads // max(tp_size, 1)) * head_dim * 2  # bf16
+
+    # Linear attention state cache: much smaller (fixed per layer, not per token)
+    # Mamba state: d_model × d_state × 2 bytes ≈ hidden × 16 × 2
+    hidden = tc.get("hidden_size", 2048)
+    lin_state_per_layer = hidden * 16 * 2  # approximate
+
+    kv_total = (n_full_attn * kv_per_token_per_layer * max_seq_len +
+                n_linear_attn * lin_state_per_layer)
+    return kv_total
+
+
 def compute_max_layers(per_layer_bytes: float, base_bytes: float,
                        gpu_memory_gb: float, num_layers: int,
-                       tp_size: int) -> int:
-    """Compute max layers after TP split that fit in GPU memory."""
-    available = gpu_memory_gb * 0.85 * 1e9  # 85% utilization (rest for KV cache + activations)
+                       tp_size: int, model_dir: str,
+                       max_seq_len: int = 4096) -> int:
+    """Compute max layers after TP split that fit in GPU memory.
+
+    Accounts for: weights + KV cache + activation overhead.
+    """
+    available = gpu_memory_gb * 1e9
 
     # After TP split: per-layer shrinks ~proportionally, base stays ~same
-    # (embed/lm_head replicated, experts split)
     per_layer_tp = per_layer_bytes / tp_size * 1.1  # 10% overhead for replicated parts
     base_tp = base_bytes  # replicated
 
-    max_layers = int((available - base_tp) / per_layer_tp)
-    max_layers = min(max_layers, num_layers)
-    max_layers = max(max_layers, 1)
-    return max_layers
+    # Activation overhead: ~500MB fixed
+    activation_overhead = 500 * 1024 * 1024
+
+    # Binary search for max layers that fit (weights + KV cache)
+    best = 1
+    for n in range(1, num_layers + 1):
+        weight_bytes = base_tp + n * per_layer_tp
+        kv_bytes = estimate_kv_cache(model_dir, n, tp_size, max_seq_len)
+        total = weight_bytes + kv_bytes + activation_overhead
+        if total <= available:
+            best = n
+        else:
+            break
+
+    return best
 
 
 def main():
@@ -135,6 +175,8 @@ def main():
     ap.add_argument("--tp-size", type=int, default=2)
     ap.add_argument("--gpu-memory-gb", type=float, required=True)
     ap.add_argument("--output-dir", required=True)
+    ap.add_argument("--max-seq-len", type=int, default=4096,
+                    help="Max sequence length for KV cache estimation")
     ap.add_argument("--max-layers", type=int, default=None,
                     help="Override auto-computed layer count")
     args = ap.parse_args()
@@ -160,12 +202,21 @@ def main():
     print(f"  Per-layer: {per_layer / 1e6:.1f} MB")
     print(f"  Base (non-layer): {base / 1e6:.1f} MB")
 
-    # Step 2: Compute max layers
+    # Step 2: Compute max layers (weights + KV cache + activations)
+    kv_full = estimate_kv_cache(args.model_dir, num_layers, args.tp_size, args.max_seq_len)
+    print(f"  KV cache ({num_layers}L, seq={args.max_seq_len}): {kv_full / 1e6:.1f} MB")
+
     if args.max_layers is not None:
         max_layers = args.max_layers
     else:
         max_layers = compute_max_layers(per_layer, base, args.gpu_memory_gb,
-                                        num_layers, args.tp_size)
+                                        num_layers, args.tp_size,
+                                        args.model_dir, args.max_seq_len)
+    kv_pruned = estimate_kv_cache(args.model_dir, max_layers, args.tp_size, args.max_seq_len)
+    weight_pruned = base + max_layers * per_layer / args.tp_size * 1.1
+    print(f"  Weights ({max_layers}L, TP={args.tp_size}): {weight_pruned / 1e9:.2f} GB")
+    print(f"  KV cache ({max_layers}L): {kv_pruned / 1e6:.1f} MB")
+    print(f"  Total estimated: {(weight_pruned + kv_pruned + 500*1024*1024) / 1e9:.2f} GB / {args.gpu_memory_gb} GB")
     print(f"  Max layers for {args.gpu_memory_gb}GB: {max_layers} / {num_layers}")
 
     # Step 3: Split (skip if TP=1)
