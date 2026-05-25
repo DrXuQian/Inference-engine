@@ -168,27 +168,31 @@ def main():
                                         num_layers, args.tp_size)
     print(f"  Max layers for {args.gpu_memory_gb}GB: {max_layers} / {num_layers}")
 
-    # Step 3: Split
-    split_dir = os.path.join(args.output_dir, "split")
-    print(f"\nStep 1/2: Splitting by TP={args.tp_size}...")
-    cmd = [sys.executable, os.path.join(script_dir, "split_tp2.py"),
-           "--model-dir", args.model_dir,
-           "--output-dir", split_dir]
-    subprocess.run(cmd, check=True)
+    # Step 3: Split (skip if TP=1)
+    if args.tp_size > 1:
+        split_dir = os.path.join(args.output_dir, "split")
+        print(f"\nStep 1/2: Splitting by TP={args.tp_size}...")
+        cmd = [sys.executable, os.path.join(script_dir, "split_tp2.py"),
+               "--model-dir", args.model_dir,
+               "--output-dir", split_dir]
+        subprocess.run(cmd, check=True)
+        source_dir = os.path.join(split_dir, "rank_0")
+    else:
+        print(f"\nStep 1/2: TP=1, no splitting needed")
+        source_dir = args.model_dir
 
     # Step 4: Prune
-    rank0_split = os.path.join(split_dir, "rank_0")
     rank0_pruned = os.path.join(args.output_dir, f"rank_0_{max_layers}L")
     if max_layers < num_layers:
         print(f"\nStep 2/2: Pruning to {max_layers} layers...")
         cmd = [sys.executable, os.path.join(script_dir, "prune_layers.py"),
-               "--rank-dir", rank0_split,
+               "--rank-dir", source_dir,
                "--num-layers", str(max_layers),
                "--output-dir", rank0_pruned]
         subprocess.run(cmd, check=True)
     else:
         print(f"\nStep 2/2: No pruning needed ({max_layers} == {num_layers})")
-        rank0_pruned = rank0_split
+        rank0_pruned = source_dir
 
     # Save metadata
     meta = {

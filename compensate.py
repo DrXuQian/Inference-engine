@@ -306,27 +306,36 @@ def main():
     print(f"Platform: {args.platform}, TP={args.tp_size}")
     print()
 
-    # a) LM head
-    print("=== a) LM head compensation ===")
-    lm = measure_lm_head(hidden, vocab, args.tp_size, input_lens)
-    print(f"  Decode delta: {lm['decode_delta_ms']:.3f} ms")
-    for il, d in lm["prefill_deltas_ms"].items():
-        print(f"  Prefill delta (input={il}): {d:.3f} ms")
-    print()
-
-    # b) Communication
-    print("=== b) Communication compensation ===")
-    if args.platform == "nvidia":
-        comm = measure_comm_nvidia(hidden, vocab, args.original_layers, args.tp_size)
+    # a) LM head (only for TP > 1)
+    if args.tp_size > 1:
+        print("=== a) LM head compensation ===")
+        lm = measure_lm_head(hidden, vocab, args.tp_size, input_lens)
+        print(f"  Decode delta: {lm['decode_delta_ms']:.3f} ms")
+        for il, d in lm["prefill_deltas_ms"].items():
+            print(f"  Prefill delta (input={il}): {d:.3f} ms")
+        print()
     else:
-        comm = measure_comm_ppu(hidden, vocab, args.original_layers, args.tp_size,
-                                args.pccl_ar, args.pccl_ag)
-    print(f"  AR: {comm['ar_per_call_us']:.1f} us/call × {comm['n_ar_per_step']} = "
-          f"{comm['n_ar_per_step'] * comm['ar_per_call_us'] / 1000:.3f} ms")
-    print(f"  AG: {comm['ag_per_call_us']:.1f} us/call × {comm['n_ag_per_step']} = "
-          f"{comm['n_ag_per_step'] * comm['ag_per_call_us'] / 1000:.3f} ms")
-    print(f"  Total/step: {comm['total_per_step_ms']:.3f} ms")
-    print()
+        print("=== a) LM head: TP=1, no compensation needed ===\n")
+        lm = {"decode_delta_ms": 0, "prefill_deltas_ms": {}}
+
+    # b) Communication (only for TP > 1)
+    if args.tp_size > 1:
+        print("=== b) Communication compensation ===")
+        if args.platform == "nvidia":
+            comm = measure_comm_nvidia(hidden, vocab, args.original_layers, args.tp_size)
+        else:
+            comm = measure_comm_ppu(hidden, vocab, args.original_layers, args.tp_size,
+                                    args.pccl_ar, args.pccl_ag)
+        print(f"  AR: {comm['ar_per_call_us']:.1f} us/call × {comm['n_ar_per_step']} = "
+              f"{comm['n_ar_per_step'] * comm['ar_per_call_us'] / 1000:.3f} ms")
+        print(f"  AG: {comm['ag_per_call_us']:.1f} us/call × {comm['n_ag_per_step']} = "
+              f"{comm['n_ag_per_step'] * comm['ag_per_call_us'] / 1000:.3f} ms")
+        print(f"  Total/step: {comm['total_per_step_ms']:.3f} ms")
+        print()
+    else:
+        print("=== b) Communication: TP=1, no compensation needed ===\n")
+        comm = {"total_per_step_ms": 0, "ar_per_call_us": 0, "ag_per_call_us": 0,
+                "n_ar_per_step": 0, "n_ag_per_step": 0}
 
     # c) Encoder block
     enc = None

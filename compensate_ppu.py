@@ -338,32 +338,40 @@ def main():
     print(f"Platform: PPU, TP={args.tp_size}")
     print()
 
-    # a) LM head
-    print("=== a) LM head compensation ===")
-    lm = measure_lm_head(hidden, vocab, args.tp_size, input_lens)
-    print(f"  Decode delta: {lm['decode_delta_ms']:.3f} ms")
-    for il, d in lm["prefill_deltas_ms"].items():
-        print(f"  Prefill delta (input={il}): {d:.3f} ms")
-    print()
-
-    # b) Communication
-    print("=== b) Communication compensation ===")
-    if args.asys_sqlite:
-        print(f"  Using asys trace: {args.asys_sqlite}")
-        comm = measure_comm_asys(args.asys_sqlite, args.original_layers)
-        print(f"  Method: {comm['method']}")
-        print(f"  Comm kernels: {comm.get('comm_kernel_count', 0)}")
-        print(f"  Per-call: {comm.get('comm_per_call_us', 0):.1f} us")
-        print(f"  Per-step: {comm['total_per_step_ms']:.3f} ms")
+    # a) LM head (only for TP > 1)
+    if args.tp_size > 1:
+        print("=== a) LM head compensation ===")
+        lm = measure_lm_head(hidden, vocab, args.tp_size, input_lens)
+        print(f"  Decode delta: {lm['decode_delta_ms']:.3f} ms")
+        for il, d in lm["prefill_deltas_ms"].items():
+            print(f"  Prefill delta (input={il}): {d:.3f} ms")
+        print()
     else:
-        print(f"  Using pccl_tools standalone")
-        comm = measure_comm_pccl(hidden, vocab, args.original_layers,
-                                 args.tp_size, args.pccl_ar, args.pccl_ag)
-        print(f"  AR: {comm['ar_per_call_us']:.1f} us/call × {comm['n_ar_per_step']}")
-        print(f"  AG: {comm['ag_per_call_us']:.1f} us/call × {comm['n_ag_per_step']}")
-        print(f"  Total/step: {comm['total_per_step_ms']:.3f} ms")
-        print(f"  NOTE: {comm.get('note', '')}")
-    print()
+        print("=== a) LM head: TP=1, no compensation needed ===\n")
+        lm = {"decode_delta_ms": 0, "prefill_deltas_ms": {}}
+
+    # b) Communication (only for TP > 1)
+    if args.tp_size > 1:
+        print("=== b) Communication compensation ===")
+        if args.asys_sqlite:
+            print(f"  Using asys trace: {args.asys_sqlite}")
+            comm = measure_comm_asys(args.asys_sqlite, args.original_layers)
+            print(f"  Method: {comm['method']}")
+            print(f"  Comm kernels: {comm.get('comm_kernel_count', 0)}")
+            print(f"  Per-call: {comm.get('comm_per_call_us', 0):.1f} us")
+            print(f"  Per-step: {comm['total_per_step_ms']:.3f} ms")
+        else:
+            print(f"  Using pccl_tools standalone")
+            comm = measure_comm_pccl(hidden, vocab, args.original_layers,
+                                     args.tp_size, args.pccl_ar, args.pccl_ag)
+            print(f"  AR: {comm['ar_per_call_us']:.1f} us/call × {comm['n_ar_per_step']}")
+            print(f"  AG: {comm['ag_per_call_us']:.1f} us/call × {comm['n_ag_per_step']}")
+            print(f"  Total/step: {comm['total_per_step_ms']:.3f} ms")
+            print(f"  NOTE: {comm.get('note', '')}")
+        print()
+    else:
+        print("=== b) Communication: TP=1, no compensation needed ===\n")
+        comm = {"total_per_step_ms": 0}
 
     # c) Encoder block
     enc = None
