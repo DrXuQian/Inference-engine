@@ -148,9 +148,9 @@ def compute_max_layers(per_layer_bytes: float, base_bytes: float,
     """
     available = gpu_memory_gb * 1e9
 
-    # After TP split: per-layer shrinks ~proportionally, base stays ~same
-    per_layer_tp = per_layer_bytes / tp_size * 1.1  # 10% overhead for replicated parts
-    base_tp = base_bytes  # replicated
+    # After TP split: per-layer shrinks proportionally, base stays same (replicated)
+    per_layer_tp = per_layer_bytes / tp_size if tp_size > 1 else per_layer_bytes
+    base_tp = base_bytes  # replicated (embed, lm_head, visual, norms)
 
     # Activation overhead: ~500MB fixed
     activation_overhead = 500 * 1024 * 1024
@@ -213,7 +213,8 @@ def main():
                                         num_layers, args.tp_size,
                                         args.model_dir, args.max_seq_len)
     kv_pruned = estimate_kv_cache(args.model_dir, max_layers, args.tp_size, args.max_seq_len)
-    weight_pruned = base + max_layers * per_layer / args.tp_size * 1.1
+    per_layer_tp = per_layer / args.tp_size if args.tp_size > 1 else per_layer
+    weight_pruned = base + max_layers * per_layer_tp
     print(f"  Weights ({max_layers}L, TP={args.tp_size}): {weight_pruned / 1e9:.2f} GB")
     print(f"  KV cache ({max_layers}L): {kv_pruned / 1e6:.1f} MB")
     print(f"  Total estimated: {(weight_pruned + kv_pruned + 500*1024*1024) / 1e9:.2f} GB / {args.gpu_memory_gb} GB")
