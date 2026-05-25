@@ -109,6 +109,22 @@ def _estimate_from_config(model_dir: str, num_layers: int) -> tuple[float, float
     return per_layer, base
 
 
+def _get_attn_cycle(model_dir: str) -> int:
+    """Get attention type cycle length from config (e.g., 4 for [lin,lin,lin,full])."""
+    tc, _ = load_config(model_dir)
+    interval = tc.get("full_attention_interval")
+    if interval:
+        return interval
+    layer_types = tc.get("layer_types", [])
+    if not layer_types:
+        return 1
+    for cycle in range(1, len(layer_types) + 1):
+        pattern = layer_types[:cycle]
+        if all(layer_types[i] == pattern[i % cycle] for i in range(len(layer_types))):
+            return cycle
+    return 1
+
+
 def estimate_kv_cache(model_dir: str, num_layers: int, tp_size: int,
                       max_seq_len: int) -> float:
     """Estimate KV cache size in bytes for a given sequence length."""
@@ -152,9 +168,11 @@ def compute_max_layers(per_layer_bytes: float, base_bytes: float,
     # Activation overhead: ~500MB fixed
     activation_overhead = 500 * 1024 * 1024
 
-    # Binary search for max layers that fit (weights + KV cache)
-    best = 1
-    for n in range(1, num_layers + 1):
+    # Find max layers that fit, aligned to attention cycle
+    cycle = _get_attn_cycle(model_dir)
+
+    best = cycle  # minimum = one full cycle
+    for n in range(cycle, num_layers + 1, cycle):
         weight_bytes = base_tp + n * per_layer_tp
         kv_bytes = estimate_kv_cache(model_dir, n, tp_size, max_seq_len)
         total = weight_bytes + kv_bytes + activation_overhead
