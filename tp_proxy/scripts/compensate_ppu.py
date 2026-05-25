@@ -409,7 +409,8 @@ def main():
     ap = argparse.ArgumentParser(description="PPU compensation (all-in-one)")
     ap.add_argument("--bench-results", required=True)
     ap.add_argument("--model-dir", required=True)
-    ap.add_argument("--output-len", type=int, required=True)
+    ap.add_argument("--output-len", type=int, default=None,
+                    help="Override output_len (auto-read from bench_results if omitted)")
     ap.add_argument("--asys-sqlite", default=None,
                     help="asys trace sqlite (for encoder block + optional comm)")
     ap.add_argument("--pruned-layers", type=int, default=None)
@@ -436,7 +437,15 @@ def main():
     pruned = args.pruned_layers or (meta and meta.get("pruned_layers")) or cfg["num_hidden_layers"]
     original = args.original_layers or (meta and meta.get("original_layers")) or pruned
 
-    input_lens = [r["input_len"] for r in bench.get("results", [bench]) if "error" not in r]
+    results_list = bench.get("results", [bench])
+    input_lens = [r["input_len"] for r in results_list if "error" not in r]
+
+    # Auto-read output_len from bench results
+    output_len = args.output_len
+    if output_len is None:
+        output_len = bench.get("output_len") or next(
+            (r.get("output_len") or r.get("output_tokens") for r in results_list if "error" not in r), 64)
+    print(f"Output len: {output_len}")
 
     sampling_names = set(k.strip() for k in args.sampling_kernels.split(","))
 
@@ -476,7 +485,7 @@ def main():
     enc = None
     if pruned < original and args.asys_sqlite:
         print("=== c) Encoder block (from trace) ===")
-        enc = measure_encoder_trace(args.asys_sqlite, pruned, args.output_len,
+        enc = measure_encoder_trace(args.asys_sqlite, pruned, output_len,
                                     args.lm_head_kernel, sampling_names)
         if enc:
             removed = original - pruned
@@ -508,7 +517,7 @@ def main():
         il = r["input_len"]
         raw_ttft = r["ttft_median_ms"]
         raw_tpot = r["tpot_median_ms"]
-        output_tokens = r.get("output_tokens", args.output_len)
+        output_tokens = r.get("output_tokens", output_len)
 
         comp_tpot = raw_tpot - lm["decode_delta_ms"] + comm["total_per_step_ms"]
         pf_delta = lm["prefill_deltas_ms"].get(str(il), lm["decode_delta_ms"])
