@@ -411,13 +411,13 @@ def main():
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--output-len", type=int, default=None,
                     help="Override output_len (auto-read from bench_results if omitted)")
+    ap.add_argument("--comm-json", default=None,
+                    help="comm.json from comm_bench.sh (AR/AG latency)")
     ap.add_argument("--asys-sqlite", default=None,
-                    help="asys trace sqlite (for encoder block + optional comm)")
+                    help="asys trace sqlite (for encoder block compensation)")
     ap.add_argument("--pruned-layers", type=int, default=None)
     ap.add_argument("--original-layers", type=int, default=None)
     ap.add_argument("--tp-size", type=int, default=None)
-    ap.add_argument("--pccl-ar", default="/usr/local/PPU_SDK/pccl_tools/all_reduce_perf")
-    ap.add_argument("--pccl-ag", default="/usr/local/PPU_SDK/pccl_tools/all_gather_perf")
     ap.add_argument("--lm-head-kernel", default="gemvt_op")
     ap.add_argument("--sampling-kernels", default="ArgMaxOps,DeviceRadixSortHistogramKernel,DeviceRadixSortExclusiveSumKernel,DeviceRadixSortOnesweepKernel,cunn_SoftMaxForward,DeviceScanInitKernel,DeviceScanKernel")
     ap.add_argument("--output-json", default="compensated_ppu.json")
@@ -465,17 +465,16 @@ def main():
         lm = {"decode_delta_ms": 0, "prefill_deltas_ms": {}}
     print()
 
-    # === b) Communication ===
-    if tp_size > 1:
-        print("=== b) Communication ===")
-        if args.asys_sqlite:
-            print(f"  From trace: {args.asys_sqlite}")
-            comm = measure_comm_trace(args.asys_sqlite, original, tp_size)
-        else:
-            print(f"  From pccl_tools")
-            comm = measure_comm_pccl(hidden, vocab, original, tp_size,
-                                     args.pccl_ar, args.pccl_ag)
-        print(f"  Total/step: {comm['total_per_step_ms']:.3f} ms ({comm['method']})")
+    # === b) Communication (read from comm.json) ===
+    if args.comm_json:
+        with open(args.comm_json) as f:
+            comm = json.load(f)
+        print(f"=== b) Communication (from {args.comm_json}) ===")
+        print(f"  Total/step: {comm['total_per_step_ms']:.3f} ms ({comm.get('method', '?')})")
+    elif tp_size > 1:
+        print("=== b) Communication: no --comm-json, using 0 ===")
+        print("    Run comm_scenarios first to measure AR/AG latency")
+        comm = {"total_per_step_ms": 0, "method": "none"}
     else:
         print("=== b) Communication: TP=1, skip ===")
         comm = {"total_per_step_ms": 0, "method": "none"}

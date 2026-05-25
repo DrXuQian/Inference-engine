@@ -9,4 +9,5 @@ python3 "$SCRIPT_DIR/compensate_ppu.py" \
     --bench-results "$BASE/bench.json" \
     --model-dir "$MODEL" \
     --asys-sqlite "$BASE/trace/trace.sqlite" \
+    --comm-json "./results/02_chat_27B/comm.json" \
     --output-json "$BASE/compensated.json"

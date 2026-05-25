@@ -14,6 +14,7 @@ for TP in 1 2; do
         --bench-results "$DIR/bench.json" \
         --model-dir "$MODEL" \
         --asys-sqlite "$DIR/trace/trace.sqlite" \
+        --comm-json "$DIR/comm.json" \
         --output-json "$DIR/compensated.json"
     echo ""
 done
