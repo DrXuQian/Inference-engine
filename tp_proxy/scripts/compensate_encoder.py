@@ -141,13 +141,25 @@ def measure_encoder_diff(model_dir: str, pruned_layers: int,
 
     cycle = get_attn_cycle(model_dir)
     n_hi = (pruned_layers // cycle) * cycle
-    n_lo = max(n_hi // 2, cycle)
-    n_lo = (n_lo // cycle) * cycle
-    if n_lo == n_hi:
-        n_lo = max(n_hi - cycle, cycle)
+
+    # Find n_lo: prefer cycle-aligned, but fall back to half if too few layers
+    if n_hi >= 2 * cycle:
+        # Enough room for two cycle-aligned points
+        n_lo = max(n_hi // 2, cycle)
+        n_lo = (n_lo // cycle) * cycle
+        if n_lo == n_hi:
+            n_lo = n_hi - cycle
+    elif n_hi > 1:
+        # Too few for cycle alignment, use half (not cycle-aligned but functional)
+        n_lo = max(n_hi // 2, 1)
+        print(f"  WARNING: only {n_hi} layers, can't align to cycle={cycle}. "
+              f"Using n_lo={n_lo} (not cycle-aligned)")
+    else:
+        print(f"  ERROR: only {n_hi} layer(s), can't do differential")
+        return None
 
     print(f"  Attention cycle: {cycle}")
-    print(f"  Differential: {n_lo}L vs {n_hi}L (both multiples of {cycle})")
+    print(f"  Differential: {n_lo}L vs {n_hi}L")
 
     tmp_dir = tempfile.mkdtemp(prefix="enc_diff_")
     results = {}

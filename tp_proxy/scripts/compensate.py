@@ -247,11 +247,15 @@ def measure_encoder_block(model_dir: str, pruned_layers: int,
     # Align to attention cycle so lin:full ratio is consistent
     cycle = _get_attn_cycle(model_dir)
     n_hi = (pruned_layers // cycle) * cycle
-    n_lo = max(n_hi // 2, cycle)
-    # Ensure n_lo is also a multiple of cycle
-    n_lo = (n_lo // cycle) * cycle
-    if n_lo == n_hi:
-        n_lo = max(n_hi - cycle, cycle)
+    if n_hi >= 2 * cycle:
+        n_lo = max(n_hi // 2, cycle)
+        n_lo = (n_lo // cycle) * cycle
+        if n_lo == n_hi:
+            n_lo = n_hi - cycle
+    elif n_hi > 1:
+        n_lo = max(n_hi // 2, 1)
+    else:
+        return None
     print(f"  Attention cycle: {cycle} (using {n_lo}L and {n_hi}L for differential)")
 
     results = {}
