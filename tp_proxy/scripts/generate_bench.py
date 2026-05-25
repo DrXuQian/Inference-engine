@@ -49,15 +49,14 @@ def nvtx_range(name):
 # Serve mode: vllm serve + HTTP streaming
 # ---------------------------------------------------------------------------
 
-def wait_for_server(port, timeout=180):
+def wait_for_server(port):
     import urllib.request
-    for _ in range(timeout):
+    while True:
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
             return True
         except Exception:
-            time.sleep(1)
-    return False
+            time.sleep(2)
 
 
 def http_generate(port, prompt_ids, max_tokens, model_name):

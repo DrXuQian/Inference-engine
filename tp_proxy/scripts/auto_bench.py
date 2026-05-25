@@ -43,7 +43,7 @@ def run_bench(model_dir: str, input_len: int, output_len: int,
     env = os.environ.copy()
     env["TRITON_BACKENDS_IN_TREE"] = "1"
 
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
     # Always show output on failure
     if result.returncode != 0:
