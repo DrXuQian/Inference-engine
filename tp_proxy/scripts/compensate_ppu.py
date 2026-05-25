@@ -207,6 +207,15 @@ def measure_comm_trace(sqlite_path: str, num_layers: int) -> dict:
 def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
                           lm_head_kernel: str | None,
                           sampling_kernels: set[str]) -> dict | None:
+    """Extract encoder block time from trace.
+
+    Timeline structure (from end, working backward):
+      ... [prefill (eager, sparse)] [gap] [decode × output_len (CUDA Graph, dense)] [gap] ...
+
+    Decode = dense kernel region (inter-kernel gap < 5us)
+    Prefill = sparse kernel region (inter-kernel gap > 10us)
+    Request boundary = large gap (> 500us)
+    """
     conn = sqlite3.connect(sqlite_path)
     cursor = conn.cursor()
 
@@ -219,17 +228,17 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
         return None
 
     cursor.execute(f"""
-        SELECT k.start, k."end" - k.start AS dur, s.value AS name
+        SELECT k.start, k."end" - k.start AS dur, k."end", s.value AS name
         FROM {kt} k JOIN StringIds s ON k.demangledName = s.id
         ORDER BY k.start
     """)
-    all_events = cursor.fetchall()
+    all_events = [(r[0], r[1], r[2], r[3]) for r in cursor.fetchall()]
     conn.close()
 
-    # Find serving phase
+    # Find serving phase (after largest idle gap)
     t_min = all_events[0][0]
     bins = defaultdict(int)
-    for s, d, n in all_events:
+    for s, d, e, n in all_events:
         bins[(s - t_min) // 1_000_000_000] += 1
     max_bin = max(bins.keys()) if bins else 0
     best_start = best_len = gap_start = gap_len = 0
@@ -244,75 +253,151 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
             in_gap = False
     serve_start = t_min + (best_start + best_len) * 1_000_000_000
 
-    events = [(s, d, n) for s, d, n in all_events if s >= serve_start]
-    total_ns = sum(d for _, d, _ in events)
+    events = [(s, d, e, n) for s, d, e, n in all_events if s >= serve_start]
+    if not events:
+        return None
 
-    # Find lm_head: for each sampling kernel, walk backward to find the
-    # nearest lm_head_kernel. That gemv is the lm_head call.
-    # Everything between lm_head and end of sampling = non-encoder.
+    # --- Split into request blocks (separated by large gaps > 500us) ---
+    request_blocks = []
+    current = [events[0]]
+    for ev in events[1:]:
+        gap = ev[0] - current[-1][2]  # start - prev_end
+        if gap > 500_000:  # 500us = new request block
+            request_blocks.append(current)
+            current = [ev]
+        else:
+            current.append(ev)
+    if current:
+        request_blocks.append(current)
 
-    # Build index of sampling kernel positions
-    sampling_indices = set()
-    for i, (s, d, n) in enumerate(events):
-        if n in sampling_kernels:
-            sampling_indices.add(i)
+    # --- Within each request block, split prefill vs decode by kernel density ---
+    # Prefill (eager): large gaps between kernels (>10us median gap)
+    # Decode (CUDA Graph): tiny gaps (<5us median gap)
+    #
+    # Structure: [prefill kernels (sparse)] [transition gap] [decode kernels (dense)]
+    # Find the transition point: scan from start, when gap pattern changes from sparse to dense
 
-    # For each sampling position, find the nearest lm_head_kernel before it
-    lm_head_indices = set()
-    lm_head_kernel_name = lm_head_kernel  # e.g., "gemvt_op"
-    for si in sorted(sampling_indices):
-        for j in range(si - 1, max(si - 50, -1), -1):
-            if lm_head_kernel_name and events[j][2] == lm_head_kernel_name:
-                lm_head_indices.add(j)
-                break
-            elif not lm_head_kernel_name:
-                # Auto-detect: first gemv/gemm before sampling
-                if any(kw in events[j][2].lower() for kw in ["gemv", "gemm"]):
-                    lm_head_indices.add(j)
+    decode_encoder_ns = 0
+    prefill_encoder_ns = 0
+    total_lm_head_ns = 0
+    total_sampling_ns = 0
+    n_decode_steps = 0
+    n_prefill_steps = 0
+    lm_head_count = 0
+
+    for block in request_blocks:
+        if len(block) < 10:
+            continue
+
+        # Compute inter-kernel gaps
+        gaps = []
+        for i in range(1, len(block)):
+            gaps.append(block[i][0] - block[i - 1][2])
+
+        # Find transition: sliding window median gap
+        # Dense (decode) has median gap < 5us, sparse (prefill) has > 10us
+        window = min(50, len(gaps) // 4)
+        if window < 5:
+            # Too few kernels, treat all as decode
+            split_idx = 0
+        else:
+            split_idx = 0
+            for i in range(len(gaps) - window):
+                window_gaps = sorted(gaps[i:i + window])
+                median_gap = window_gaps[len(window_gaps) // 2]
+                if median_gap < 5000:  # < 5us median = decode region starts
+                    split_idx = i
                     break
 
-    # Mark non-encoder: lm_head + everything between lm_head and sampling (inclusive)
-    non_encoder_indices = set()
-    for si in sorted(sampling_indices):
-        # Find matching lm_head
-        lm_idx = None
-        for j in range(si - 1, max(si - 50, -1), -1):
-            if j in lm_head_indices:
-                lm_idx = j
-                break
-        if lm_idx is not None:
-            for k in range(lm_idx, si + 1):
-                non_encoder_indices.add(k)
-        else:
-            non_encoder_indices.add(si)
+        prefill_part = block[:split_idx] if split_idx > 0 else []
+        decode_part = block[split_idx:] if split_idx < len(block) else block
 
-    lm_head_ns = sum(events[i][1] for i in lm_head_indices)
-    lm_head_count = len(lm_head_indices)
-    sampling_ns = sum(events[i][1] for i in non_encoder_indices if i not in lm_head_indices)
+        # --- For each part, identify non-encoder (lm_head + sampling) ---
+        def classify_part(part):
+            enc_ns = 0; lm_ns = 0; samp_ns = 0; lm_cnt = 0
 
-    # Encoder
-    encoder_ns = total_ns - lm_head_ns - sampling_ns
-    n_fwd = lm_head_count or 1
-    n_requests = max(round(n_fwd / output_len), 1)
-    n_decode = n_requests * output_len
+            # Find sampling positions
+            samp_indices = set()
+            for i, (s, d, e, n) in enumerate(part):
+                if n in sampling_kernels:
+                    samp_indices.add(i)
 
-    # Prefill/decode split (heuristic: prefill 5x heavier)
-    prefill_weight = 5
-    total_w = n_decode + n_requests * prefill_weight
-    decode_enc = encoder_ns * n_decode / total_w
-    prefill_enc = encoder_ns * n_requests * prefill_weight / total_w
+            # For each sampling, walk backward to find lm_head
+            lm_indices = set()
+            non_enc_indices = set()
+            for si in sorted(samp_indices):
+                for j in range(si - 1, max(si - 50, -1), -1):
+                    if lm_head_kernel and part[j][3] == lm_head_kernel:
+                        lm_indices.add(j)
+                        break
+                    elif not lm_head_kernel and any(
+                            kw in part[j][3].lower() for kw in ["gemv", "gemm"]):
+                        lm_indices.add(j)
+                        break
 
-    decode_per_layer = decode_enc / max(n_decode, 1) / num_layers
-    prefill_per_layer = prefill_enc / max(n_requests, 1) / num_layers
+            # Mark lm_head → sampling range as non-encoder
+            for si in sorted(samp_indices):
+                lm_idx = None
+                for j in range(si - 1, max(si - 50, -1), -1):
+                    if j in lm_indices:
+                        lm_idx = j; break
+                start_idx = lm_idx if lm_idx is not None else si
+                for k in range(start_idx, si + 1):
+                    non_enc_indices.add(k)
+
+            for i, (s, d, e, n) in enumerate(part):
+                if i in lm_indices:
+                    lm_ns += d; lm_cnt += 1
+                elif i in non_enc_indices:
+                    samp_ns += d
+                else:
+                    enc_ns += d
+
+            n_fwd = len(samp_indices) or (lm_cnt or 0)
+            return enc_ns, lm_ns, samp_ns, lm_cnt, n_fwd
+
+        # Classify decode
+        if decode_part:
+            d_enc, d_lm, d_samp, d_lm_cnt, d_n_fwd = classify_part(decode_part)
+            decode_encoder_ns += d_enc
+            total_lm_head_ns += d_lm
+            total_sampling_ns += d_samp
+            lm_head_count += d_lm_cnt
+            n_decode_steps += d_n_fwd
+
+        # Classify prefill
+        if prefill_part:
+            p_enc, p_lm, p_samp, p_lm_cnt, p_n_fwd = classify_part(prefill_part)
+            prefill_encoder_ns += p_enc
+            total_lm_head_ns += p_lm
+            total_sampling_ns += p_samp
+            lm_head_count += p_lm_cnt
+            n_prefill_steps += p_n_fwd or 1
+
+    # Compute per-layer
+    n_requests = len([b for b in request_blocks if len(b) >= 10])
+    if n_decode_steps == 0:
+        n_decode_steps = n_requests * output_len
+    if n_prefill_steps == 0:
+        n_prefill_steps = n_requests
+
+    decode_per_layer = decode_encoder_ns / max(n_decode_steps * num_layers, 1)
+    prefill_per_layer = prefill_encoder_ns / max(n_prefill_steps * num_layers, 1)
+
+    total_encoder_ns = decode_encoder_ns + prefill_encoder_ns
 
     return {
         "decode_per_layer_ms": round(decode_per_layer / 1e6, 5),
         "prefill_per_layer_ms": round(prefill_per_layer / 1e6, 4),
-        "encoder_total_ms": round(encoder_ns / 1e6, 2),
-        "lm_head_total_ms": round(lm_head_ns / 1e6, 2),
-        "lm_head_per_call_us": round(lm_head_ns / max(lm_head_count, 1) / 1e3, 1),
+        "decode_encoder_total_ms": round(decode_encoder_ns / 1e6, 2),
+        "prefill_encoder_total_ms": round(prefill_encoder_ns / 1e6, 2),
+        "encoder_total_ms": round(total_encoder_ns / 1e6, 2),
+        "lm_head_total_ms": round(total_lm_head_ns / 1e6, 2),
+        "lm_head_per_call_us": round(total_lm_head_ns / max(lm_head_count, 1) / 1e3, 1),
+        "sampling_total_ms": round(total_sampling_ns / 1e6, 2),
         "n_requests": n_requests,
-        "n_decode": n_decode,
+        "n_decode_steps": n_decode_steps,
+        "n_prefill_steps": n_prefill_steps,
     }
 
 
