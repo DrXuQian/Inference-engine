@@ -102,6 +102,7 @@ def run_serve_mode(args):
     mml = args.max_model_len or (args.input_len + args.output_len + 64)
     env = os.environ.copy()
     env["TRITON_BACKENDS_IN_TREE"] = "1"
+    env["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
     server = subprocess.Popen(
         [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
