@@ -111,9 +111,7 @@ def run_serve_mode(args):
          "--trust-remote-code",
          "--no-enable-prefix-caching",
          "--gpu-memory-utilization", str(args.gpu_mem)],
-        env=env,
-        stdout=open("/tmp/generate_bench_server.log", "w"),
-        stderr=subprocess.STDOUT)
+        env=env)
 
     def cleanup():
         server.terminate()
