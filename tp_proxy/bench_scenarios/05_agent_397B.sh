@@ -3,7 +3,7 @@
 # Input: 100K tokens, Output: 30K tokens
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
-MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3.5-397B-A27B-GPTQ-Int4}
+MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3.5-397B-A17B-GPTQ-Int4}
 GPU_MEM=${GPU_MEM:-16}
 OUT=./results/05_agent_397B
 mkdir -p "$OUT"
