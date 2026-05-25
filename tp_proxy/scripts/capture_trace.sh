@@ -73,7 +73,9 @@ trap - EXIT
 # Export sqlite
 echo "[5/5] Exporting sqlite..."
 if [ "$PLATFORM" = "ppu" ]; then
-    asys export -o "$OUT_DIR/trace.sqlite" "$OUT_DIR/trace.report"
+    # asys saves as trace.report.asysrep
+    ASYS_REP=$(ls "$OUT_DIR/trace.report.asysrep" "$OUT_DIR/trace.report" 2>/dev/null | head -1)
+    asys export -o "$OUT_DIR/trace.sqlite" "$ASYS_REP"
 else
     nsys stats -r cuda_gpu_kern_sum --format csv --force-export=true \
         "$OUT_DIR/trace.nsys-rep" > /dev/null 2>&1
