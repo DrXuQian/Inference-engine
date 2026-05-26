@@ -15,19 +15,11 @@ echo "  Rerun TP=4 for Qwen3.5-397B-A17B"
 echo "  (fix: split_tp2.py now supports --tp-size)"
 echo "============================================"
 
-# --- Clean old (invalid) TP=4 split results ---
-for DIR in results/05_agent_397B/tp4 results/05b_agent_hit_397B/tp4; do
-    if [ -d "$DIR" ]; then
-        echo "Removing old invalid TP=4 results: $DIR"
-        rm -rf "$DIR"
-    fi
-done
-
 # =============================================
 # 1. Split + Bench: 05_agent_397B TP=4
 # =============================================
 echo ""
-echo "=== [1/4] Bench: 05_agent_397B TP=4 (100K input, 30K output) ==="
+echo "=== [1/3] Bench: 05_agent_397B TP=4 (100K input, 30K output) ==="
 TP_DIR=./results/05_agent_397B/tp4
 mkdir -p "$TP_DIR"
 
@@ -49,7 +41,7 @@ python3 "$SCRIPT_DIR/auto_bench.py" \
 # 2. Split + Bench: 05b_agent_hit_397B TP=4
 # =============================================
 echo ""
-echo "=== [2/4] Bench: 05b_agent_hit_397B TP=4 (20K input, 30K output) ==="
+echo "=== [2/3] Bench: 05b_agent_hit_397B TP=4 (20K input, 30K output) ==="
 TP_DIR=./results/05b_agent_hit_397B/tp4
 mkdir -p "$TP_DIR"
 
@@ -68,19 +60,10 @@ python3 "$SCRIPT_DIR/auto_bench.py" \
     --output-json "$TP_DIR/bench.json"
 
 # =============================================
-# 3. Comm: TP=4 (skip — requires multi-GPU, run separately)
+# 3. Trace + Compensate: TP=4 (comm.json already exists)
 # =============================================
 echo ""
-echo "=== [3/4] Comm bench: SKIPPED (requires $TP GPUs) ==="
-echo "  Run separately on multi-GPU node:"
-echo "    bash $SCRIPT_DIR/comm_bench.sh <model> $TP 102400 ./results/05_agent_397B/tp4/comm.json"
-echo "    bash $SCRIPT_DIR/comm_bench.sh <model> $TP 20480 ./results/05b_agent_hit_397B/tp4/comm.json"
-
-# =============================================
-# 4. Trace + Compensate: TP=4
-# =============================================
-echo ""
-echo "=== [4/4] Trace + Compensate: TP=4 ==="
+echo "=== [3/3] Trace + Compensate: TP=4 ==="
 
 for SCENARIO in 05_agent_397B 05b_agent_hit_397B; do
     DIR=./results/$SCENARIO/tp4
