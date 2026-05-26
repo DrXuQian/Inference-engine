@@ -238,162 +238,73 @@ def measure_comm_trace(sqlite_path: str, num_layers: int) -> dict:
 # c) Encoder block from trace
 # ---------------------------------------------------------------------------
 
-def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
-                          lm_head_kernel: str | None,
-                          sampling_kernels: set[str]) -> dict | None:
-    """Extract encoder block time from trace.
+def measure_tail_from_trace(sqlite_path: str,
+                            lm_head_kernel: str) -> dict | None:
+    """Extract tail time (lm_head + sampling) per decode step from trace.
 
-    Timeline structure (from end, working backward):
-      ... [prefill (eager, sparse)] [gap] [decode × output_len (CUDA Graph, dense)] [gap] ...
+    Simple approach:
+      1. From the END of the trace, walk backward to find the last lm_head kernel
+      2. Sum kernel durations from that kernel to the end = tail_per_step
+      3. This tail is subtracted from raw TPOT/TTFT, then encoder is scaled up
 
-    Decode = dense kernel region (inter-kernel gap < 5us)
-    Prefill = sparse kernel region (inter-kernel gap > 10us)
-    Request boundary = large gap (> 500us)
+    The lm_head kernel is matched by SUBSTRING (e.g. "gemvt_op" matches
+    "void gemvt_op<...>").
     """
     conn = sqlite3.connect(sqlite_path)
     cursor = conn.cursor()
 
+    # Find kernel table
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
     kt = ""
     for r in cursor.fetchall():
-        if "KERNEL" in r[0] and "ACTIVITY" in r[0]:
+        if "KERNEL" in r[0].upper() and "ACTIVITY" in r[0].upper():
             kt = r[0]; break
     if not kt:
+        conn.close()
         return None
 
     cursor.execute(f"""
         SELECT k.start, k."end" - k.start AS dur, k."end", s.value AS name
-        FROM {kt} k JOIN StringIds s ON k.demangledName = s.id
+        FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
         ORDER BY k.start
     """)
     all_events = [(r[0], r[1], r[2], r[3]) for r in cursor.fetchall()]
     conn.close()
 
-    # Find serving phase (after largest idle gap)
-    t_min = all_events[0][0]
-    bins = defaultdict(int)
-    for s, d, e, n in all_events:
-        bins[(s - t_min) // 1_000_000_000] += 1
-    max_bin = max(bins.keys()) if bins else 0
-    best_start = best_len = gap_start = gap_len = 0
-    in_gap = False
-    for b in range(max_bin + 1):
-        if bins[b] == 0:
-            if not in_gap: gap_start = b; in_gap = True; gap_len = 1
-            else: gap_len += 1
-        else:
-            if in_gap and gap_len > best_len:
-                best_start = gap_start; best_len = gap_len
-            in_gap = False
-    serve_start = t_min + (best_start + best_len) * 1_000_000_000
-
-    events = [(s, d, e, n) for s, d, e, n in all_events if s >= serve_start]
-    if not events:
+    if not all_events:
         return None
 
-    # --- Split into request blocks (separated by large gaps > 500us) ---
-    request_blocks = []
-    current = [events[0]]
-    for ev in events[1:]:
-        gap = ev[0] - current[-1][2]  # start - prev_end
-        if gap > 500_000:  # 500us = new request block
-            request_blocks.append(current)
-            current = [ev]
-        else:
-            current.append(ev)
-    if current:
-        request_blocks.append(current)
+    # Walk backward from end to find last lm_head kernel (substring match)
+    tail_start_idx = None
+    for i in range(len(all_events) - 1, -1, -1):
+        if lm_head_kernel in all_events[i][3]:
+            tail_start_idx = i
+            break
 
-    # --- Split each request block into forward passes, then for each pass:
-    #     walk backward from end to find last gemvt_op (lm_head).
-    #     gemvt_op → end = lm_head + sampling (cut)
-    #     start → gemvt_op = encoder kernels
-    #     Same logic for both prefill and decode.
-    #
-    # Prefill vs decode split: first sampling kernel marks end of prefill.
+    if tail_start_idx is None:
+        # Debug: print last 10 kernel names to help diagnose
+        print("  WARNING: lm_head kernel not found by substring match")
+        print(f"  Looking for: '{lm_head_kernel}'")
+        print(f"  Last 10 kernels:")
+        for ev in all_events[-10:]:
+            print(f"    {ev[3][:80]}  dur={ev[1]/1e3:.1f}us")
+        return None
 
-    decode_encoder_ns = 0
-    prefill_encoder_ns = 0
-    total_tail_ns = 0  # lm_head + sampling combined
-    n_decode_steps = 0
-    n_prefill_steps = 0
+    # Tail = sum of kernel durations from lm_head to end
+    tail_kernels = all_events[tail_start_idx:]
+    tail_kernel_ns = sum(d for _, d, _, _ in tail_kernels)
+    # Also measure wall clock span
+    tail_wall_ns = tail_kernels[-1][2] - tail_kernels[0][0]
 
-    for block in request_blocks:
-        if len(block) < 10:
-            continue
-
-        # Split prefill vs decode at first sampling kernel's lm_head
-        first_samp_idx = None
-        for i, (s, d, e, n) in enumerate(block):
-            if n in sampling_kernels:
-                first_samp_idx = i
-                break
-
-        if first_samp_idx is None:
-            prefill_end = 0
-        else:
-            # Walk backward from first sampling to find its gemvt_op
-            prefill_end = first_samp_idx + 1  # include first sampling in prefill pass
-            for j in range(first_samp_idx, -1, -1):
-                if block[j][3] == lm_head_kernel:
-                    prefill_end = j  # cut starts at lm_head
-                    break
-
-        prefill_part = block[:prefill_end] if prefill_end > 0 else []
-        decode_part = block[prefill_end:] if prefill_end < len(block) else []
-
-        # --- For a list of kernels, cut tail from last gemvt_op onward ---
-        def encoder_time(part):
-            if not part:
-                return 0, 0, 0
-            # Walk backward to find last lm_head_kernel
-            cut_idx = len(part)  # default: no cut, all encoder
-            for i in range(len(part) - 1, -1, -1):
-                if part[i][3] == lm_head_kernel:
-                    cut_idx = i
-                    break
-            enc_ns = sum(d for _, d, _, _ in part[:cut_idx])
-            tail_ns = sum(d for _, d, _, _ in part[cut_idx:])
-            # Count forward passes = number of sampling kernels
-            n_fwd = sum(1 for _, _, _, n in part if n in sampling_kernels)
-            return enc_ns, tail_ns, max(n_fwd, 1)
-
-        # Prefill: already split before lm_head, so NO lm_head in prefill_part.
-        # All kernels are pure encoder (including linear attn gemvt_op).
-        # Do NOT apply tail-cut here.
-        if prefill_part:
-            prefill_encoder_ns += sum(d for _, d, _, _ in prefill_part)
-            n_prefill_steps += 1
-
-        # Decode: multiple forward passes
-        if decode_part:
-            d_enc, d_tail, d_fwd = encoder_time(decode_part)
-            decode_encoder_ns += d_enc
-            total_tail_ns += d_tail
-            n_decode_steps += d_fwd
-
-    # Compute per-layer
-    n_requests = len([b for b in request_blocks if len(b) >= 10])
-    if n_decode_steps == 0:
-        n_decode_steps = n_requests * output_len
-    if n_prefill_steps == 0:
-        n_prefill_steps = n_requests
-
-    decode_per_layer = decode_encoder_ns / max(n_decode_steps * num_layers, 1)
-    prefill_per_layer = prefill_encoder_ns / max(n_prefill_steps * num_layers, 1)
-
-    total_encoder_ns = decode_encoder_ns + prefill_encoder_ns
+    print(f"  Last lm_head kernel: '{all_events[tail_start_idx][3][:60]}'")
+    print(f"  Tail kernels: {len(tail_kernels)}")
+    print(f"  Tail kernel time: {tail_kernel_ns / 1e6:.4f} ms")
+    print(f"  Tail wall time:   {tail_wall_ns / 1e6:.4f} ms")
 
     return {
-        "decode_per_layer_ms": round(decode_per_layer / 1e6, 5),
-        "prefill_per_layer_ms": round(prefill_per_layer / 1e6, 4),
-        "decode_encoder_total_ms": round(decode_encoder_ns / 1e6, 2),
-        "prefill_encoder_total_ms": round(prefill_encoder_ns / 1e6, 2),
-        "encoder_total_ms": round(total_encoder_ns / 1e6, 2),
-        "tail_total_ms": round(total_tail_ns / 1e6, 2),
-        "n_requests": n_requests,
-        "n_decode_steps": n_decode_steps,
-        "n_prefill_steps": n_prefill_steps,
+        "tail_per_step_ms": round(tail_kernel_ns / 1e6, 4),
+        "tail_wall_ms": round(tail_wall_ns / 1e6, 4),
+        "tail_kernel_count": len(tail_kernels),
     }
 
 
@@ -491,29 +402,16 @@ def main():
         comm = {"total_per_step_ms": 0, "method": "none"}
     print()
 
-    # === c) Encoder block ===
-    enc = None
-    if pruned < original and args.asys_sqlite:
-        print("=== c) Encoder block (from trace) ===")
-        enc = measure_encoder_trace(args.asys_sqlite, pruned, output_len,
-                                    args.lm_head_kernel, sampling_names)
-        if enc:
-            removed = original - pruned
-            print(f"  Decode encoder total: {enc['decode_encoder_total_ms']:.2f} ms "
-                  f"({enc['n_decode_steps']} steps)")
-            print(f"  Decode per_layer: {enc['decode_per_layer_ms']:.5f} ms")
-            print(f"  Prefill encoder total: {enc['prefill_encoder_total_ms']:.2f} ms "
-                  f"({enc['n_prefill_steps']} steps)")
-            print(f"  Prefill per_layer: {enc['prefill_per_layer_ms']:.4f} ms")
-            print(f"  Tail (lm_head+sampling) total: {enc['tail_total_ms']:.2f} ms")
-            print(f"  Compensation ({removed} layers):")
-            print(f"    TPOT: +{removed * enc['decode_per_layer_ms']:.3f} ms")
-            print(f"    TTFT: +{removed * enc['prefill_per_layer_ms']:.3f} ms")
-    elif pruned < original:
-        print("=== c) Encoder block: no asys trace, skip ===")
-        print("    (provide --asys-sqlite for encoder block compensation)")
-    else:
-        print("=== c) Encoder block: no pruning, skip ===")
+    # === c) Tail from trace (lm_head + sampling per step) ===
+    tail = None
+    if args.asys_sqlite:
+        print("=== c) Tail from trace (lm_head + sampling) ===")
+        tail = measure_tail_from_trace(args.asys_sqlite, args.lm_head_kernel)
+        if tail:
+            print(f"  → tail_per_step: {tail['tail_per_step_ms']:.4f} ms")
+    if not tail:
+        print("=== c) Tail: no trace or kernel not found, using 0 ===")
+        tail = {"tail_per_step_ms": 0}
     print()
 
     # === d) Apply ===
@@ -533,25 +431,30 @@ def main():
         raw_tpot = r["tpot_median_ms"]
         output_tokens = r.get("output_tokens", output_len)
 
-        # lm_head delta (replicated lm_head: proxy has full vocab, real also full)
-        comp_tpot = raw_tpot - lm["decode_delta_ms"] + comm["total_per_step_ms"]
-        pf_delta = lm["prefill_deltas_ms"].get(str(il), lm["decode_delta_ms"])
-        comp_ttft = raw_ttft - pf_delta
+        # Approach: subtract tail (lm_head + sampling), scale encoder, add back
+        # raw_TPOT = encoder_per_step + tail + overhead
+        # raw_TTFT = prefill_encoder + tail + overhead
+        tail_ms = tail["tail_per_step_ms"]
+        layer_scale = original / pruned if pruned > 0 else 1
 
-        # Linear attention: proxy has TP-split heads, real also TP-split
-        # but proxy runs on 1 GPU so gemvt sees full hidden dim
-        # Scale from lm_head delta × (attn_dim / vocab) per linear attn layer
+        decode_encoder = raw_tpot - tail_ms
+        prefill_encoder = raw_ttft - tail_ms
+
+        comp_tpot = decode_encoder * layer_scale + tail_ms + comm["total_per_step_ms"]
+        comp_ttft = prefill_encoder * layer_scale + tail_ms
+
+        # lm_head TP delta (replicated lm_head)
+        comp_tpot -= lm["decode_delta_ms"]
+        pf_delta = lm["prefill_deltas_ms"].get(str(il), lm["decode_delta_ms"])
+        comp_ttft -= pf_delta
+
+        # Linear attention TP delta (scaled from lm_head)
         n_lin_layers = round(original * lin_ratio)
         lin_decode = lm.get("lin_attn_decode_delta_per_layer_ms", 0)
         lin_prefill = lm.get("lin_attn_prefill_deltas_per_layer_ms", {}).get(
             str(il), lin_decode)
         comp_tpot -= n_lin_layers * lin_decode
         comp_ttft -= n_lin_layers * lin_prefill
-
-        if enc and pruned < original:
-            removed = original - pruned
-            comp_tpot += removed * enc["decode_per_layer_ms"]
-            comp_ttft += removed * enc["prefill_per_layer_ms"]
 
         comp_total = comp_ttft + (output_tokens - 1) * comp_tpot
 
@@ -573,7 +476,8 @@ def main():
         "original_layers": original,
         "lm_head": lm,
         "communication": comm,
-        "encoder_block": enc,
+        "tail": tail,
+        "layer_scale": original / pruned if pruned > 0 else 1,
         "results": compensated,
     }
     with open(args.output_json, "w") as f:
