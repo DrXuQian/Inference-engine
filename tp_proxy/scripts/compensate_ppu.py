@@ -358,11 +358,11 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
             n_fwd = sum(1 for _, _, _, n in part if n in sampling_kernels)
             return enc_ns, tail_ns, max(n_fwd, 1)
 
-        # Prefill: one forward pass
+        # Prefill: already split before lm_head, so NO lm_head in prefill_part.
+        # All kernels are pure encoder (including linear attn gemvt_op).
+        # Do NOT apply tail-cut here.
         if prefill_part:
-            p_enc, p_tail, _ = encoder_time(prefill_part)
-            prefill_encoder_ns += p_enc
-            total_tail_ns += p_tail
+            prefill_encoder_ns += sum(d for _, d, _, _ in prefill_part)
             n_prefill_steps += 1
 
         # Decode: multiple forward passes
