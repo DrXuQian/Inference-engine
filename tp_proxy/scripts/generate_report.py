@@ -4,6 +4,10 @@ Generate performance report table from compensated_ppu.json results.
 
 Usage:
     python generate_report.py [--results-dir ./results] [--format markdown|csv]
+    python generate_report.py --results-dir ./results \
+        --peak-flops 312 --peak-bw 2039
+        # --peak-flops: single GPU peak FP16 TFLOPS (e.g. A100=312, H100=990)
+        # --peak-bw:    single GPU peak memory bandwidth in GB/s (e.g. A100=2039, H100=3350)
 """
 
 import argparse
@@ -270,9 +274,9 @@ def main():
     ap.add_argument("--results-dir", default="./results")
     ap.add_argument("--format", choices=["markdown", "csv"], default="markdown")
     ap.add_argument("--peak-flops", type=float, default=0,
-                    help="Peak TFLOPS (FP16) per GPU for MFU calculation")
+                    help="Single GPU peak FP16 TFLOPS (e.g. A100=312, H100=990)")
     ap.add_argument("--peak-bw", type=float, default=0,
-                    help="Peak memory bandwidth GB/s per GPU for BW util")
+                    help="Single GPU peak memory bandwidth GB/s (e.g. A100=2039, H100=3350)")
     args = ap.parse_args()
     rd = args.results_dir
     fmt = args.format
