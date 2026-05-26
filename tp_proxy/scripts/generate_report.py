@@ -469,6 +469,11 @@ def main():
                 model_dirs = _glob.glob(os.path.join(base, "model", "split", "rank_0"))
             cfg = load_model_config(model_dirs[0]) if model_dirs else None
 
+            # Use original (full) layer count, not pruned
+            if cfg and comp:
+                orig_layers = comp.get("original_layers", cfg["num_hidden_layers"])
+                cfg["num_hidden_layers"] = orig_layers
+
             mfu_str = "N/A"
             bw_str = "N/A"
             w_str = "N/A"
