@@ -179,26 +179,29 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     n_full_layers, n_lin_layers = count_full_attn_layers(cfg)
 
     # --- Weights per layer (active) ---
-    # Full attention
+    # GPTQ quantizes all linear layers (attn, expert, shared expert)
+    # Only norms, embeddings, router are bf16
+
+    # Full attention (quantized)
     q_dim = n_heads * head_dim * (2 if has_gate else 1)
     kv_dim = n_kv * head_dim
     attn_params_full = (q_dim * H + 2 * kv_dim * H + n_heads * head_dim * H)
-    attn_bytes_full = attn_params_full * bpp_f / tp_size  # attn usually bf16
+    attn_bytes_full = attn_params_full * bpp_q / tp_size
 
-    # Linear attention
+    # Linear attention (quantized)
     lin_k = cfg.get("linear_num_key_heads", 0) * cfg.get("linear_key_head_dim", 0)
     lin_v = cfg.get("linear_num_value_heads", 0) * cfg.get("linear_value_head_dim", 0)
     if lin_k > 0:
         lin_params = (lin_k * 2 + lin_v) * H + lin_v * H + lin_v * H  # qkv + z + out
-        attn_bytes_lin = lin_params * bpp_f / tp_size
+        attn_bytes_lin = lin_params * bpp_q / tp_size
     else:
         attn_bytes_lin = attn_bytes_full
 
     # MoE / FFN
     if n_experts > 0 and n_active > 0:
         expert_bytes = n_active * 3 * H * moe_inter * bpp_q / tp_size
-        router_bytes = n_experts * H * 2  # bf16
-        shared_bytes = 3 * H * shared_inter * bpp_f / tp_size if shared_inter > 0 else 0
+        router_bytes = n_experts * H * bpp_f  # router always bf16
+        shared_bytes = 3 * H * shared_inter * bpp_q / tp_size if shared_inter > 0 else 0
         ffn_bytes = expert_bytes + router_bytes + shared_bytes
     else:
         ffn_bytes = 3 * H * dense_inter * bpp_q / tp_size
