@@ -80,17 +80,25 @@ if [ "$PLATFORM" = "ppu" ]; then
     # asys saves as trace.report.asysrep
     ASYS_REP=""
     for i in 1 2 3 4 5; do
-        ASYS_REP=$(ls "$OUT_DIR/trace.report.asysrep" "$OUT_DIR/trace.report" 2>/dev/null | head -1)
+        if [ -f "$OUT_DIR/trace.report.asysrep" ]; then
+            ASYS_REP="$OUT_DIR/trace.report.asysrep"
+        elif [ -f "$OUT_DIR/trace.report" ]; then
+            ASYS_REP="$OUT_DIR/trace.report"
+        fi
         if [ -n "$ASYS_REP" ]; then break; fi
         echo "       Waiting for asys report file... (attempt $i)"
         sleep 3
     done
     if [ -z "$ASYS_REP" ]; then
         echo "ERROR: asys report file not found in $OUT_DIR"
+        ls -la "$OUT_DIR/" || true
         exit 1
     fi
     echo "       Found: $ASYS_REP"
-    asys export --force-overwrite true -o "$OUT_DIR/trace.sqlite" "$ASYS_REP"
+    asys export --force-overwrite true -o "$OUT_DIR/trace.sqlite" "$ASYS_REP" || {
+        echo "ERROR: asys export failed (exit code $?)"
+        exit 1
+    }
 else
     nsys stats -r cuda_gpu_kern_sum --format csv --force-export=true \
         "$OUT_DIR/trace.nsys-rep" > /dev/null 2>&1
