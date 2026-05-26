@@ -71,6 +71,7 @@ def load_model_config(model_dir: str) -> dict | None:
                 "linear_value_head_dim": tc.get("linear_value_head_dim", 0),
                 "attn_output_gate": tc.get("attn_output_gate", False),
                 "quant_bits": qc.get("bits", 16),
+                "quant_dynamic": qc.get("dynamic", {}),
             }
     return None
 
@@ -173,27 +174,39 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     dense_inter = cfg["intermediate_size"]
 
     quant_bits = cfg["quant_bits"]
-    bpp_q = quant_bits / 8 + 0.05 if quant_bits < 16 else 2  # quantized
+    bpp_q = quant_bits / 8 + 0.05 if quant_bits < 16 else 2  # quantized weight
     bpp_f = 2  # bf16
+
+    # Determine what's quantized from dynamic config (same logic as bandwidth_util.py)
+    quant_dynamic = cfg.get("quant_dynamic", {})
+    attn_quantized = True
+    shared_quantized = True
+    for pattern in quant_dynamic:
+        pl = pattern.lower()
+        if pl.startswith("-:"):
+            if "attn" in pl:
+                attn_quantized = False
+            if "shared_expert" in pl:
+                shared_quantized = False
+
+    bpp_attn = bpp_q if attn_quantized else bpp_f
+    bpp_shared = bpp_q if shared_quantized else bpp_f
 
     n_full_layers, n_lin_layers = count_full_attn_layers(cfg)
 
     # --- Weights per layer (active) ---
-    # GPTQ quantizes all linear layers (attn, expert, shared expert)
-    # Only norms, embeddings, router are bf16
-
-    # Full attention (quantized)
+    # Full attention
     q_dim = n_heads * head_dim * (2 if has_gate else 1)
     kv_dim = n_kv * head_dim
     attn_params_full = (q_dim * H + 2 * kv_dim * H + n_heads * head_dim * H)
-    attn_bytes_full = attn_params_full * bpp_q / tp_size
+    attn_bytes_full = attn_params_full * bpp_attn / tp_size
 
-    # Linear attention (quantized)
+    # Linear attention
     lin_k = cfg.get("linear_num_key_heads", 0) * cfg.get("linear_key_head_dim", 0)
     lin_v = cfg.get("linear_num_value_heads", 0) * cfg.get("linear_value_head_dim", 0)
     if lin_k > 0:
         lin_params = (lin_k * 2 + lin_v) * H + lin_v * H + lin_v * H  # qkv + z + out
-        attn_bytes_lin = lin_params * bpp_q / tp_size
+        attn_bytes_lin = lin_params * bpp_attn / tp_size
     else:
         attn_bytes_lin = attn_bytes_full
 
@@ -201,7 +214,7 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     if n_experts > 0 and n_active > 0:
         expert_bytes = n_active * 3 * H * moe_inter * bpp_q / tp_size
         router_bytes = n_experts * H * bpp_f  # router always bf16
-        shared_bytes = 3 * H * shared_inter * bpp_q / tp_size if shared_inter > 0 else 0
+        shared_bytes = 3 * H * shared_inter * bpp_shared / tp_size if shared_inter > 0 else 0
         ffn_bytes = expert_bytes + router_bytes + shared_bytes
     else:
         ffn_bytes = 3 * H * dense_inter * bpp_q / tp_size
