@@ -174,7 +174,7 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     dense_inter = cfg["intermediate_size"]
 
     quant_bits = cfg["quant_bits"]
-    bpp_q = quant_bits / 8 + 0.05 if quant_bits < 16 else 2  # quantized weight
+    bpp_q = quant_bits / 8 if quant_bits < 16 else 2  # quantized: int4 = 0.5 bytes
     bpp_f = 2  # bf16
 
     # Determine what's quantized from dynamic config (same logic as bandwidth_util.py)
@@ -229,13 +229,23 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     total_weight += H * 2  # final norm
 
     # --- KV cache ---
-    # Only full attention layers have KV cache
-    # Per layer: read K[seq_len, n_kv_heads/tp, head_dim] + V[same], bf16
-    # When tp > n_kv, KV heads are replicated (each rank has all n_kv heads)
-    # When tp <= n_kv, KV heads are split (each rank has n_kv/tp heads)
+    # Full attention: KV grows with seq_len
+    #   Per layer = 2(K+V) × kv_heads_per_rank × head_dim × seq_len × 2 (bf16)
     kv_heads_per_rank = n_kv if tp_size > n_kv else n_kv // tp_size
-    kv_per_layer = 2 * kv_heads_per_rank * head_dim * seq_len * 2  # K + V, bf16
-    total_kv = n_full_layers * kv_per_layer
+    full_kv_per_layer = 2 * kv_heads_per_rank * head_dim * seq_len * 2
+    total_full_kv = n_full_layers * full_kv_per_layer
+
+    # Linear attention: fixed recurrent state S = K^T × V (seq-independent)
+    #   Per layer = qk_heads × key_dim × key_dim × 2 (bf16)
+    lin_qk_heads = cfg.get("linear_num_key_heads", 0)
+    lin_key_dim = cfg.get("linear_key_head_dim", 0)
+    if lin_qk_heads > 0 and lin_key_dim > 0:
+        lin_state_per_layer = lin_qk_heads * lin_key_dim * lin_key_dim * 2
+    else:
+        lin_state_per_layer = 0
+    total_lin_kv = n_lin_layers * lin_state_per_layer
+
+    total_kv = total_full_kv + total_lin_kv
 
     return total_weight + total_kv, total_weight, total_kv
 
@@ -530,9 +540,10 @@ def main():
                     mfu_str = f"{mfu:.1f}%"
 
                 if args.peak_bw > 0:
-                    # KV cache seq_len = input_len (decode start)
+                    # avg_seq_len during decode = input_len + output_len/2
+                    avg_seq = input_len + output_len // 2
                     total_bytes, weight_bytes, kv_bytes = compute_decode_bytes(
-                        cfg, input_len, tp)
+                        cfg, avg_seq, tp)
                     tpot_s = m["tpot"] / 1000
                     bw_used = total_bytes / tpot_s / 1e9 if tpot_s > 0 else 0
                     bw_util = bw_used / args.peak_bw * 100
