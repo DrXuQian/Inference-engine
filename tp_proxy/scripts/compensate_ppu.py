@@ -48,10 +48,24 @@ def load_model_config(model_dir: str) -> dict:
     with open(os.path.join(model_dir, "config.json")) as f:
         cfg = json.load(f)
     tc = cfg.get("text_config", cfg)
+    num_heads = tc.get("num_attention_heads", 0)
+    head_dim = tc.get("head_dim", 0)
+    if not head_dim and num_heads:
+        head_dim = tc["hidden_size"] // num_heads
+    # Attention cycle: e.g. [lin, lin, lin, full] → 3/4 are linear
+    attn_pattern = tc.get("interleave_attn_pattern", None)
+    if attn_pattern:
+        n_lin = sum(1 for x in attn_pattern if x != "full")
+        lin_ratio = n_lin / len(attn_pattern)
+    else:
+        lin_ratio = 0.0  # no linear attention layers
     return {
         "hidden_size": tc["hidden_size"],
         "vocab_size": tc["vocab_size"],
         "num_hidden_layers": tc["num_hidden_layers"],
+        "num_attention_heads": num_heads,
+        "head_dim": head_dim,
+        "lin_attn_ratio": lin_ratio,
     }
 
 
@@ -69,10 +83,20 @@ def load_meta(model_dir: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def measure_lm_head(hidden: int, vocab: int, tp_size: int,
-                    input_lens: list[int]) -> dict:
+                    input_lens: list[int],
+                    num_heads: int = 0, head_dim: int = 0,
+                    lin_attn_ratio: float = 0.0) -> dict:
+    """Measure lm_head delta and estimate linear attention delta by scaling.
+
+    lm_head gemvt:   [1, hidden] × [hidden, vocab]
+    lin attn gemvt:  [1, hidden] × [hidden, num_heads * head_dim]
+    scale = num_heads * head_dim / vocab
+    """
     if tp_size <= 1:
         return {"decode_delta_ms": 0,
-                "prefill_deltas_ms": {str(il): 0 for il in input_lens}}
+                "prefill_deltas_ms": {str(il): 0 for il in input_lens},
+                "lin_attn_decode_delta_per_layer_ms": 0,
+                "lin_attn_prefill_deltas_per_layer_ms": {str(il): 0 for il in input_lens}}
 
     import torch
     device, dtype = "cuda", torch.bfloat16
@@ -98,8 +122,18 @@ def measure_lm_head(hidden: int, vocab: int, tp_size: int,
     for il in input_lens:
         prefill_deltas[il] = bench_mm(il, hidden, vocab) - bench_mm(il, hidden, vocab_half)
 
+    # Linear attention: scale down from lm_head delta
+    # lm_head output dim = vocab, lin attn output dim = num_heads * head_dim
+    lin_attn_dim = num_heads * head_dim
+    scale = lin_attn_dim / vocab if vocab > 0 and lin_attn_dim > 0 else 0
+    lin_decode_delta = decode_delta * scale
+    lin_prefill_deltas = {il: d * scale for il, d in prefill_deltas.items()}
+
     return {"decode_delta_ms": round(decode_delta, 4),
-            "prefill_deltas_ms": {str(k): round(v, 4) for k, v in prefill_deltas.items()}}
+            "prefill_deltas_ms": {str(k): round(v, 4) for k, v in prefill_deltas.items()},
+            "lin_attn_decode_delta_per_layer_ms": round(lin_decode_delta, 6),
+            "lin_attn_prefill_deltas_per_layer_ms": {str(k): round(v, 6) for k, v in lin_prefill_deltas.items()},
+            "lin_attn_scale": round(scale, 6)}
 
 
 # ---------------------------------------------------------------------------
@@ -411,20 +445,35 @@ def main():
 
     sampling_names = set(k.strip() for k in args.sampling_kernels.split(","))
 
-    print(f"Model: hidden={hidden}, vocab={vocab}")
+    num_heads = cfg["num_attention_heads"]
+    head_dim_val = cfg["head_dim"]
+    lin_ratio = cfg["lin_attn_ratio"]
+
+    print(f"Model: hidden={hidden}, vocab={vocab}, heads={num_heads}, "
+          f"head_dim={head_dim_val}, lin_ratio={lin_ratio:.2f}")
     print(f"Layers: {pruned} pruned / {original} original, TP={tp_size}")
     print()
 
-    # === a) LM head ===
+    # === a) LM head + linear attention (torch.mm, scaled) ===
     if tp_size > 1:
-        print("=== a) LM head (torch.mm) ===")
-        lm = measure_lm_head(hidden, vocab, tp_size, input_lens)
-        print(f"  Decode delta: {lm['decode_delta_ms']:.3f} ms")
+        print("=== a) LM head + linear attention (torch.mm) ===")
+        lm = measure_lm_head(hidden, vocab, tp_size, input_lens,
+                             num_heads, head_dim_val, lin_ratio)
+        print(f"  LM head decode delta: {lm['decode_delta_ms']:.3f} ms")
         for il, d in lm["prefill_deltas_ms"].items():
-            print(f"  Prefill delta (input={il}): {d:.3f} ms")
+            print(f"  LM head prefill delta (input={il}): {d:.3f} ms")
+        print(f"  Linear attn scale: {lm['lin_attn_scale']:.6f} "
+              f"({num_heads}×{head_dim_val}/{vocab})")
+        print(f"  Linear attn decode delta/layer: {lm['lin_attn_decode_delta_per_layer_ms']:.6f} ms")
+        n_lin_layers = round(original * lin_ratio)
+        print(f"  Linear attn layers: {n_lin_layers}/{original}")
+        print(f"  Total lin attn decode delta: "
+              f"{n_lin_layers * lm['lin_attn_decode_delta_per_layer_ms']:.3f} ms")
     else:
         print("=== a) LM head: TP=1, skip ===")
-        lm = {"decode_delta_ms": 0, "prefill_deltas_ms": {}}
+        lm = {"decode_delta_ms": 0, "prefill_deltas_ms": {},
+              "lin_attn_decode_delta_per_layer_ms": 0,
+              "lin_attn_prefill_deltas_per_layer_ms": {}}
     print()
 
     # === b) Communication (read from comm.json) ===
@@ -484,9 +533,20 @@ def main():
         raw_tpot = r["tpot_median_ms"]
         output_tokens = r.get("output_tokens", output_len)
 
+        # lm_head delta (replicated lm_head: proxy has full vocab, real also full)
         comp_tpot = raw_tpot - lm["decode_delta_ms"] + comm["total_per_step_ms"]
         pf_delta = lm["prefill_deltas_ms"].get(str(il), lm["decode_delta_ms"])
         comp_ttft = raw_ttft - pf_delta
+
+        # Linear attention: proxy has TP-split heads, real also TP-split
+        # but proxy runs on 1 GPU so gemvt sees full hidden dim
+        # Scale from lm_head delta × (attn_dim / vocab) per linear attn layer
+        n_lin_layers = round(original * lin_ratio)
+        lin_decode = lm.get("lin_attn_decode_delta_per_layer_ms", 0)
+        lin_prefill = lm.get("lin_attn_prefill_deltas_per_layer_ms", {}).get(
+            str(il), lin_decode)
+        comp_tpot -= n_lin_layers * lin_decode
+        comp_ttft -= n_lin_layers * lin_prefill
 
         if enc and pruned < original:
             removed = original - pruned
