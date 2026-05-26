@@ -69,9 +69,8 @@ def load_config(model_dir: str) -> dict:
 def bytes_per_param(quant_bits: int, is_quantized: bool) -> float:
     """Bytes per parameter based on quantization."""
     if is_quantized:
-        # GPTQ: qweight + scales + qzeros ≈ bits/8 + overhead
-        # For int4: 0.5 bytes for weight + ~0.03 bytes for scales/zeros
-        return quant_bits / 8 + 0.05
+        # GPTQ int4: 0.5 bytes per param
+        return quant_bits / 8
     else:
         return 2  # bf16
 

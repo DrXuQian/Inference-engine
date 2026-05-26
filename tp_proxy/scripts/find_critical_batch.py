@@ -58,10 +58,6 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
     n = max(num_prompts, concurrency + 2)
 
     cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.run_batch_benchmark",
-    ]
-    # Fall back to vllm bench serve
-    cmd = [
         "vllm", "bench", "serve",
         "--model", model,
         "--base-url", base_url,

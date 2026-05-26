@@ -288,8 +288,8 @@ def main():
         raw_tpot = r["tpot_median_ms"]
         output_tokens = r.get("output_tokens", output_len)
 
-        decode_encoder = raw_tpot - tail_ms
-        prefill_encoder = raw_ttft - tail_ms
+        decode_encoder = max(raw_tpot - tail_ms, 0)
+        prefill_encoder = max(raw_ttft - tail_ms, 0)
 
         comp_tpot = decode_encoder * layer_scale + tail_comp + decode_comm
         comp_ttft = prefill_encoder * layer_scale + tail_comp + prefill_comm

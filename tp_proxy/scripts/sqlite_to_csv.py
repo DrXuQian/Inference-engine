@@ -57,14 +57,9 @@ def main():
     out_dir = args.output_dir or os.path.dirname(args.sqlite) or "."
     os.makedirs(out_dir, exist_ok=True)
 
-    # Check if StringIds table exists for name resolution
-    has_string_ids = "StringIds" in [t for t in tables]
-    # Also check for lowercase variant
-    if not has_string_ids:
-        for t in tables:
-            if t.lower() == "stringids":
-                has_string_ids = True
-                break
+    # Check if StringIds table exists for name resolution (before filtering)
+    all_tables = tables[:]
+    has_string_ids = any(t.lower() == "stringids" for t in all_tables)
 
     for table in tables:
         # For kernel/activity tables, JOIN with StringIds to resolve names
