@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Split Qwen3.5-35B-A3B-GPTQ-Int4 model for TP=2.
+Split model for arbitrary TP size.
 
 Each rank produces a standalone model directory that can be loaded
 by vLLM with tensor_parallel_size=1 for performance benchmarking.
 
 Usage:
     python split_tp2.py --model-dir /path/to/model --output-dir /path/to/output
-    python split_tp2.py --model-dir /path/to/model --output-dir /path/to/output --delete-shards
+    python split_tp2.py --model-dir /path/to/model --output-dir /path/to/output --tp-size 4
 
 Outputs:
     output-dir/rank_0/   # Complete model for rank 0
     output-dir/rank_1/   # Complete model for rank 1
+    ...
 """
 
 import argparse
@@ -28,7 +29,7 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file as np_save_file
 
-TP_SIZE = 2
+TP_SIZE = 2  # default, overridden by --tp-size
 GPTQ_BITS = 4
 GPTQ_GROUP_SIZE = 128
 GPTQ_PACK_FACTOR = 32 // GPTQ_BITS  # 8 for int4
@@ -212,12 +213,15 @@ def process_shard(shard_path: str, rank_dirs: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="Split model for TP=2")
+    global TP_SIZE
+    ap = argparse.ArgumentParser(description="Split model for TP")
     ap.add_argument("--model-dir", required=True, help="Original model directory")
-    ap.add_argument("--output-dir", required=True, help="Output root (rank_0/, rank_1/ created inside)")
+    ap.add_argument("--output-dir", required=True, help="Output root (rank_0/, rank_1/, ... created inside)")
+    ap.add_argument("--tp-size", type=int, default=2, help="Tensor parallel size (default: 2)")
     ap.add_argument("--delete-shards", action="store_true",
                     help="Delete each original shard after processing (saves disk)")
     args = ap.parse_args()
+    TP_SIZE = args.tp_size
 
     model_dir = Path(args.model_dir)
     output_dir = Path(args.output_dir)

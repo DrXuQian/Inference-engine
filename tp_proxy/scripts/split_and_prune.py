@@ -277,7 +277,8 @@ def main():
         print(f"\nStep 1/2: Splitting by TP={args.tp_size}...")
         cmd = [sys.executable, os.path.join(script_dir, "split_tp2.py"),
                "--model-dir", args.model_dir,
-               "--output-dir", split_dir]
+               "--output-dir", split_dir,
+               "--tp-size", str(args.tp_size)]
         subprocess.run(cmd, check=True)
         source_dir = os.path.join(split_dir, "rank_0")
     else:
