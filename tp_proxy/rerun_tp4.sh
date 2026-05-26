@@ -68,19 +68,13 @@ python3 "$SCRIPT_DIR/auto_bench.py" \
     --output-json "$TP_DIR/bench.json"
 
 # =============================================
-# 3. Comm: TP=4
+# 3. Comm: TP=4 (skip — requires multi-GPU, run separately)
 # =============================================
 echo ""
-echo "=== [3/4] Comm bench: TP=4 ==="
-# 05_agent (100K)
-COMM_MODEL=$(ls -d ./results/05_agent_397B/tp4/model/rank_0_*L 2>/dev/null | head -1)
-[ -z "$COMM_MODEL" ] && COMM_MODEL="$MODEL"
-bash "$SCRIPT_DIR/comm_bench.sh" "$COMM_MODEL" $TP 102400 ./results/05_agent_397B/tp4/comm.json
-
-# 05b_agent_hit (20K)
-COMM_MODEL=$(ls -d ./results/05b_agent_hit_397B/tp4/model/rank_0_*L 2>/dev/null | head -1)
-[ -z "$COMM_MODEL" ] && COMM_MODEL="$MODEL"
-bash "$SCRIPT_DIR/comm_bench.sh" "$COMM_MODEL" $TP 20480 ./results/05b_agent_hit_397B/tp4/comm.json
+echo "=== [3/4] Comm bench: SKIPPED (requires $TP GPUs) ==="
+echo "  Run separately on multi-GPU node:"
+echo "    bash $SCRIPT_DIR/comm_bench.sh <model> $TP 102400 ./results/05_agent_397B/tp4/comm.json"
+echo "    bash $SCRIPT_DIR/comm_bench.sh <model> $TP 20480 ./results/05b_agent_hit_397B/tp4/comm.json"
 
 # =============================================
 # 4. Trace + Compensate: TP=4
