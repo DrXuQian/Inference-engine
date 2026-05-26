@@ -270,12 +270,10 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
     if current:
         request_blocks.append(current)
 
-    # --- Within each request block, split prefill vs decode by kernel density ---
-    # Prefill (eager): large gaps between kernels (>10us median gap)
-    # Decode (CUDA Graph): tiny gaps (<5us median gap)
-    #
-    # Structure: [prefill kernels (sparse)] [transition gap] [decode kernels (dense)]
-    # Find the transition point: scan from start, when gap pattern changes from sparse to dense
+    # --- Within each request block, split prefill vs decode by first sampling kernel ---
+    # The first sampling kernel marks the end of prefill (prefill produces 1 token).
+    # Everything before the first sampling kernel's lm_head = prefill encoder.
+    # Everything after = decode steps.
 
     decode_encoder_ns = 0
     prefill_encoder_ns = 0
@@ -289,24 +287,26 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
         if len(block) < 10:
             continue
 
-        # Compute inter-kernel gaps
-        gaps = []
-        for i in range(1, len(block)):
-            gaps.append(block[i][0] - block[i - 1][2])
+        # Find first sampling kernel index
+        first_samp_idx = None
+        for i, (s, d, e, n) in enumerate(block):
+            if n in sampling_kernels:
+                first_samp_idx = i
+                break
 
-        # Find transition: sliding window median gap
-        # Dense (decode) has median gap < 5us, sparse (prefill) has > 10us
-        window = min(50, len(gaps) // 4)
-        if window < 5:
-            # Too few kernels, treat all as decode
+        if first_samp_idx is None:
+            # No sampling kernel found, treat all as decode
             split_idx = 0
         else:
-            split_idx = 0
-            for i in range(len(gaps) - window):
-                window_gaps = sorted(gaps[i:i + window])
-                median_gap = window_gaps[len(window_gaps) // 2]
-                if median_gap < 5000:  # < 5us median = decode region starts
-                    split_idx = i
+            # Walk backward from first sampling to find its lm_head
+            split_idx = first_samp_idx
+            for j in range(first_samp_idx - 1, max(first_samp_idx - 50, -1), -1):
+                if lm_head_kernel and block[j][3] == lm_head_kernel:
+                    split_idx = j
+                    break
+                elif not lm_head_kernel and any(
+                        kw in block[j][3].lower() for kw in ["gemv", "gemm"]):
+                    split_idx = j
                     break
 
         prefill_part = block[:split_idx] if split_idx > 0 else []
