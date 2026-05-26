@@ -102,20 +102,21 @@ def measure_tail_from_trace(sqlite_path: str,
             print(f"    {ev[3][:80]}  dur={ev[1]/1e3:.1f}us")
         return None
 
-    # Tail = sum of kernel durations from lm_head to end
-    tail_kernels = all_events[tail_start_idx:]
-    tail_kernel_ns = sum(d for _, d, _, _ in tail_kernels)
-    tail_wall_ns = tail_kernels[-1][2] - tail_kernels[0][0]
+    # Split tail into lm_head (the gemvt kernel) and sampling (everything after)
+    lm_head_ns = all_events[tail_start_idx][1]
+    sampling_kernels = all_events[tail_start_idx + 1:]
+    sampling_ns = sum(d for _, d, _, _ in sampling_kernels)
+    tail_kernel_ns = lm_head_ns + sampling_ns
 
     print(f"  Last lm_head kernel: '{all_events[tail_start_idx][3][:60]}'")
-    print(f"  Tail kernels: {len(tail_kernels)}")
-    print(f"  Tail kernel time: {tail_kernel_ns / 1e6:.4f} ms")
-    print(f"  Tail wall time:   {tail_wall_ns / 1e6:.4f} ms")
+    print(f"  lm_head time:  {lm_head_ns / 1e6:.4f} ms")
+    print(f"  sampling time: {sampling_ns / 1e6:.4f} ms ({len(sampling_kernels)} kernels)")
+    print(f"  tail total:    {tail_kernel_ns / 1e6:.4f} ms")
 
     return {
+        "lm_head_ms": round(lm_head_ns / 1e6, 4),
+        "sampling_ms": round(sampling_ns / 1e6, 4),
         "tail_per_step_ms": round(tail_kernel_ns / 1e6, 4),
-        "tail_wall_ms": round(tail_wall_ns / 1e6, 4),
-        "tail_kernel_count": len(tail_kernels),
     }
 
 
@@ -200,14 +201,20 @@ def main():
     print()
 
     # === c) Compensate ===
-    # comp_TPOT = (raw_TPOT - tail) × scale + tail + decode_comm
-    # comp_TTFT = (raw_TTFT - tail) × scale + tail + prefill_comm
+    # For TP>1: lm_head scales down by 1/tp (each rank computes vocab/tp)
+    # tail_comp = lm_head/tp + sampling (sampling doesn't change)
+    # comp_TPOT = (raw_TPOT - tail) × scale + tail_comp + decode_comm
+    # comp_TTFT = (raw_TTFT - tail) × scale + tail_comp + prefill_comm
     print("=== Compensated Results ===")
     tail_ms = tail["tail_per_step_ms"]
+    lm_head_ms = tail.get("lm_head_ms", tail_ms)
+    sampling_ms = tail.get("sampling_ms", 0)
+    tail_comp = lm_head_ms / tp_size + sampling_ms
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
-    print(f"Formula: encoder = raw - tail({tail_ms:.4f}ms), "
-          f"comp = encoder × {layer_scale:.2f} + tail + comm")
+    print(f"  tail (proxy):  {tail_ms:.4f}ms (lm_head={lm_head_ms:.4f} + sampling={sampling_ms:.4f})")
+    print(f"  tail (TP={tp_size}):  {tail_comp:.4f}ms (lm_head/{tp_size}={lm_head_ms/tp_size:.4f} + sampling={sampling_ms:.4f})")
+    print(f"  layer scale: {layer_scale:.2f}x")
     print(f"  TPOT comm: {decode_comm:.3f}ms, TTFT comm: {prefill_comm:.3f}ms")
     print()
     print(f"{'input':>8} {'raw_ttft':>10} {'comp_ttft':>10} "
@@ -227,8 +234,8 @@ def main():
         decode_encoder = raw_tpot - tail_ms
         prefill_encoder = raw_ttft - tail_ms
 
-        comp_tpot = decode_encoder * layer_scale + tail_ms + decode_comm
-        comp_ttft = prefill_encoder * layer_scale + tail_ms + prefill_comm
+        comp_tpot = decode_encoder * layer_scale + tail_comp + decode_comm
+        comp_ttft = prefill_encoder * layer_scale + tail_comp + prefill_comm
 
         comp_total = comp_ttft + (output_tokens - 1) * comp_tpot
 
