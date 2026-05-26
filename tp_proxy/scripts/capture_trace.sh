@@ -25,6 +25,7 @@ PLATFORM="${PLATFORM:-ppu}"
 # Start server under profiler
 echo "[1/5] Starting server under profiler..."
 if [ "$PLATFORM" = "ppu" ]; then
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     asys profile -o "$OUT_DIR/trace.report" -f true \
         -t hggc,acdnn,acblas \
         vllm serve "$MODEL" \
@@ -32,6 +33,7 @@ if [ "$PLATFORM" = "ppu" ]; then
         --trust-remote-code --no-enable-prefix-caching \
         --gpu-memory-utilization 0.9 &
 else
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     TRITON_BACKENDS_IN_TREE=1 \
     nsys profile -t cuda --cuda-trace-scope=system-wide --cuda-graph-trace=node \
         --force-overwrite=true -o "$OUT_DIR/trace" \
