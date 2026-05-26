@@ -270,24 +270,25 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
     if current:
         request_blocks.append(current)
 
-    # --- Within each request block, split prefill vs decode by first sampling kernel ---
-    # The first sampling kernel marks the end of prefill (prefill produces 1 token).
-    # Everything before the first sampling kernel's lm_head = prefill encoder.
-    # Everything after = decode steps.
+    # --- Split each request block into forward passes, then for each pass:
+    #     walk backward from end to find last gemvt_op (lm_head).
+    #     gemvt_op → end = lm_head + sampling (cut)
+    #     start → gemvt_op = encoder kernels
+    #     Same logic for both prefill and decode.
+    #
+    # Prefill vs decode split: first sampling kernel marks end of prefill.
 
     decode_encoder_ns = 0
     prefill_encoder_ns = 0
-    total_lm_head_ns = 0
-    total_sampling_ns = 0
+    total_tail_ns = 0  # lm_head + sampling combined
     n_decode_steps = 0
     n_prefill_steps = 0
-    lm_head_count = 0
 
     for block in request_blocks:
         if len(block) < 10:
             continue
 
-        # Find first sampling kernel index
+        # Split prefill vs decode at first sampling kernel's lm_head
         first_samp_idx = None
         for i, (s, d, e, n) in enumerate(block):
             if n in sampling_kernels:
@@ -295,84 +296,47 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
                 break
 
         if first_samp_idx is None:
-            # No sampling kernel found, treat all as decode
-            split_idx = 0
+            prefill_end = 0
         else:
-            # Walk backward from first sampling to find its lm_head
-            split_idx = first_samp_idx
-            for j in range(first_samp_idx - 1, max(first_samp_idx - 50, -1), -1):
-                if lm_head_kernel and block[j][3] == lm_head_kernel:
-                    split_idx = j
-                    break
-                elif not lm_head_kernel and any(
-                        kw in block[j][3].lower() for kw in ["gemv", "gemm"]):
-                    split_idx = j
+            # Walk backward from first sampling to find its gemvt_op
+            prefill_end = first_samp_idx + 1  # include first sampling in prefill pass
+            for j in range(first_samp_idx, -1, -1):
+                if block[j][3] == lm_head_kernel:
+                    prefill_end = j  # cut starts at lm_head
                     break
 
-        prefill_part = block[:split_idx] if split_idx > 0 else []
-        decode_part = block[split_idx:] if split_idx < len(block) else block
+        prefill_part = block[:prefill_end] if prefill_end > 0 else []
+        decode_part = block[prefill_end:] if prefill_end < len(block) else []
 
-        # --- For each part, identify non-encoder (lm_head + sampling) ---
-        def classify_part(part):
-            enc_ns = 0; lm_ns = 0; samp_ns = 0; lm_cnt = 0
+        # --- For a list of kernels, cut tail from last gemvt_op onward ---
+        def encoder_time(part):
+            if not part:
+                return 0, 0, 0
+            # Walk backward to find last lm_head_kernel
+            cut_idx = len(part)  # default: no cut, all encoder
+            for i in range(len(part) - 1, -1, -1):
+                if part[i][3] == lm_head_kernel:
+                    cut_idx = i
+                    break
+            enc_ns = sum(d for _, d, _, _ in part[:cut_idx])
+            tail_ns = sum(d for _, d, _, _ in part[cut_idx:])
+            # Count forward passes = number of sampling kernels
+            n_fwd = sum(1 for _, _, _, n in part if n in sampling_kernels)
+            return enc_ns, tail_ns, max(n_fwd, 1)
 
-            # Find sampling positions
-            samp_indices = set()
-            for i, (s, d, e, n) in enumerate(part):
-                if n in sampling_kernels:
-                    samp_indices.add(i)
-
-            # For each sampling, walk backward to find lm_head
-            lm_indices = set()
-            non_enc_indices = set()
-            for si in sorted(samp_indices):
-                for j in range(si - 1, max(si - 50, -1), -1):
-                    if lm_head_kernel and part[j][3] == lm_head_kernel:
-                        lm_indices.add(j)
-                        break
-                    elif not lm_head_kernel and any(
-                            kw in part[j][3].lower() for kw in ["gemv", "gemm"]):
-                        lm_indices.add(j)
-                        break
-
-            # Mark lm_head → sampling range as non-encoder
-            for si in sorted(samp_indices):
-                lm_idx = None
-                for j in range(si - 1, max(si - 50, -1), -1):
-                    if j in lm_indices:
-                        lm_idx = j; break
-                start_idx = lm_idx if lm_idx is not None else si
-                for k in range(start_idx, si + 1):
-                    non_enc_indices.add(k)
-
-            for i, (s, d, e, n) in enumerate(part):
-                if i in lm_indices:
-                    lm_ns += d; lm_cnt += 1
-                elif i in non_enc_indices:
-                    samp_ns += d
-                else:
-                    enc_ns += d
-
-            n_fwd = len(samp_indices) or (lm_cnt or 0)
-            return enc_ns, lm_ns, samp_ns, lm_cnt, n_fwd
-
-        # Classify decode
-        if decode_part:
-            d_enc, d_lm, d_samp, d_lm_cnt, d_n_fwd = classify_part(decode_part)
-            decode_encoder_ns += d_enc
-            total_lm_head_ns += d_lm
-            total_sampling_ns += d_samp
-            lm_head_count += d_lm_cnt
-            n_decode_steps += d_n_fwd
-
-        # Classify prefill
+        # Prefill: one forward pass
         if prefill_part:
-            p_enc, p_lm, p_samp, p_lm_cnt, p_n_fwd = classify_part(prefill_part)
+            p_enc, p_tail, _ = encoder_time(prefill_part)
             prefill_encoder_ns += p_enc
-            total_lm_head_ns += p_lm
-            total_sampling_ns += p_samp
-            lm_head_count += p_lm_cnt
-            n_prefill_steps += p_n_fwd or 1
+            total_tail_ns += p_tail
+            n_prefill_steps += 1
+
+        # Decode: multiple forward passes
+        if decode_part:
+            d_enc, d_tail, d_fwd = encoder_time(decode_part)
+            decode_encoder_ns += d_enc
+            total_tail_ns += d_tail
+            n_decode_steps += d_fwd
 
     # Compute per-layer
     n_requests = len([b for b in request_blocks if len(b) >= 10])
@@ -392,9 +356,7 @@ def measure_encoder_trace(sqlite_path: str, num_layers: int, output_len: int,
         "decode_encoder_total_ms": round(decode_encoder_ns / 1e6, 2),
         "prefill_encoder_total_ms": round(prefill_encoder_ns / 1e6, 2),
         "encoder_total_ms": round(total_encoder_ns / 1e6, 2),
-        "lm_head_total_ms": round(total_lm_head_ns / 1e6, 2),
-        "lm_head_per_call_us": round(total_lm_head_ns / max(lm_head_count, 1) / 1e3, 1),
-        "sampling_total_ms": round(total_sampling_ns / 1e6, 2),
+        "tail_total_ms": round(total_tail_ns / 1e6, 2),
         "n_requests": n_requests,
         "n_decode_steps": n_decode_steps,
         "n_prefill_steps": n_prefill_steps,
@@ -488,12 +450,16 @@ def main():
                                     args.lm_head_kernel, sampling_names)
         if enc:
             removed = original - pruned
+            print(f"  Decode encoder total: {enc['decode_encoder_total_ms']:.2f} ms "
+                  f"({enc['n_decode_steps']} steps)")
             print(f"  Decode per_layer: {enc['decode_per_layer_ms']:.5f} ms")
+            print(f"  Prefill encoder total: {enc['prefill_encoder_total_ms']:.2f} ms "
+                  f"({enc['n_prefill_steps']} steps)")
             print(f"  Prefill per_layer: {enc['prefill_per_layer_ms']:.4f} ms")
+            print(f"  Tail (lm_head+sampling) total: {enc['tail_total_ms']:.2f} ms")
             print(f"  Compensation ({removed} layers):")
             print(f"    TPOT: +{removed * enc['decode_per_layer_ms']:.3f} ms")
             print(f"    TTFT: +{removed * enc['prefill_per_layer_ms']:.3f} ms")
-            print(f"  LM head per call: {enc['lm_head_per_call_us']:.1f} us")
     elif pruned < original:
         print("=== c) Encoder block: no asys trace, skip ===")
         print("    (provide --asys-sqlite for encoder block compensation)")
