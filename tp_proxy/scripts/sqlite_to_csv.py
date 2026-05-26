@@ -57,8 +57,55 @@ def main():
     out_dir = args.output_dir or os.path.dirname(args.sqlite) or "."
     os.makedirs(out_dir, exist_ok=True)
 
+    # Check if StringIds table exists for name resolution
+    has_string_ids = "StringIds" in [t for t in tables]
+    # Also check for lowercase variant
+    if not has_string_ids:
+        for t in tables:
+            if t.lower() == "stringids":
+                has_string_ids = True
+                break
+
     for table in tables:
-        cursor.execute(f"SELECT * FROM \"{table}\"")
+        # For kernel/activity tables, JOIN with StringIds to resolve names
+        cursor.execute(f"PRAGMA table_info(\"{table}\")")
+        col_info = cursor.fetchall()
+        col_names_lower = {c[1].lower(): c[1] for c in col_info}
+
+        # Detect string ID columns that should be resolved
+        str_id_cols = []
+        if has_string_ids:
+            for candidate in ["demangledName", "mangledName", "shortName",
+                              "registeredName", "name"]:
+                if candidate in col_names_lower.values() or candidate.lower() in col_names_lower:
+                    actual = col_names_lower.get(candidate.lower(), candidate)
+                    str_id_cols.append(actual)
+
+        if str_id_cols and table.lower() != "stringids":
+            # Build query with JOINs to resolve string IDs
+            joins = []
+            selects = []
+            cursor.execute(f"PRAGMA table_info(\"{table}\")")
+            for c in cursor.fetchall():
+                col = c[1]
+                if col in str_id_cols:
+                    alias = f"s_{col}"
+                    selects.append(f'{alias}.value AS "{col}"')
+                    joins.append(
+                        f'LEFT JOIN StringIds {alias} ON t."{col}" = {alias}.id')
+                else:
+                    selects.append(f't."{col}"')
+
+            query = f"SELECT {', '.join(selects)} FROM \"{table}\" t {' '.join(joins)} ORDER BY t.start" if "start" in col_names_lower else \
+                    f"SELECT {', '.join(selects)} FROM \"{table}\" t {' '.join(joins)}"
+            try:
+                cursor.execute(query)
+            except Exception:
+                # Fallback to raw query if JOIN fails
+                cursor.execute(f"SELECT * FROM \"{table}\"")
+        else:
+            cursor.execute(f"SELECT * FROM \"{table}\"")
+
         rows = cursor.fetchall()
         cols = [desc[0] for desc in cursor.description]
 
