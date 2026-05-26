@@ -469,10 +469,18 @@ def main():
                 model_dirs = _glob.glob(os.path.join(base, "model", "split", "rank_0"))
             cfg = load_model_config(model_dirs[0]) if model_dirs else None
 
-            # Use original (full) layer count, not pruned
+            # Restore original model dimensions (pruned config has TP-split values)
             if cfg and comp:
                 orig_layers = comp.get("original_layers", cfg["num_hidden_layers"])
                 cfg["num_hidden_layers"] = orig_layers
+                # Config was modified by split_tp2: heads/intermediate divided by tp.
+                # Restore to original values for correct FLOPs/BW calculation.
+                if tp > 1:
+                    for key in ("num_attention_heads", "num_key_value_heads",
+                                "linear_num_key_heads", "linear_num_value_heads",
+                                "moe_intermediate_size", "shared_expert_intermediate_size"):
+                        if key in cfg and cfg[key] > 0:
+                            cfg[key] = cfg[key] * tp
 
             mfu_str = "N/A"
             bw_str = "N/A"
