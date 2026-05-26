@@ -16,6 +16,7 @@ OUTPUT_LEN="${3:?}"
 OUT_DIR="${4:?}"
 NUM_PROMPTS="${5:-10}"
 PORT=8200
+MAX_MODEL_LEN=$((INPUT_LEN + OUTPUT_LEN + 64))
 
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
@@ -23,13 +24,14 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 PLATFORM="${PLATFORM:-ppu}"
 
 # Start server under profiler
-echo "[1/5] Starting server under profiler..."
+echo "[1/5] Starting server under profiler (max_model_len=$MAX_MODEL_LEN)..."
 if [ "$PLATFORM" = "ppu" ]; then
     VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     asys profile -o "$OUT_DIR/trace.report" -f true \
         -t hggc,acdnn,acblas \
         vllm serve "$MODEL" \
         --host 127.0.0.1 --port $PORT --tensor-parallel-size 1 \
+        --max-model-len $MAX_MODEL_LEN \
         --trust-remote-code --no-enable-prefix-caching \
         --gpu-memory-utilization 0.9 &
 else
@@ -39,6 +41,7 @@ else
         --force-overwrite=true -o "$OUT_DIR/trace" \
         vllm serve "$MODEL" \
         --host 127.0.0.1 --port $PORT --tensor-parallel-size 1 \
+        --max-model-len $MAX_MODEL_LEN \
         --trust-remote-code --no-enable-prefix-caching \
         --gpu-memory-utilization 0.9 &
 fi
