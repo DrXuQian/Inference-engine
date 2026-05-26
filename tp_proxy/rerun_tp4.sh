@@ -25,7 +25,7 @@ mkdir -p "$TP_DIR"
 
 python3 "$SCRIPT_DIR/split_and_prune.py" \
     --model-dir "$MODEL" --tp-size $TP \
-    --gpu-memory-gb "$GPU_MEM" --max-seq-len 135168 \
+    --gpu-memory-gb "$GPU_MEM" --max-seq-len 108544 \
     --output-dir "$TP_DIR/model"
 
 PRUNED=$(ls -d "$TP_DIR/model/rank_0_"*L 2>/dev/null | head -1)
@@ -33,7 +33,7 @@ PRUNED=$(ls -d "$TP_DIR/model/rank_0_"*L 2>/dev/null | head -1)
 [ -z "$PRUNED" ] && PRUNED="$MODEL"
 
 python3 "$SCRIPT_DIR/auto_bench.py" \
-    --model-dir "$PRUNED" --input-lens 102400 --output-len 30720 \
+    --model-dir "$PRUNED" --input-lens 102400 --output-len 3072 \
     --num-prompts 5 --gpu-mem 0.9 \
     --output-json "$TP_DIR/bench.json"
 
@@ -47,7 +47,7 @@ mkdir -p "$TP_DIR"
 
 python3 "$SCRIPT_DIR/split_and_prune.py" \
     --model-dir "$MODEL" --tp-size $TP \
-    --gpu-memory-gb "$GPU_MEM" --max-seq-len 53248 \
+    --gpu-memory-gb "$GPU_MEM" --max-seq-len 26624 \
     --output-dir "$TP_DIR/model"
 
 PRUNED=$(ls -d "$TP_DIR/model/rank_0_"*L 2>/dev/null | head -1)
@@ -55,7 +55,7 @@ PRUNED=$(ls -d "$TP_DIR/model/rank_0_"*L 2>/dev/null | head -1)
 [ -z "$PRUNED" ] && PRUNED="$MODEL"
 
 python3 "$SCRIPT_DIR/auto_bench.py" \
-    --model-dir "$PRUNED" --input-lens 20480 --output-len 30720 \
+    --model-dir "$PRUNED" --input-lens 20480 --output-len 3072 \
     --num-prompts 5 --gpu-mem 0.9 \
     --output-json "$TP_DIR/bench.json"
 
@@ -71,9 +71,9 @@ for SCENARIO in 05_agent_397B 05b_agent_hit_397B; do
     [ -z "$TRACE_MODEL" ] && continue
 
     if [ "$SCENARIO" = "05_agent_397B" ]; then
-        INPUT_LEN=102400; OUTPUT_LEN=30720; NUM_PROMPTS=5
+        INPUT_LEN=102400; OUTPUT_LEN=3072; NUM_PROMPTS=5
     else
-        INPUT_LEN=20480; OUTPUT_LEN=30720; NUM_PROMPTS=5
+        INPUT_LEN=20480; OUTPUT_LEN=3072; NUM_PROMPTS=5
     fi
 
     echo ""

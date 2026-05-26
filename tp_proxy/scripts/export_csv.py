@@ -74,7 +74,7 @@ def main():
     # === Code Completion ===
     w.writerow(["Code Completion"])
     w.writerow(["子场景", "单次上下文(token)", "单次产出(token)", "模型"])
-    w.writerow(["代码补全", "15K", "50", "Qwen3.5 35B-A3B"])
+    w.writerow(["代码补全", "1.5K", "50", "Qwen3.5 35B-A3B"])
     w.writerow([])
 
     d01 = load_json(os.path.join(rd, "01_code_completion_35B", "compensated.json"))
@@ -105,7 +105,7 @@ def main():
     # === Agent Full Task ===
     w.writerow(["Agent Full Task (1M tokens)"])
     w.writerow(["子场景", "单次上下文(token)", "单次产出(token)", "模型"])
-    w.writerow(["Agent长程调用", "单次100K, 全任务1M = first 100K(0%hit) + 9*100K(80%hit)", "30K",
+    w.writerow(["Agent长程调用", "单次100K, 全任务1M = first 100K(0%hit) + 9*100K(80%hit)", "3K",
                 "122B-A10B, 397B-A17B"])
     w.writerow([])
 

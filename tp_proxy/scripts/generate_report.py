@@ -312,12 +312,12 @@ def main():
         print("场景,模型,TTFT(ms),TPOT(ms),TPS(tok/s),总延迟(ms)")
 
     # =========================================================================
-    # 1. Code Completion (15K input, 50 output)
+    # 1. Code Completion (1.5K input, 50 output)
     # =========================================================================
     d01 = load_json(os.path.join(rd, "01_code_completion_35B", "compensated.json"))
     m01 = get_metrics(d01) if d01 else None
     print_scenario(
-        "Code Completion (15K input, 50 output)",
+        "Code Completion (1.5K input, 50 output)",
         [("Qwen3.5-35B-A3B-GPTQ-INT4", m01)],
         fmt,
     )
@@ -347,14 +347,14 @@ def main():
     # =========================================================================
     # 3. Agent Full Task (100K first + 9×20K hit)
     # =========================================================================
-    # First call (100K input, 30K output)
+    # First call (100K input, 3K output)
     agent_first = {}
     for scenario, tp_list in [("04_agent_122B", [1, 2]), ("05_agent_397B", [2, 4])]:
         for tp in tp_list:
             d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
             agent_first[(scenario, tp)] = get_metrics(d) if d else None
 
-    # Hit calls (20K input, 30K output)
+    # Hit calls (20K input, 3K output)
     agent_hit = {}
     for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), ("05b_agent_hit_397B", [2, 4])]:
         for tp in tp_list:
@@ -409,7 +409,7 @@ def main():
 
     # First call detail
     print_scenario(
-        "Agent 第一次调用 (100K input, 30K output)",
+        "Agent 第一次调用 (100K input, 3K output)",
         [(model_names[k], agent_first[k]) for k in
          [("04_agent_122B", 1), ("04_agent_122B", 2),
           ("05_agent_397B", 2), ("05_agent_397B", 4)]],
@@ -424,7 +424,7 @@ def main():
         ("05b_agent_hit_397B", 4): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=4",
     }
     print_scenario(
-        "Agent 后续调用 (20K input@80%hit, 30K output)",
+        "Agent 后续调用 (20K input@80%hit, 3K output)",
         [(hit_names[k], agent_hit[k]) for k in
          [("04b_agent_hit_122B", 1), ("04b_agent_hit_122B", 2),
           ("05b_agent_hit_397B", 2), ("05b_agent_hit_397B", 4)]],
@@ -450,14 +450,14 @@ def main():
         scenarios = []
         # Map scenario dirs to (name, model_dir_pattern, input_len, output_len, tp)
         scenario_defs = [
-            ("01 Code Completion 35B", "01_code_completion_35B", None, 15360, 50, 1),
+            ("01 Code Completion 35B", "01_code_completion_35B", None, 1536, 50, 1),
             ("02 Chat 27B", "02_chat_27B", None, 25600, 1024, 1),
             ("03 Chat 122B TP=1", "03_chat_122B", "tp1", 25600, 1024, 1),
             ("03 Chat 122B TP=2", "03_chat_122B", "tp2", 25600, 1024, 2),
-            ("04 Agent 122B TP=1", "04_agent_122B", "tp1", 102400, 30720, 1),
-            ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 30720, 2),
-            ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 30720, 2),
-            ("05 Agent 397B TP=4", "05_agent_397B", "tp4", 102400, 30720, 4),
+            ("04 Agent 122B TP=1", "04_agent_122B", "tp1", 102400, 3072, 1),
+            ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 3072, 2),
+            ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 3072, 2),
+            ("05 Agent 397B TP=4", "05_agent_397B", "tp4", 102400, 3072, 4),
             ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1),
         ]
 
