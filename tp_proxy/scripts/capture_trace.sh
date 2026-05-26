@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-MODEL="${1:?Usage: $0 <model_dir> <input_len> <output_len> <output_dir> [num_prompts]}"
+MODEL="$(readlink -f "${1:?Usage: $0 <model_dir> <input_len> <output_len> <output_dir> [num_prompts]}")"
 INPUT_LEN="${2:?}"
 OUTPUT_LEN="${3:?}"
 OUT_DIR="${4:?}"
@@ -18,6 +18,7 @@ NUM_PROMPTS="${5:-10}"
 PORT=8200
 
 mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 PLATFORM="${PLATFORM:-ppu}"
 
