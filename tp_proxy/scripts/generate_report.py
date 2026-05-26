@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -30,6 +31,192 @@ def fmt_ms(val_ms: float) -> str:
     if val_ms < 3600_000:
         return f"{val_ms / 60_000:.2f}min"
     return f"{val_ms / 3600_000:.2f}h"
+
+
+# ---------------------------------------------------------------------------
+# Hardware specs (override via --peak-flops and --peak-bw)
+# ---------------------------------------------------------------------------
+DEFAULT_PEAK_FLOPS_TFLOPS = 0    # set via CLI
+DEFAULT_PEAK_BW_GB_S = 0         # set via CLI
+
+
+def load_model_config(model_dir: str) -> dict | None:
+    """Load model config.json, return None if not found."""
+    for p in [os.path.join(model_dir, "config.json")]:
+        if os.path.exists(p):
+            with open(p) as f:
+                cfg = json.load(f)
+            tc = cfg.get("text_config", cfg)
+            qc = cfg.get("quantization_config", {})
+            return {
+                "hidden_size": tc.get("hidden_size", 2048),
+                "num_hidden_layers": tc.get("num_hidden_layers", 24),
+                "num_attention_heads": tc.get("num_attention_heads", 16),
+                "num_key_value_heads": tc.get("num_key_value_heads", 2),
+                "head_dim": tc.get("head_dim", 256),
+                "vocab_size": tc.get("vocab_size", 248320),
+                "num_experts": tc.get("num_experts", 0),
+                "num_experts_per_tok": tc.get("num_experts_per_tok", 0),
+                "moe_intermediate_size": tc.get("moe_intermediate_size", 0),
+                "shared_expert_intermediate_size": tc.get("shared_expert_intermediate_size", 0),
+                "intermediate_size": tc.get("intermediate_size", 0),
+                "interleave_attn_pattern": tc.get("interleave_attn_pattern", None),
+                "linear_num_key_heads": tc.get("linear_num_key_heads", 0),
+                "linear_num_value_heads": tc.get("linear_num_value_heads", 0),
+                "linear_key_head_dim": tc.get("linear_key_head_dim", 0),
+                "linear_value_head_dim": tc.get("linear_value_head_dim", 0),
+                "attn_output_gate": tc.get("attn_output_gate", False),
+                "quant_bits": qc.get("bits", 16),
+            }
+    return None
+
+
+def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
+    """Compute total FLOPs for one prefill pass (forward only).
+
+    For each linear layer: FLOPs = 2 × M × K × N
+    Attention: 2 × seq × seq × head_dim × n_heads (for QK^T and attn×V)
+    """
+    H = cfg["hidden_size"]
+    N = cfg["num_hidden_layers"]
+    S = seq_len
+    n_heads = cfg["num_attention_heads"]
+    n_kv = cfg["num_key_value_heads"]
+    head_dim = cfg["head_dim"]
+    has_gate = cfg["attn_output_gate"]
+    V = cfg["vocab_size"]
+
+    n_experts = cfg["num_experts"]
+    n_active = cfg["num_experts_per_tok"]
+    moe_inter = cfg["moe_intermediate_size"]
+    shared_inter = cfg["shared_expert_intermediate_size"]
+    dense_inter = cfg["intermediate_size"]
+
+    attn_pattern = cfg.get("interleave_attn_pattern")
+    if attn_pattern:
+        n_full = sum(1 for x in attn_pattern if x == "full")
+        n_full_layers = N * n_full // len(attn_pattern)
+    else:
+        n_full_layers = N
+    n_lin_layers = N - n_full_layers
+
+    # --- Full attention layer FLOPs ---
+    # QKV projections: Q=[S,H]×[H, n_heads*head_dim*(2 if gate)], K/V=[S,H]×[H, n_kv*head_dim]
+    q_out = n_heads * head_dim * (2 if has_gate else 1)
+    qkv_flops = 2 * S * H * (q_out + 2 * n_kv * head_dim)
+    # Attention: QK^T = [S, head_dim] × [head_dim, S] per head, then attn×V
+    attn_flops = 2 * 2 * n_heads * S * S * head_dim  # QK^T + attn*V
+    # Output projection: [S, n_heads*head_dim] × [n_heads*head_dim, H]
+    o_flops = 2 * S * (n_heads * head_dim) * H
+
+    full_attn_flops = qkv_flops + attn_flops + o_flops
+
+    # --- Linear attention layer FLOPs (no S×S attention) ---
+    lin_k_dim = cfg.get("linear_num_key_heads", 0) * cfg.get("linear_key_head_dim", 0)
+    lin_v_dim = cfg.get("linear_num_value_heads", 0) * cfg.get("linear_value_head_dim", 0)
+    if lin_k_dim > 0:
+        lin_proj_flops = 2 * S * H * (lin_k_dim * 2 + lin_v_dim)  # QKV
+        lin_proj_flops += 2 * S * H * lin_v_dim  # z proj
+        lin_proj_flops += 2 * S * lin_v_dim * H  # out proj
+        lin_attn_flops = lin_proj_flops
+    else:
+        lin_attn_flops = full_attn_flops  # fallback
+
+    # --- MoE / FFN FLOPs per layer ---
+    if n_experts > 0 and n_active > 0:
+        # active experts: gate+up+down, each [S,H]×[H,inter] or [S,inter]×[inter,H]
+        expert_flops = n_active * 3 * 2 * S * H * moe_inter
+        shared_flops = 3 * 2 * S * H * shared_inter if shared_inter > 0 else 0
+        ffn_flops = expert_flops + shared_flops
+    else:
+        ffn_flops = 3 * 2 * S * H * dense_inter
+
+    # --- Total ---
+    total = (n_full_layers * (full_attn_flops + ffn_flops) +
+             n_lin_layers * (lin_attn_flops + ffn_flops))
+    # LM head
+    total += 2 * S * H * V
+    # Per-GPU (TP splits compute)
+    total = total / tp_size
+
+    return total
+
+
+def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
+    """Compute total bytes read per decode step: weights + KV cache.
+
+    Weights: same as bandwidth_util.py (active weights per step)
+    KV cache: for each full-attention layer, read K and V of all seq_len tokens
+              KV per layer = 2 × n_kv_heads × head_dim × seq_len × 2 (bf16)
+              Linear attention: fixed state, negligible
+    """
+    H = cfg["hidden_size"]
+    N = cfg["num_hidden_layers"]
+    V = cfg["vocab_size"]
+    n_heads = cfg["num_attention_heads"]
+    n_kv = cfg["num_key_value_heads"]
+    head_dim = cfg["head_dim"]
+    has_gate = cfg["attn_output_gate"]
+
+    n_experts = cfg["num_experts"]
+    n_active = cfg["num_experts_per_tok"]
+    moe_inter = cfg["moe_intermediate_size"]
+    shared_inter = cfg["shared_expert_intermediate_size"]
+    dense_inter = cfg["intermediate_size"]
+
+    quant_bits = cfg["quant_bits"]
+    bpp_q = quant_bits / 8 + 0.05 if quant_bits < 16 else 2  # quantized
+    bpp_f = 2  # bf16
+
+    attn_pattern = cfg.get("interleave_attn_pattern")
+    if attn_pattern:
+        n_full = sum(1 for x in attn_pattern if x == "full")
+        n_full_layers = N * n_full // len(attn_pattern)
+    else:
+        n_full_layers = N
+    n_lin_layers = N - n_full_layers
+
+    # --- Weights per layer (active) ---
+    # Full attention
+    q_dim = n_heads * head_dim * (2 if has_gate else 1)
+    kv_dim = n_kv * head_dim
+    attn_params_full = (q_dim * H + 2 * kv_dim * H + n_heads * head_dim * H)
+    attn_bytes_full = attn_params_full * bpp_f / tp_size  # attn usually bf16
+
+    # Linear attention
+    lin_k = cfg.get("linear_num_key_heads", 0) * cfg.get("linear_key_head_dim", 0)
+    lin_v = cfg.get("linear_num_value_heads", 0) * cfg.get("linear_value_head_dim", 0)
+    if lin_k > 0:
+        lin_params = (lin_k * 2 + lin_v) * H + lin_v * H + lin_v * H  # qkv + z + out
+        attn_bytes_lin = lin_params * bpp_f / tp_size
+    else:
+        attn_bytes_lin = attn_bytes_full
+
+    # MoE / FFN
+    if n_experts > 0 and n_active > 0:
+        expert_bytes = n_active * 3 * H * moe_inter * bpp_q / tp_size
+        router_bytes = n_experts * H * 2  # bf16
+        shared_bytes = 3 * H * shared_inter * bpp_f / tp_size if shared_inter > 0 else 0
+        ffn_bytes = expert_bytes + router_bytes + shared_bytes
+    else:
+        ffn_bytes = 3 * H * dense_inter * bpp_q / tp_size
+
+    norm_bytes = 2 * H * 2  # 2 norms × bf16
+
+    weight_full = attn_bytes_full + ffn_bytes + norm_bytes
+    weight_lin = attn_bytes_lin + ffn_bytes + norm_bytes
+    total_weight = n_full_layers * weight_full + n_lin_layers * weight_lin
+    # LM head (replicated, not split)
+    total_weight += V * H * bpp_f
+    total_weight += H * 2  # final norm
+
+    # --- KV cache ---
+    # Only full attention layers have KV cache
+    # Per layer: read K[seq_len, n_kv_heads/tp, head_dim] + V[same], bf16
+    kv_per_layer = 2 * (n_kv // max(tp_size, 1)) * head_dim * seq_len * 2
+    total_kv = n_full_layers * kv_per_layer
+
+    return total_weight + total_kv, total_weight, total_kv
 
 
 def get_metrics(data: dict) -> dict | None:
@@ -82,6 +269,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="./results")
     ap.add_argument("--format", choices=["markdown", "csv"], default="markdown")
+    ap.add_argument("--peak-flops", type=float, default=0,
+                    help="Peak TFLOPS (FP16) per GPU for MFU calculation")
+    ap.add_argument("--peak-bw", type=float, default=0,
+                    help="Peak memory bandwidth GB/s per GPU for BW util")
     args = ap.parse_args()
     rd = args.results_dir
     fmt = args.format
@@ -219,6 +410,95 @@ def main():
         [("Qwen3.5-35B-A3B-GPTQ-INT4", m06)],
         fmt,
     )
+
+    # =========================================================================
+    # 5. Prefill MFU + Decode Bandwidth Utilization
+    # =========================================================================
+    if args.peak_flops > 0 or args.peak_bw > 0:
+        # Collect all scenarios: (name, model_dir, input_len, output_len, tp_size, metrics)
+        scenarios = []
+        # Map scenario dirs to (name, model_dir_pattern, input_len, output_len, tp)
+        scenario_defs = [
+            ("01 Code Completion 35B", "01_code_completion_35B", None, 15360, 50, 1),
+            ("02 Chat 27B", "02_chat_27B", None, 25600, 1024, 1),
+            ("03 Chat 122B TP=1", "03_chat_122B", "tp1", 25600, 1024, 1),
+            ("03 Chat 122B TP=2", "03_chat_122B", "tp2", 25600, 1024, 2),
+            ("04 Agent 122B TP=1", "04_agent_122B", "tp1", 102400, 30720, 1),
+            ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 30720, 2),
+            ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 30720, 2),
+            ("05 Agent 397B TP=4", "05_agent_397B", "tp4", 102400, 30720, 4),
+            ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1),
+        ]
+
+        if fmt == "markdown":
+            print(f"\n### Prefill MFU & Decode Bandwidth Utilization")
+            if args.peak_flops > 0:
+                print(f"\nPeak compute: {args.peak_flops} TFLOPS (FP16)")
+            if args.peak_bw > 0:
+                print(f"Peak bandwidth: {args.peak_bw} GB/s")
+            print()
+            cols = "| 场景 | Prefill MFU |" if args.peak_flops > 0 else "| 场景 |"
+            if args.peak_bw > 0:
+                cols += " Decode BW Util | Weights | KV Cache |"
+            print(cols)
+            sep = "|------|"
+            if args.peak_flops > 0:
+                sep += "------------|"
+            if args.peak_bw > 0:
+                sep += "---------------|---------|----------|"
+            print(sep)
+
+        for name, sc_dir, sub, input_len, output_len, tp in scenario_defs:
+            if sub:
+                base = os.path.join(rd, sc_dir, sub)
+            else:
+                base = os.path.join(rd, sc_dir)
+
+            comp = load_json(os.path.join(base, "compensated.json"))
+            m = get_metrics(comp) if comp else None
+
+            # Find model config
+            model_dirs = []
+            import glob as _glob
+            model_dirs = _glob.glob(os.path.join(base, "model", "rank_0_*L"))
+            if not model_dirs:
+                model_dirs = _glob.glob(os.path.join(base, "model", "split", "rank_0"))
+            cfg = load_model_config(model_dirs[0]) if model_dirs else None
+
+            mfu_str = "N/A"
+            bw_str = "N/A"
+            w_str = "N/A"
+            kv_str = "N/A"
+
+            if cfg and m:
+                if args.peak_flops > 0:
+                    flops = compute_prefill_flops(cfg, input_len, tp)
+                    ttft_s = m["ttft"] / 1000
+                    actual_tflops = flops / ttft_s / 1e12 if ttft_s > 0 else 0
+                    mfu = actual_tflops / args.peak_flops * 100
+                    mfu_str = f"{mfu:.1f}%"
+
+                if args.peak_bw > 0:
+                    # For decode, seq_len = input_len + output_len/2 (average)
+                    avg_seq = input_len + output_len // 2
+                    total_bytes, weight_bytes, kv_bytes = compute_decode_bytes(
+                        cfg, avg_seq, tp)
+                    tpot_s = m["tpot"] / 1000
+                    bw_used = total_bytes / tpot_s / 1e9 if tpot_s > 0 else 0
+                    bw_util = bw_used / args.peak_bw * 100
+                    bw_str = f"{bw_util:.1f}%"
+                    w_str = f"{weight_bytes / 1e9:.2f}GB"
+                    kv_str = f"{kv_bytes / 1e9:.2f}GB"
+
+            if fmt == "csv":
+                print(f"Utilization,{name},{mfu_str},{bw_str},{w_str},{kv_str}")
+            else:
+                row = f"| {name} |"
+                if args.peak_flops > 0:
+                    row += f" {mfu_str} |"
+                if args.peak_bw > 0:
+                    row += f" {bw_str} | {w_str} | {kv_str} |"
+                print(row)
 
     # =========================================================================
     # Summary
