@@ -70,11 +70,25 @@ kill $SRV_PID 2>/dev/null
 wait $SRV_PID 2>/dev/null || true
 trap - EXIT
 
-# Export sqlite
-echo "[5/5] Exporting sqlite..."
+# Wait for profiler to finish writing
+echo "[5/5] Waiting for trace file to be written..."
+sleep 5
+
+echo "       Exporting sqlite..."
 if [ "$PLATFORM" = "ppu" ]; then
     # asys saves as trace.report.asysrep
-    ASYS_REP=$(ls "$OUT_DIR/trace.report.asysrep" "$OUT_DIR/trace.report" 2>/dev/null | head -1)
+    ASYS_REP=""
+    for i in 1 2 3 4 5; do
+        ASYS_REP=$(ls "$OUT_DIR/trace.report.asysrep" "$OUT_DIR/trace.report" 2>/dev/null | head -1)
+        if [ -n "$ASYS_REP" ]; then break; fi
+        echo "       Waiting for asys report file... (attempt $i)"
+        sleep 3
+    done
+    if [ -z "$ASYS_REP" ]; then
+        echo "ERROR: asys report file not found in $OUT_DIR"
+        exit 1
+    fi
+    echo "       Found: $ASYS_REP"
     asys export -f -o "$OUT_DIR/trace.sqlite" "$ASYS_REP"
 else
     nsys stats -r cuda_gpu_kern_sum --format csv --force-export=true \
