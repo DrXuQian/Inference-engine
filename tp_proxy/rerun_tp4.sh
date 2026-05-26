@@ -82,11 +82,16 @@ for SCENARIO in 05_agent_397B 05b_agent_hit_397B; do
 
     echo ""
     echo "--- Compensate: $SCENARIO TP=$TP ---"
+    EXTRA_ARGS=""
+    if [ "$SCENARIO" = "05b_agent_hit_397B" ]; then
+        EXTRA_ARGS="--actual-seq-len 102400"
+    fi
     python3 "$SCRIPT_DIR/compensate_ppu.py" \
         --bench-results "$DIR/bench.json" \
         --model-dir "$TRACE_MODEL" \
         --asys-sqlite "$DIR/trace/trace.sqlite" \
         --comm-json "$DIR/comm.json" \
+        $EXTRA_ARGS \
         --output-json "$DIR/compensated.json"
 done
 

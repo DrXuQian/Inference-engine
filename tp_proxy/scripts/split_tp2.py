@@ -132,23 +132,32 @@ def split_tensor(tensor: np.ndarray, strategy: str, rank: int) -> np.ndarray:
         return tensor  # no copy needed – safetensors.save_file reads it
 
     if strategy in ("col", "col_1d"):
+        if tensor.shape[0] % TP_SIZE != 0:
+            return tensor  # can't split evenly → replicate (e.g. kv_heads < tp)
         c = tensor.shape[0] // TP_SIZE
         return tensor[rank * c : (rank + 1) * c].copy()
 
     if strategy == "row":
+        if tensor.shape[1] % TP_SIZE != 0:
+            return tensor  # replicate
         c = tensor.shape[1] // TP_SIZE
         return tensor[:, rank * c : (rank + 1) * c].copy()
 
     if strategy == "gptq_col":
+        if tensor.shape[1] % TP_SIZE != 0:
+            return tensor  # replicate
         c = tensor.shape[1] // TP_SIZE
         return tensor[:, rank * c : (rank + 1) * c].copy()
 
     if strategy == "gptq_row":
+        if tensor.shape[0] % TP_SIZE != 0:
+            return tensor  # replicate
         c = tensor.shape[0] // TP_SIZE
         return tensor[rank * c : (rank + 1) * c].copy()
 
     if strategy == "gptq_gidx":
-        # desc_act=false → g_idx is sequential.  Regenerate for local range.
+        if tensor.shape[0] % TP_SIZE != 0:
+            return (np.arange(tensor.shape[0], dtype=np.int32) // GPTQ_GROUP_SIZE)
         c = tensor.shape[0] // TP_SIZE
         return (np.arange(c, dtype=np.int32) // GPTQ_GROUP_SIZE)
 
@@ -173,7 +182,10 @@ def modify_config(config: dict) -> dict:
         "shared_expert_intermediate_size",
     ):
         if key in tc:
-            tc[key] = tc[key] // TP_SIZE
+            # When TP > value, heads are replicated not split — keep original
+            if tc[key] >= TP_SIZE:
+                tc[key] = tc[key] // TP_SIZE
+            # else: keep as-is (replicated)
 
     return cfg
 

@@ -15,6 +15,7 @@ for TP in 1 2; do
         --model-dir "$MODEL" \
         --asys-sqlite "$DIR/trace/trace.sqlite" \
         --comm-json "$DIR/comm.json" \
+        --actual-seq-len 102400 \
         --output-json "$DIR/compensated.json"
     echo ""
 done

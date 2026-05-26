@@ -36,10 +36,16 @@ def load_model_config(model_dir: str) -> dict:
     with open(os.path.join(model_dir, "config.json")) as f:
         cfg = json.load(f)
     tc = cfg.get("text_config", cfg)
+    layer_types = tc.get("layer_types", [])
+    n_layers = tc["num_hidden_layers"]
+    n_full = sum(1 for lt in layer_types[:n_layers] if lt == "full_attention") if layer_types else n_layers
     return {
         "hidden_size": tc["hidden_size"],
         "vocab_size": tc["vocab_size"],
-        "num_hidden_layers": tc["num_hidden_layers"],
+        "num_hidden_layers": n_layers,
+        "num_key_value_heads": tc.get("num_key_value_heads", 2),
+        "head_dim": tc.get("head_dim", 256),
+        "n_full_attn_layers": n_full,
     }
 
 
@@ -137,6 +143,13 @@ def main():
     ap.add_argument("--original-layers", type=int, default=None)
     ap.add_argument("--tp-size", type=int, default=None)
     ap.add_argument("--lm-head-kernel", default="gemvt_op")
+    ap.add_argument("--actual-seq-len", type=int, default=None,
+                    help="Actual decode seq_len (e.g. 100K for agent hit with 80%% prefix cache). "
+                         "If set and > bench input_len, compensates extra KV cache read time.")
+    ap.add_argument("--peak-bw", type=float, default=680,
+                    help="Peak memory bandwidth GB/s (default: 680)")
+    ap.add_argument("--kv-bw-util", type=float, default=0.8,
+                    help="KV cache bandwidth utilization ratio (default: 0.8)")
     ap.add_argument("--output-json", default="compensated_ppu.json")
     args = ap.parse_args()
 
@@ -220,8 +233,26 @@ def main():
 
     tail_comp = lm_head_comp + sampling_ms
 
-    # === d) Compensated Results ===
-    print("=== d) Compensated Results ===")
+    # === d) KV cache compensation (for prefix cache hit scenarios) ===
+    kv_extra_tpot_ms = 0
+    if args.actual_seq_len:
+        n_kv = cfg["num_key_value_heads"]
+        head_dim = cfg["head_dim"]
+        n_full = cfg["n_full_attn_layers"]
+        # Use original layer count for full attn
+        n_full_orig = round(n_full * original / cfg["num_hidden_layers"]) if cfg["num_hidden_layers"] > 0 else n_full
+        # KV heads per rank
+        kv_heads_per_rank = n_kv if tp_size > n_kv else n_kv // tp_size
+
+        print(f"=== d) KV cache compensation ===")
+        # Will be computed per input_len in the loop below
+        print(f"  actual_seq_len: {args.actual_seq_len}")
+        print(f"  full_attn_layers: {n_full_orig}, kv_heads/rank: {kv_heads_per_rank}, head_dim: {head_dim}")
+        print(f"  peak_bw: {args.peak_bw} GB/s, kv_bw_util: {args.kv_bw_util}")
+    print()
+
+    # === e) Compensated Results ===
+    print("=== e) Compensated Results ===" if args.actual_seq_len else "=== d) Compensated Results ===")
     print()
     print("Step 1: Extract encoder time")
     print(f"  tail (proxy) = lm_head({lm_head_ms:.4f}) + sampling({sampling_ms:.4f}) = {tail_ms:.4f} ms")
@@ -234,9 +265,13 @@ def main():
     print("Step 3: Add back tail (lm_head compensated) + comm")
     print(f"  tail_comp = lm_head/{tp_size}({lm_head_comp:.4f}) + sampling({sampling_ms:.4f}) = {tail_comp:.4f} ms")
     print(f"  decode_comm = {decode_comm:.3f} ms, prefill_comm = {prefill_comm:.3f} ms")
+    if args.actual_seq_len:
+        print()
+        print("Step 4: KV cache compensation (actual_seq > bench input)")
     print()
     print("Formula:")
-    print(f"  comp_TPOT = decode_encoder × {layer_scale:.2f} + {tail_comp:.4f} + {decode_comm:.3f}")
+    print(f"  comp_TPOT = decode_encoder × {layer_scale:.2f} + {tail_comp:.4f} + {decode_comm:.3f}" +
+          (" + kv_extra" if args.actual_seq_len else ""))
     print(f"  comp_TTFT = prefill_encoder × {layer_scale:.2f} + {tail_comp:.4f} + {prefill_comm:.3f}")
     print()
     print(f"{'input':>8} {'raw_ttft':>10} {'comp_ttft':>10} "
@@ -259,17 +294,37 @@ def main():
         comp_tpot = decode_encoder * layer_scale + tail_comp + decode_comm
         comp_ttft = prefill_encoder * layer_scale + tail_comp + prefill_comm
 
+        # KV cache compensation: bench tested with input_len=il, but actual
+        # decode reads KV for actual_seq_len tokens. Add extra KV read time.
+        kv_extra = 0
+        if args.actual_seq_len and args.actual_seq_len > il:
+            delta_seq = args.actual_seq_len - il
+            n_kv = cfg["num_key_value_heads"]
+            head_dim_v = cfg["head_dim"]
+            n_full_orig = round(cfg["n_full_attn_layers"] * original / cfg["num_hidden_layers"]) \
+                if cfg["num_hidden_layers"] > 0 else cfg["n_full_attn_layers"]
+            kv_heads_per_rank = n_kv if tp_size > n_kv else n_kv // tp_size
+            # Extra bytes = n_full_layers × 2(K+V) × kv_heads × head_dim × delta_seq × 2(bf16)
+            extra_bytes = n_full_orig * 2 * kv_heads_per_rank * head_dim_v * delta_seq * 2
+            effective_bw = args.peak_bw * 1e9 * args.kv_bw_util
+            kv_extra = extra_bytes / effective_bw * 1000  # ms
+            comp_tpot += kv_extra
+
         comp_total = comp_ttft + (output_tokens - 1) * comp_tpot
 
         print(f"{il:>8} {raw_ttft:>10.2f} {comp_ttft:>10.2f} "
-              f"{raw_tpot:>10.3f} {comp_tpot:>10.3f} {comp_total:>10.1f}")
+              f"{raw_tpot:>10.3f} {comp_tpot:>10.3f} {comp_total:>10.1f}" +
+              (f" (kv_extra={kv_extra:.3f}ms)" if kv_extra > 0 else ""))
 
-        compensated.append({
+        entry = {
             **r,
             "comp_ttft_ms": round(comp_ttft, 3),
             "comp_tpot_ms": round(comp_tpot, 3),
             "comp_total_ms": round(comp_total, 3),
-        })
+        }
+        if kv_extra > 0:
+            entry["kv_extra_tpot_ms"] = round(kv_extra, 3)
+        compensated.append(entry)
 
     # Save
     output = {
