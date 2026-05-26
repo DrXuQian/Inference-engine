@@ -171,15 +171,20 @@ def main():
     if args.comm_json:
         with open(args.comm_json) as f:
             comm = json.load(f)
+        decode_comm = comm.get("decode_total_per_step_ms", comm.get("total_per_step_ms", 0))
+        prefill_comm = comm.get("prefill_total_per_step_ms", decode_comm)
+        comm["decode_comm_ms"] = decode_comm
+        comm["prefill_comm_ms"] = prefill_comm
         print(f"=== a) Communication (from {args.comm_json}) ===")
-        print(f"  Total/step: {comm['total_per_step_ms']:.3f} ms ({comm.get('method', '?')})")
+        print(f"  Decode:  {decode_comm:.3f} ms/step")
+        print(f"  Prefill: {prefill_comm:.3f} ms/step")
     elif tp_size > 1:
         print("=== a) Communication: no --comm-json, using 0 ===")
         print("    Run comm_scenarios first to measure AR/AG latency")
-        comm = {"total_per_step_ms": 0, "method": "none"}
+        comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
     else:
         print("=== a) Communication: TP=1, skip ===")
-        comm = {"total_per_step_ms": 0, "method": "none"}
+        comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
     print()
 
     # === b) Tail from trace ===
@@ -195,12 +200,15 @@ def main():
     print()
 
     # === c) Compensate ===
-    # comp_TPOT = (raw_TPOT - tail) × layer_scale + tail + comm
-    # comp_TTFT = (raw_TTFT - tail) × layer_scale + tail
+    # comp_TPOT = (raw_TPOT - tail) × scale + tail + decode_comm
+    # comp_TTFT = (raw_TTFT - tail) × scale + tail + prefill_comm
     print("=== Compensated Results ===")
     tail_ms = tail["tail_per_step_ms"]
+    decode_comm = comm["decode_comm_ms"]
+    prefill_comm = comm["prefill_comm_ms"]
     print(f"Formula: encoder = raw - tail({tail_ms:.4f}ms), "
-          f"comp = encoder × {layer_scale:.2f} + tail + comm({comm['total_per_step_ms']:.3f}ms)")
+          f"comp = encoder × {layer_scale:.2f} + tail + comm")
+    print(f"  TPOT comm: {decode_comm:.3f}ms, TTFT comm: {prefill_comm:.3f}ms")
     print()
     print(f"{'input':>8} {'raw_ttft':>10} {'comp_ttft':>10} "
           f"{'raw_tpot':>10} {'comp_tpot':>10} {'comp_total':>10}")
@@ -219,8 +227,8 @@ def main():
         decode_encoder = raw_tpot - tail_ms
         prefill_encoder = raw_ttft - tail_ms
 
-        comp_tpot = decode_encoder * layer_scale + tail_ms + comm["total_per_step_ms"]
-        comp_ttft = prefill_encoder * layer_scale + tail_ms
+        comp_tpot = decode_encoder * layer_scale + tail_ms + decode_comm
+        comp_ttft = prefill_encoder * layer_scale + tail_ms + prefill_comm
 
         comp_total = comp_ttft + (output_tokens - 1) * comp_tpot
 
