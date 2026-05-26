@@ -200,22 +200,44 @@ def main():
         tail = {"tail_per_step_ms": 0}
     print()
 
-    # === c) Compensate ===
-    # For TP>1: lm_head scales down by 1/tp (each rank computes vocab/tp)
-    # tail_comp = lm_head/tp + sampling (sampling doesn't change)
-    # comp_TPOT = (raw_TPOT - tail) × scale + tail_comp + decode_comm
-    # comp_TTFT = (raw_TTFT - tail) × scale + tail_comp + prefill_comm
-    print("=== Compensated Results ===")
+    # === c) LM head compensation (TP>1: scale down by 1/tp) ===
     tail_ms = tail["tail_per_step_ms"]
     lm_head_ms = tail.get("lm_head_ms", tail_ms)
     sampling_ms = tail.get("sampling_ms", 0)
-    tail_comp = lm_head_ms / tp_size + sampling_ms
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
-    print(f"  tail (proxy):  {tail_ms:.4f}ms (lm_head={lm_head_ms:.4f} + sampling={sampling_ms:.4f})")
-    print(f"  tail (TP={tp_size}):  {tail_comp:.4f}ms (lm_head/{tp_size}={lm_head_ms/tp_size:.4f} + sampling={sampling_ms:.4f})")
-    print(f"  layer scale: {layer_scale:.2f}x")
-    print(f"  TPOT comm: {decode_comm:.3f}ms, TTFT comm: {prefill_comm:.3f}ms")
+
+    if tp_size > 1:
+        lm_head_comp = lm_head_ms / tp_size
+        print(f"=== c) LM head compensation (TP={tp_size}) ===")
+        print(f"  lm_head (proxy, full vocab): {lm_head_ms:.4f} ms")
+        print(f"  lm_head (TP={tp_size}, vocab/{tp_size}):  {lm_head_comp:.4f} ms")
+        print(f"  delta: -{lm_head_ms - lm_head_comp:.4f} ms")
+    else:
+        lm_head_comp = lm_head_ms
+        print("=== c) LM head: TP=1, no compensation ===")
+    print()
+
+    tail_comp = lm_head_comp + sampling_ms
+
+    # === d) Compensated Results ===
+    print("=== d) Compensated Results ===")
+    print()
+    print("Step 1: Extract encoder time")
+    print(f"  tail (proxy) = lm_head({lm_head_ms:.4f}) + sampling({sampling_ms:.4f}) = {tail_ms:.4f} ms")
+    print(f"  decode_encoder = raw_TPOT - tail")
+    print(f"  prefill_encoder = raw_TTFT - tail")
+    print()
+    print("Step 2: Scale encoder by layer ratio")
+    print(f"  layer_scale = {original}/{pruned} = {layer_scale:.2f}x")
+    print()
+    print("Step 3: Add back tail (lm_head compensated) + comm")
+    print(f"  tail_comp = lm_head/{tp_size}({lm_head_comp:.4f}) + sampling({sampling_ms:.4f}) = {tail_comp:.4f} ms")
+    print(f"  decode_comm = {decode_comm:.3f} ms, prefill_comm = {prefill_comm:.3f} ms")
+    print()
+    print("Formula:")
+    print(f"  comp_TPOT = decode_encoder × {layer_scale:.2f} + {tail_comp:.4f} + {decode_comm:.3f}")
+    print(f"  comp_TTFT = prefill_encoder × {layer_scale:.2f} + {tail_comp:.4f} + {prefill_comm:.3f}")
     print()
     print(f"{'input':>8} {'raw_ttft':>10} {'comp_ttft':>10} "
           f"{'raw_tpot':>10} {'comp_tpot':>10} {'comp_total':>10}")
