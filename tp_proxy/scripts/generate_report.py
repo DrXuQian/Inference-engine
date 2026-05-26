@@ -25,7 +25,11 @@ def fmt_ms(val_ms: float) -> str:
         return f"{val_ms * 1000:.1f}us"
     if val_ms < 1000:
         return f"{val_ms:.2f}ms"
-    return f"{val_ms / 1000:.2f}s"
+    if val_ms < 60_000:
+        return f"{val_ms / 1000:.2f}s"
+    if val_ms < 3600_000:
+        return f"{val_ms / 60_000:.2f}min"
+    return f"{val_ms / 3600_000:.2f}h"
 
 
 def get_metrics(data: dict) -> dict | None:

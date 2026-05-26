@@ -38,6 +38,10 @@ def fmt(val, unit="ms", prec=2):
     if val is None:
         return ""
     if unit == "ms":
+        if val >= 3600_000:
+            return f"{val / 3600_000:.{prec}f}h"
+        if val >= 60_000:
+            return f"{val / 60_000:.{prec}f}min"
         if val >= 1000:
             return f"{val / 1000:.{prec}f}s"
         return f"{val:.{prec}f}ms"
