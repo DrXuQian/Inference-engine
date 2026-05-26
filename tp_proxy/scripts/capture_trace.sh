@@ -25,7 +25,7 @@ PLATFORM="${PLATFORM:-ppu}"
 echo "[1/5] Starting server under profiler..."
 if [ "$PLATFORM" = "ppu" ]; then
     asys profile -o "$OUT_DIR/trace.report" -f true \
-        -t hggc,acdnn,acblas --hggc-trace-scope system-wide \
+        -t hggc,acdnn,acblas \
         vllm serve "$MODEL" \
         --host 127.0.0.1 --port $PORT --tensor-parallel-size 1 \
         --trust-remote-code --no-enable-prefix-caching \
@@ -89,7 +89,7 @@ if [ "$PLATFORM" = "ppu" ]; then
         exit 1
     fi
     echo "       Found: $ASYS_REP"
-    asys export -f -o "$OUT_DIR/trace.sqlite" "$ASYS_REP"
+    asys export --force-overwrite true -o "$OUT_DIR/trace.sqlite" "$ASYS_REP"
 else
     nsys stats -r cuda_gpu_kern_sum --format csv --force-export=true \
         "$OUT_DIR/trace.nsys-rep" > /dev/null 2>&1
