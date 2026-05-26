@@ -64,7 +64,7 @@ def load_model_config(model_dir: str) -> dict | None:
                 "moe_intermediate_size": tc.get("moe_intermediate_size", 0),
                 "shared_expert_intermediate_size": tc.get("shared_expert_intermediate_size", 0),
                 "intermediate_size": tc.get("intermediate_size", 0),
-                "interleave_attn_pattern": tc.get("interleave_attn_pattern", None),
+                "layer_types": tc.get("layer_types", []),
                 "linear_num_key_heads": tc.get("linear_num_key_heads", 0),
                 "linear_num_value_heads": tc.get("linear_num_value_heads", 0),
                 "linear_key_head_dim": tc.get("linear_key_head_dim", 0),
@@ -73,6 +73,16 @@ def load_model_config(model_dir: str) -> dict | None:
                 "quant_bits": qc.get("bits", 16),
             }
     return None
+
+
+def count_full_attn_layers(cfg: dict) -> tuple[int, int]:
+    """Return (n_full_attn_layers, n_linear_attn_layers)."""
+    N = cfg["num_hidden_layers"]
+    layer_types = cfg.get("layer_types", [])
+    if layer_types:
+        n_full = sum(1 for lt in layer_types[:N] if lt == "full_attention")
+        return n_full, N - n_full
+    return N, 0  # default: all full attention
 
 
 def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
@@ -96,13 +106,7 @@ def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     shared_inter = cfg["shared_expert_intermediate_size"]
     dense_inter = cfg["intermediate_size"]
 
-    attn_pattern = cfg.get("interleave_attn_pattern")
-    if attn_pattern:
-        n_full = sum(1 for x in attn_pattern if x == "full")
-        n_full_layers = N * n_full // len(attn_pattern)
-    else:
-        n_full_layers = N
-    n_lin_layers = N - n_full_layers
+    n_full_layers, n_lin_layers = count_full_attn_layers(cfg)
 
     # --- Full attention layer FLOPs ---
     # QKV projections: Q=[S,H]×[H, n_heads*head_dim*(2 if gate)], K/V=[S,H]×[H, n_kv*head_dim]
@@ -172,13 +176,7 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     bpp_q = quant_bits / 8 + 0.05 if quant_bits < 16 else 2  # quantized
     bpp_f = 2  # bf16
 
-    attn_pattern = cfg.get("interleave_attn_pattern")
-    if attn_pattern:
-        n_full = sum(1 for x in attn_pattern if x == "full")
-        n_full_layers = N * n_full // len(attn_pattern)
-    else:
-        n_full_layers = N
-    n_lin_layers = N - n_full_layers
+    n_full_layers, n_lin_layers = count_full_attn_layers(cfg)
 
     # --- Weights per layer (active) ---
     # Full attention
@@ -217,7 +215,10 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
     # --- KV cache ---
     # Only full attention layers have KV cache
     # Per layer: read K[seq_len, n_kv_heads/tp, head_dim] + V[same], bf16
-    kv_per_layer = 2 * (n_kv // max(tp_size, 1)) * head_dim * seq_len * 2
+    # When tp > n_kv, KV heads are replicated (each rank has all n_kv heads)
+    # When tp <= n_kv, KV heads are split (each rank has n_kv/tp heads)
+    kv_heads_per_rank = n_kv if tp_size > n_kv else n_kv // tp_size
+    kv_per_layer = 2 * kv_heads_per_rank * head_dim * seq_len * 2  # K + V, bf16
     total_kv = n_full_layers * kv_per_layer
 
     return total_weight + total_kv, total_weight, total_kv
@@ -469,18 +470,35 @@ def main():
                 model_dirs = _glob.glob(os.path.join(base, "model", "split", "rank_0"))
             cfg = load_model_config(model_dirs[0]) if model_dirs else None
 
-            # Restore original model dimensions (pruned config has TP-split values)
+            # Pruned config has TP-split values and truncated layer_types.
+            # Try to load the ORIGINAL model config from split_meta.json.
             if cfg and comp:
-                orig_layers = comp.get("original_layers", cfg["num_hidden_layers"])
-                cfg["num_hidden_layers"] = orig_layers
-                # Config was modified by split_tp2: heads/intermediate divided by tp.
-                # Restore to original values for correct FLOPs/BW calculation.
-                if tp > 1:
-                    for key in ("num_attention_heads", "num_key_value_heads",
-                                "linear_num_key_heads", "linear_num_value_heads",
-                                "moe_intermediate_size", "shared_expert_intermediate_size"):
-                        if key in cfg and cfg[key] > 0:
-                            cfg[key] = cfg[key] * tp
+                orig_cfg = None
+                meta_path = os.path.join(base, "model", "split_meta.json")
+                if os.path.exists(meta_path):
+                    with open(meta_path) as _f:
+                        meta = json.load(_f)
+                    orig_model = meta.get("original_model", "")
+                    if orig_model:
+                        orig_cfg = load_model_config(orig_model)
+
+                if orig_cfg:
+                    # Use original config directly — correct heads, layers, layer_types
+                    cfg = orig_cfg
+                else:
+                    # Fallback: restore from pruned config
+                    orig_layers = comp.get("original_layers", cfg["num_hidden_layers"])
+                    cfg["num_hidden_layers"] = orig_layers
+                    lt = cfg.get("layer_types", [])
+                    if lt and len(lt) < orig_layers:
+                        cycle = len(lt)
+                        cfg["layer_types"] = [lt[i % cycle] for i in range(orig_layers)]
+                    if tp > 1:
+                        for key in ("num_attention_heads", "num_key_value_heads",
+                                    "linear_num_key_heads", "linear_num_value_heads",
+                                    "moe_intermediate_size", "shared_expert_intermediate_size"):
+                            if key in cfg:
+                                cfg[key] = max(cfg[key] * tp, 1)
 
             mfu_str = "N/A"
             bw_str = "N/A"
