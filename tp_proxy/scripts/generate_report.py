@@ -488,10 +488,9 @@ def main():
                     mfu_str = f"{mfu:.1f}%"
 
                 if args.peak_bw > 0:
-                    # For decode, seq_len = input_len + output_len/2 (average)
-                    avg_seq = input_len + output_len // 2
+                    # KV cache seq_len = input_len (decode start)
                     total_bytes, weight_bytes, kv_bytes = compute_decode_bytes(
-                        cfg, avg_seq, tp)
+                        cfg, input_len, tp)
                     tpot_s = m["tpot"] / 1000
                     bw_used = total_bytes / tpot_s / 1e9 if tpot_s > 0 else 0
                     bw_util = bw_used / args.peak_bw * 100
