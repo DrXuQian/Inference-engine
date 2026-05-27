@@ -68,7 +68,7 @@ VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 vllm bench serve \
     --max-concurrency $BATCH_SIZE --base-url "http://127.0.0.1:${PORT}" \
     --dataset-name random \
     --random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN" \
-    --num-prompts "$NUM_PROMPTS" --request-rate 5 \
+    --num-prompts "$NUM_PROMPTS" --request-rate inf \
     --trust-remote-code 2>&1 | tee "$OUT_DIR/bench_serve.txt"
 
 # Kill server → profiler saves trace
