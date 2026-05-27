@@ -1,7 +1,7 @@
 #!/bin/bash
 # Agent batch sweep: Qwen3.5-122B-A10B GPTQ-Int4, TP=1 and TP=2
-# Tests batch=1,2,4,8 with input=4096, output=1500
-# Uses auto_bench.py (same method as other scenarios)
+# Tests batch=1,2,4,8 with input=102400, output=3072
+# Uses auto_bench with --batch-size (serve mode, --max-concurrency)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3.5-122B-A10B-GPTQ-Int4}
@@ -22,7 +22,6 @@ for TP in 1 2; do
     TP_DIR="$OUT/tp${TP}"
     mkdir -p "$TP_DIR"
 
-    # Reuse split model from 04_agent
     PRUNED=$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE_04/tp${TP}/model")
     if [ -z "$PRUNED" ]; then
         echo "  Split model not found, splitting..."

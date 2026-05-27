@@ -143,6 +143,8 @@ def main():
     ap.add_argument("--original-layers", type=int, default=None)
     ap.add_argument("--tp-size", type=int, default=None)
     ap.add_argument("--lm-head-kernel", default="gemvt_op")
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="Batch size. lm_head scales by 1.1^batch, sampling scales by batch.")
     ap.add_argument("--actual-seq-len", type=int, default=None,
                     help="Actual decode seq_len (e.g. 100K for agent hit with 80%% prefix cache). "
                          "If set and > bench input_len, compensates extra KV cache read time.")
@@ -231,7 +233,17 @@ def main():
         print("=== c) LM head: TP=1, no compensation ===")
     print()
 
-    tail_comp = lm_head_comp + sampling_ms
+    # === c2) Batch compensation ===
+    batch = args.batch_size
+    if batch > 1:
+        lm_head_batch = lm_head_comp * (1.1 ** batch)
+        sampling_batch = sampling_ms * batch
+        print(f"=== c2) Batch compensation (batch={batch}) ===")
+        print(f"  lm_head: {lm_head_comp:.4f} × 1.1^{batch} = {lm_head_batch:.4f} ms")
+        print(f"  sampling: {sampling_ms:.4f} × {batch} = {sampling_batch:.4f} ms")
+        tail_comp = lm_head_batch + sampling_batch
+    else:
+        tail_comp = lm_head_comp + sampling_ms
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===
     kv_extra_tpot_ms = 0
