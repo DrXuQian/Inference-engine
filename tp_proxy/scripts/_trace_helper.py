@@ -110,17 +110,30 @@ def measure_tail_from_trace(sqlite_path, lm_head_kernel):
     step_kernel_ns = encoder_ns + lm_head_ns + sampling_ns
     overhead_ns = max(step_wall_ns - step_kernel_ns, 0)
 
+    tpot_ms = step_wall_ns / 1e6
+
+    # Prefill: non-graph kernels before first consistent decode graph
+    first_graph_start = consistent_steps[0][0][0][0]
+    prefill_ns = sum(d for s, d, e, n, g in all_events if s < first_graph_start and g == 0)
+    prefill_wall_ns = first_graph_start - all_events[0][0]
+    ttft_ms = prefill_wall_ns / 1e6
+
+    print(f"  === Decode ===")
     print(f"  encoder (CUDA Graph): {encoder_ns/1e6:.4f} ms ({len(graph_evts)} kernels)")
     print(f"  lm_head:  {lm_head_ns/1e6:.4f} ms")
-    print(f"  sampling: {sampling_ns/1e6:.4f} ms ({len(gap_evts)-1 if lm_head_ns>0 else len(gap_evts)} kernels)")
-    print(f"  step wall: {step_wall_ns/1e6:.4f} ms")
-    print(f"  overhead:  {overhead_ns/1e6:.4f} ms")
+    print(f"  sampling: {sampling_ns/1e6:.4f} ms")
+    print(f"  overhead: {overhead_ns/1e6:.4f} ms")
+    print(f"  TPOT (step wall): {tpot_ms:.4f} ms")
+    print(f"  === Prefill ===")
+    print(f"  TTFT (wall): {ttft_ms:.2f} ms")
 
     return {
         "lm_head_ms": round(lm_head_ns / 1e6, 4),
         "sampling_ms": round(sampling_ns / 1e6, 4),
         "encoder_ms": round(encoder_ns / 1e6, 4),
         "overhead_ms": round(overhead_ns / 1e6, 4),
+        "tpot_ms": round(tpot_ms, 4),
+        "ttft_ms": round(ttft_ms, 2),
         "tail_per_step_ms": round((lm_head_ns + sampling_ns) / 1e6, 4),
     }
 

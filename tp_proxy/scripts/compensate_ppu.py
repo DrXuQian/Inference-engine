@@ -200,17 +200,52 @@ def measure_tail_from_trace(sqlite_path: str,
     step_kernel_ns = encoder_ns + lm_head_ns + sampling_ns
     overhead_ns = max(step_wall_ns - step_kernel_ns, 0)
 
+    # TPOT = step wall clock (one decode step)
+    tpot_ms = step_wall_ns / 1e6
+
+    # Prefill (TTFT): find the last large gap segment before decode starts.
+    # Prefill = non-graph kernels, typically the largest gap segment.
+    # Look for the gap segment right before the first consistent graph segment.
+    first_consistent_graph = consistent_steps[0][0]
+    first_graph_start = first_consistent_graph[0][0]  # start time of first graph kernel
+
+    # All non-graph kernels before first consistent decode graph = prefill
+    prefill_ns = 0
+    prefill_count = 0
+    for s, d, e, n, g in all_events:
+        if s >= first_graph_start:
+            break
+        if g == 0:
+            prefill_ns += d
+            prefill_count += 1
+    # Prefill wall clock
+    prefill_wall_ns = first_graph_start - all_events[0][0]
+    ttft_ms = prefill_wall_ns / 1e6
+
+    # Count decode steps for averaging
+    n_decode_steps = len(consistent_steps)
+
+    print(f"  === Decode (per step) ===")
     print(f"  encoder (CUDA Graph): {encoder_ns/1e6:.4f} ms ({len(graph_evts)} kernels)")
     print(f"  lm_head:  {lm_head_ns/1e6:.4f} ms")
     print(f"  sampling: {sampling_ns/1e6:.4f} ms")
-    print(f"  step wall: {step_wall_ns/1e6:.4f} ms")
-    print(f"  overhead:  {overhead_ns/1e6:.4f} ms (not scaled)")
+    print(f"  overhead: {overhead_ns/1e6:.4f} ms")
+    print(f"  TPOT (step wall): {tpot_ms:.4f} ms")
+    print(f"  === Prefill ===")
+    print(f"  prefill kernels: {prefill_count}, kernel time: {prefill_ns/1e6:.2f} ms")
+    print(f"  TTFT (wall): {ttft_ms:.2f} ms")
+    print(f"  === Summary ===")
+    print(f"  decode steps: {n_decode_steps}")
 
     return {
         "lm_head_ms": round(lm_head_ns / 1e6, 4),
         "sampling_ms": round(sampling_ns / 1e6, 4),
         "encoder_ms": round(encoder_ns / 1e6, 4),
         "overhead_ms": round(overhead_ns / 1e6, 4),
+        "tpot_ms": round(tpot_ms, 4),
+        "ttft_ms": round(ttft_ms, 2),
+        "prefill_kernel_ms": round(prefill_ns / 1e6, 2),
+        "n_decode_steps": n_decode_steps,
         "tail_per_step_ms": round((lm_head_ns + sampling_ns) / 1e6, 4),
     }
 
@@ -221,7 +256,8 @@ def measure_tail_from_trace(sqlite_path: str,
 
 def main():
     ap = argparse.ArgumentParser(description="PPU compensation")
-    ap.add_argument("--bench-results", required=True)
+    ap.add_argument("--bench-results", default=None,
+                    help="bench.json (optional if --asys-sqlite provided, reads TTFT/TPOT from trace)")
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--output-len", type=int, default=None)
     ap.add_argument("--comm-json", default=None,
@@ -245,9 +281,11 @@ def main():
     ap.add_argument("--output-json", default="compensated_ppu.json")
     args = ap.parse_args()
 
-    # Load bench results
-    with open(args.bench_results) as f:
-        bench = json.load(f)
+    # Load bench results (optional — can read from trace instead)
+    bench = None
+    if args.bench_results and os.path.exists(args.bench_results):
+        with open(args.bench_results) as f:
+            bench = json.load(f)
 
     # Load config + meta
     cfg = load_model_config(args.model_dir)
@@ -260,13 +298,18 @@ def main():
     original = args.original_layers or (meta and meta.get("original_layers")) or pruned
     layer_scale = original / pruned if pruned > 0 else 1
 
-    results_list = bench.get("results", [bench])
+    if bench:
+        results_list = bench.get("results", [bench])
+    else:
+        results_list = []
 
     # Auto-read output_len
     output_len = args.output_len
-    if output_len is None:
+    if output_len is None and bench:
         output_len = bench.get("output_len") or next(
             (r.get("output_len") or r.get("output_tokens") for r in results_list if "error" not in r), 64)
+    if output_len is None:
+        output_len = 64
 
     print(f"Model: hidden={hidden}, vocab={vocab}")
     print(f"Layers: {pruned} pruned / {original} original (scale={layer_scale:.2f}x), TP={tp_size}")
@@ -380,22 +423,34 @@ def main():
           f"{'raw_tpot':>10} {'comp_tpot':>10} {'comp_total':>10}")
     print("-" * 65)
 
+    # If no bench results, create one entry from trace data
+    if not results_list and use_trace_encoder:
+        trace_ttft = tail.get("ttft_ms", 0)
+        trace_tpot = tail.get("tpot_ms", 0)
+        print(f"  (No bench.json — using trace: TTFT={trace_ttft:.2f}ms, TPOT={trace_tpot:.4f}ms)")
+        results_list = [{
+            "input_len": 0,  # unknown from trace
+            "ttft_median_ms": trace_ttft,
+            "tpot_median_ms": trace_tpot,
+            "output_tokens": output_len,
+        }]
+
     compensated = []
     for r in results_list:
         if "error" in r:
             compensated.append(r); continue
 
-        il = r["input_len"]
-        raw_ttft = r["ttft_median_ms"]
-        raw_tpot = r["tpot_median_ms"]
+        il = r.get("input_len", 0)
+        raw_ttft = r.get("ttft_median_ms", tail.get("ttft_ms", 0))
+        raw_tpot = r.get("tpot_median_ms", tail.get("tpot_ms", 0))
         output_tokens = r.get("output_tokens", output_len)
 
         if use_trace_encoder:
             # Precise: encoder from trace, overhead not scaled
             comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + overhead_ms + decode_comm
-            # For TTFT: use raw_TTFT - (encoder + lm_head + sampling + overhead) as prefill non-encoder,
-            # then scale encoder part. Simpler: scale proportionally.
-            prefill_encoder = max(raw_ttft - lm_head_ms - sampling_ms - overhead_ms, 0)
+            # TTFT: prefill kernel time from trace, scale encoder portion
+            trace_ttft = tail.get("ttft_ms", raw_ttft)
+            prefill_encoder = max(trace_ttft - lm_head_ms - sampling_ms - overhead_ms, 0)
             comp_ttft = prefill_encoder * layer_scale + lm_head_final + sampling_ms + overhead_ms + prefill_comm
         else:
             tail_subtract = lm_head_ms + sampling_ms
