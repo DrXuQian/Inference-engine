@@ -56,17 +56,21 @@ def scale_ttft(ttft_src, src_flops, tgt_flops,
     return compute_tgt + comm_tgt
 
 
-def scale_tpot(tpot_src_ms, src_bw, tgt_bw, src_link_lat_us, tgt_link_lat_us):
-    """Scale TPOT (ms): subtract src link latency, scale DDR part, add tgt link latency.
-    Link latency in us, converted to ms internally.
-    tpot_tgt = (tpot_src - src_lat) × (src_bw / tgt_bw) + tgt_lat
+def scale_tpot(tpot_src_ms, src_bw, tgt_bw,
+               src_ar_lat_us, tgt_ar_lat_us, n_ar_per_step):
+    """Scale TPOT (ms).
+    src/tgt_ar_lat_us: single all-reduce latency (us)
+    n_ar_per_step: number of AR calls per decode step (= num_layers × 2)
+
+    tpot = ddr_time + n_ar × ar_latency
+    ddr_time scales with DDR BW, ar_latency replaced by target value.
     """
     if src_bw <= 0 or tgt_bw <= 0:
         return tpot_src_ms
-    src_lat_ms = src_link_lat_us / 1000
-    tgt_lat_ms = tgt_link_lat_us / 1000
-    ddr_time = max(tpot_src_ms - src_lat_ms, 0)
-    return ddr_time * (src_bw / tgt_bw) + tgt_lat_ms
+    src_comm_ms = src_ar_lat_us * n_ar_per_step / 1000
+    tgt_comm_ms = tgt_ar_lat_us * n_ar_per_step / 1000
+    ddr_time = max(tpot_src_ms - src_comm_ms, 0)
+    return ddr_time * (src_bw / tgt_bw) + tgt_comm_ms
 
 
 def parse_log(path):
@@ -152,8 +156,9 @@ def do_scale(args):
                 if ttft is None or tpot is None:
                     continue
                 t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
+                n_ar = args.num_layers * 2
                 t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                    args.src_link_latency, args.tgt_link_latency)
+                                    args.src_link_latency, args.tgt_link_latency, n_ar)
                 t_tps = 1000 / t_tpot if t_tpot > 0 else 0
                 print(f"{il:>8} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10} {t_tps:>7.1f}")
                 sweep.append({
@@ -181,7 +186,8 @@ def do_scale(args):
             name = log_name.replace(".log", "")
             t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
             t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                args.src_link_latency, args.tgt_link_latency)
+                                args.src_link_latency, args.tgt_link_latency,
+                                args.num_layers * 2)
             print(f"{name:>20} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}")
             scenarios.append({
                 "name": name,
@@ -298,6 +304,8 @@ def main():
     ap.add_argument("--input-csv", default=None)
     ap.add_argument("--scenario-dir", default=None)
     ap.add_argument("--tp-size", type=int, default=1)
+    ap.add_argument("--num-layers", type=int, default=40,
+                    help="Model num_hidden_layers (for AR count = layers×2)")
     ap.add_argument("--name", default="Target",
                     help="Label for this configuration (e.g. 'ICN', 'PCIe')")
 
