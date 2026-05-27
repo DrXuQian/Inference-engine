@@ -29,31 +29,16 @@ import sys, os, numpy as np
 os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
-def patch_batch_nvtx():
-    """Patch ModelRunner.execute_model to add NVTX marker with batch size.
-    nvtx.range_push/pop is CPU-only (<1us), does not affect GPU timing."""
-    import torch
-    try:
-        from vllm.worker.model_runner import ModelRunner
-        _orig = ModelRunner.execute_model
-        def _patched(self, *args, **kwargs):
-            model_input = args[0] if args else kwargs.get('model_input')
-            bs = 0
-            if hasattr(model_input, 'input_tokens'):
-                bs = model_input.input_tokens.shape[0]
-            elif hasattr(model_input, 'seq_lens'):
-                bs = len(model_input.seq_lens)
-            torch.cuda.nvtx.range_push(f"bs={bs}")
-            result = _orig(self, *args, **kwargs)
-            torch.cuda.nvtx.range_pop()
-            return result
-        ModelRunner.execute_model = _patched
-        print("Patched ModelRunner with batch NVTX markers")
-    except Exception as e:
-        print(f"NVTX patch failed (non-fatal): {e}")
-
 def main():
-    patch_batch_nvtx()
+    # Apply NVTX batch size patch
+    patch_path = os.environ.get("PATCH_NVTX", "")
+    if patch_path and os.path.exists(patch_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("patch_nvtx", patch_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.apply()
+
     from vllm import LLM, SamplingParams
 
     model = sys.argv[1]
@@ -98,6 +83,9 @@ echo "============================================"
 
 # Run under profiler
 echo "[1/3] Running offline bench under profiler..."
+PATCH_NVTX="$SCRIPT_DIR/patch_vllm_batch_nvtx.py"
+export PATCH_NVTX
+
 if [ "$PLATFORM" = "ppu" ]; then
     asys profile -o "$OUT_DIR/trace.report" -f true \
         -t hggc,acdnn,acblas \
