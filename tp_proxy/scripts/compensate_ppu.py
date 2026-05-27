@@ -203,47 +203,46 @@ def main():
         comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
     print()
 
-    # === b) Tail from trace ===
+    # === b) Tail from trace (lm_head + sampling) ===
     tail = None
     if args.asys_sqlite:
         print("=== b) Tail from trace (lm_head + sampling) ===")
         tail = measure_tail_from_trace(args.asys_sqlite, args.lm_head_kernel)
         if tail:
-            print(f"  → tail_per_step: {tail['tail_per_step_ms']:.4f} ms")
+            print(f"  lm_head (batch=1): {tail['lm_head_ms']:.4f} ms")
+            print(f"  sampling (batch=1): {tail['sampling_ms']:.4f} ms")
     if not tail:
         print("=== b) Tail: no trace or kernel not found, using 0 ===")
-        tail = {"tail_per_step_ms": 0}
-    print()
+        tail = {"tail_per_step_ms": 0, "lm_head_ms": 0, "sampling_ms": 0}
 
-    # === c) LM head compensation (TP>1: scale down by 1/tp) ===
-    tail_ms = tail["tail_per_step_ms"]
-    lm_head_ms = tail.get("lm_head_ms", tail_ms)
+    lm_head_ms = tail.get("lm_head_ms", tail["tail_per_step_ms"])
     sampling_ms = tail.get("sampling_ms", 0)
+    batch = args.batch_size
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 
-    if tp_size > 1:
-        lm_head_comp = lm_head_ms / tp_size
-        print(f"=== c) LM head compensation (TP={tp_size}) ===")
-        print(f"  lm_head (proxy, full vocab): {lm_head_ms:.4f} ms")
-        print(f"  lm_head (TP={tp_size}, vocab/{tp_size}):  {lm_head_comp:.4f} ms")
-        print(f"  delta: -{lm_head_ms - lm_head_comp:.4f} ms")
-    else:
-        lm_head_comp = lm_head_ms
-        print("=== c) LM head: TP=1, no compensation ===")
-    print()
-
-    # === c2) Batch compensation ===
-    batch = args.batch_size
+    # Apply batch scaling: lm_head × 1.1^batch, sampling × batch
     if batch > 1:
-        lm_head_batch = lm_head_comp * (1.1 ** batch)
-        sampling_batch = sampling_ms * batch
-        print(f"=== c2) Batch compensation (batch={batch}) ===")
-        print(f"  lm_head: {lm_head_comp:.4f} × 1.1^{batch} = {lm_head_batch:.4f} ms")
-        print(f"  sampling: {sampling_ms:.4f} × {batch} = {sampling_batch:.4f} ms")
-        tail_comp = lm_head_batch + sampling_batch
+        lm_head_scaled = lm_head_ms * (1.1 ** batch)
+        sampling_scaled = sampling_ms * batch
+        print(f"  batch={batch}: lm_head × 1.1^{batch} = {lm_head_scaled:.4f} ms")
+        print(f"  batch={batch}: sampling × {batch} = {sampling_scaled:.4f} ms")
     else:
-        tail_comp = lm_head_comp + sampling_ms
+        lm_head_scaled = lm_head_ms
+        sampling_scaled = sampling_ms
+
+    # Apply TP scaling: lm_head / tp
+    if tp_size > 1:
+        lm_head_final = lm_head_scaled / tp_size
+        print(f"  TP={tp_size}: lm_head / {tp_size} = {lm_head_final:.4f} ms")
+    else:
+        lm_head_final = lm_head_scaled
+
+    tail_ms = lm_head_ms + sampling_ms  # original tail (for subtracting from raw)
+    tail_comp = lm_head_final + sampling_scaled  # compensated tail
+    print(f"  tail (original): {tail_ms:.4f} ms")
+    print(f"  tail (compensated): {tail_comp:.4f} ms")
+    print()
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===
     kv_extra_tpot_ms = 0
