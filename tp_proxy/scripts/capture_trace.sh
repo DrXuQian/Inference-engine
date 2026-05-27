@@ -25,39 +25,44 @@ PLATFORM="${PLATFORM:-ppu}"
 # Generate the offline bench script
 BENCH_SCRIPT="$OUT_DIR/_bench_offline.py"
 cat > "$BENCH_SCRIPT" << 'PYEOF'
-import sys, os, json, numpy as np
+import sys, os, numpy as np
 os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-from vllm import LLM, SamplingParams
 
-model = sys.argv[1]
-input_len = int(sys.argv[2])
-output_len = int(sys.argv[3])
-num_prompts = int(sys.argv[4])
-batch_size = int(sys.argv[5])
-max_model_len = int(sys.argv[6])
+def main():
+    from vllm import LLM, SamplingParams
 
-llm = LLM(model=model, max_model_len=max_model_len,
-          gpu_memory_utilization=0.9, trust_remote_code=True)
-sp = SamplingParams(max_tokens=output_len, temperature=0, ignore_eos=True)
+    model = sys.argv[1]
+    input_len = int(sys.argv[2])
+    output_len = int(sys.argv[3])
+    num_prompts = int(sys.argv[4])
+    batch_size = int(sys.argv[5])
+    max_model_len = int(sys.argv[6])
 
-# Warmup
-warmup = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
-          for _ in range(batch_size)]
-llm.generate(warmup, sampling_params=sp)
-print(f"Warmup done (batch={batch_size})")
+    llm = LLM(model=model, max_model_len=max_model_len,
+              gpu_memory_utilization=0.9, trust_remote_code=True)
+    sp = SamplingParams(max_tokens=output_len, temperature=0, ignore_eos=True)
 
-# Bench rounds
-n_rounds = max(num_prompts // batch_size, 3)
-for r in range(n_rounds):
-    prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
-               for _ in range(batch_size)]
-    outputs = llm.generate(prompts, sampling_params=sp)
-    toks = [len(o.outputs[0].token_ids) for o in outputs]
-    print(f"Round {r}: batch={len(outputs)}, tokens={toks}")
+    # Warmup
+    warmup = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
+              for _ in range(batch_size)]
+    llm.generate(warmup, sampling_params=sp)
+    print(f"Warmup done (batch={batch_size})")
 
-del llm
-print("Done")
+    # Bench rounds
+    n_rounds = max(num_prompts // batch_size, 3)
+    for r in range(n_rounds):
+        prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
+                   for _ in range(batch_size)]
+        outputs = llm.generate(prompts, sampling_params=sp)
+        toks = [len(o.outputs[0].token_ids) for o in outputs]
+        print(f"Round {r}: batch={len(outputs)}, tokens={toks}")
+
+    del llm
+    print("Done")
+
+if __name__ == "__main__":
+    main()
 PYEOF
 
 echo "============================================"
