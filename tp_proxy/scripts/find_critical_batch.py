@@ -37,20 +37,27 @@ import numpy as np
 import requests
 
 
-def wait_for_server(base_url: str, timeout: int = 600) -> bool:
+def wait_for_server(base_url: str, server_proc=None) -> bool:
+    """Block until server is ready. No timeout — waits forever.
+    Returns False only if server process dies."""
     t0 = time.time()
-    while time.time() - t0 < timeout:
+    while True:
         try:
             r = requests.get(f"{base_url}/health", timeout=2)
             if r.status_code == 200:
+                elapsed = int(time.time() - t0)
+                print(f"  Server ready ({elapsed}s)")
                 return True
         except Exception:
             pass
+        # Check if server process died
+        if server_proc and server_proc.poll() is not None:
+            print(f"  Server process exited with code {server_proc.returncode}")
+            return False
         elapsed = int(time.time() - t0)
         if elapsed % 30 == 0 and elapsed > 0:
-            print(f"  Waiting for server... ({elapsed}s / {timeout}s)")
+            print(f"  Waiting for server... ({elapsed}s)")
         time.sleep(2)
-    return False
 
 
 def bench_concurrency(base_url: str, model: str, input_len: int,
@@ -167,9 +174,8 @@ def main():
             env=env,
         )
         print(f"Starting server (port {args.port})...")
-        if not wait_for_server(base_url):
-            print("ERROR: server failed to start")
-            server_proc.kill()
+        if not wait_for_server(base_url, server_proc):
+            print("ERROR: server process died")
             sys.exit(1)
         print("Server ready\n")
 
