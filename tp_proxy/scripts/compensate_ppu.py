@@ -301,13 +301,18 @@ def main():
     else:
         lm_head_final = lm_head_ms
 
-    # New formula: use encoder_ms from trace directly, don't subtract from TPOT
-    # comp_TPOT = encoder_ms × layer_scale + lm_head/tp + sampling + overhead + comm
-    # overhead is NOT scaled (CPU scheduling, not proportional to layers)
-    use_trace_encoder = encoder_ms > 0
+    # COMP_MODE env: "trace" (precise, default) or "tpot" (old method)
+    comp_mode = os.environ.get("COMP_MODE", "trace").lower()
+    use_trace_encoder = encoder_ms > 0 and comp_mode == "trace"
     if use_trace_encoder:
-        print(f"\n  Using trace-based encoder: {encoder_ms:.4f} ms/step ({pruned} layers)")
+        print(f"\n  Mode: trace-based (COMP_MODE=trace)")
+        print(f"  encoder (from trace): {encoder_ms:.4f} ms/step ({pruned} layers)")
         print(f"  overhead (not scaled): {overhead_ms:.4f} ms")
+    else:
+        if comp_mode == "tpot" and encoder_ms > 0:
+            print(f"\n  Mode: TPOT-based (COMP_MODE=tpot, forced)")
+        else:
+            print(f"\n  Mode: TPOT-based (no encoder from trace)")
     print()
     print()
 
