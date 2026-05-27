@@ -37,7 +37,7 @@ import numpy as np
 import requests
 
 
-def wait_for_server(base_url: str, timeout: int = 300) -> bool:
+def wait_for_server(base_url: str, timeout: int = 600) -> bool:
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
@@ -46,6 +46,9 @@ def wait_for_server(base_url: str, timeout: int = 300) -> bool:
                 return True
         except Exception:
             pass
+        elapsed = int(time.time() - t0)
+        if elapsed % 30 == 0 and elapsed > 0:
+            print(f"  Waiting for server... ({elapsed}s / {timeout}s)")
         time.sleep(2)
     return False
 
