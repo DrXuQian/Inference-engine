@@ -28,15 +28,16 @@ echo "============================================"
 # === Start server ===
 echo ""
 echo "=== Starting vllm serve ==="
-CUDA_VISIBLE_DEVICES=$GPU_IDS \
-VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+export CUDA_VISIBLE_DEVICES=$GPU_IDS
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 vllm serve "$MODEL" \
     --host 127.0.0.1 --port $PORT \
     --tensor-parallel-size $TP \
     --trust-remote-code \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.9 &
+    --gpu-memory-utilization 0.9 > "$OUTPUT_DIR/server.log" 2>&1 &
 SRV_PID=$!
+echo "Server PID=$SRV_PID, log: $OUTPUT_DIR/server.log"
 
 cleanup() {
     echo ""
@@ -46,21 +47,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Wait for server
+# Wait for server (up to 600s for large models)
 echo "Waiting for server..."
-for i in $(seq 1 120); do
+SERVER_READY=0
+for i in $(seq 1 300); do
     if curl -s "$BASE_URL/health" > /dev/null 2>&1; then
-        echo "Server ready (${i}s)"
+        echo "Server ready (${i}×2s = $((i*2))s)"
+        SERVER_READY=1
         break
     fi
     if ! kill -0 $SRV_PID 2>/dev/null; then
-        echo "ERROR: server died"
+        echo "ERROR: server died. Last 30 lines of log:"
+        tail -30 "$OUTPUT_DIR/server.log"
         exit 1
     fi
     sleep 2
 done
-if ! curl -s "$BASE_URL/health" > /dev/null 2>&1; then
-    echo "ERROR: server not ready after 240s"
+if [ $SERVER_READY -eq 0 ]; then
+    echo "ERROR: server not ready after 600s. Last 30 lines of log:"
+    tail -30 "$OUTPUT_DIR/server.log"
     exit 1
 fi
 
