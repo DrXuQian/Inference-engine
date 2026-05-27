@@ -230,12 +230,13 @@ def run_offline_mode(args):
         print("Measuring TTFT...")
         sp_short = SamplingParams(max_tokens=1, temperature=0)
         ttft_times = []
-        ttft_batch = prompts[idx:idx + min(5, args.num_prompts)]
+        ttft_batch = prompts[idx:idx + min(5 * batch, args.num_prompts)]
         for i in range(0, len(ttft_batch), max(batch, 1)):
             b = ttft_batch[i:i + batch]
             t0 = time.perf_counter()
             llm.generate(b, sampling_params=sp_short)
-            per_req = (time.perf_counter() - t0) * 1000
+            # Divide by batch: each request's prefill runs in parallel
+            per_req = (time.perf_counter() - t0) * 1000 / len(b)
             ttft_times.append(per_req)
 
     ttft_times.sort()
