@@ -143,12 +143,28 @@ def run_serve_mode(args):
         for i in range(args.num_warmup):
             http_generate(port, prompts[i], args.output_len, args.model)
 
-        print(f"Benchmarking ({args.num_prompts} prompts)...")
+        batch = getattr(args, 'batch_size', 1) or 1
+        print(f"Benchmarking ({args.num_prompts} prompts, batch={batch})...")
         results = []
-        for i in range(args.num_prompts):
-            r = http_generate(port, prompts[args.num_warmup + i],
-                              args.output_len, args.model)
-            results.append(r)
+        if batch <= 1:
+            for i in range(args.num_prompts):
+                r = http_generate(port, prompts[args.num_warmup + i],
+                                  args.output_len, args.model)
+                results.append(r)
+        else:
+            import concurrent.futures
+            idx = args.num_warmup
+            remaining = args.num_prompts
+            while remaining > 0:
+                n = min(batch, remaining)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+                    futs = [pool.submit(http_generate, port,
+                                        prompts[idx + j], args.output_len, args.model)
+                            for j in range(n)]
+                    for f in concurrent.futures.as_completed(futs):
+                        results.append(f.result())
+                idx += n
+                remaining -= n
 
         mid = len(results) // 2
         ttfts = sorted(r["ttft_ms"] for r in results)
@@ -237,6 +253,8 @@ def main():
     ap.add_argument("--max-model-len", type=int, default=None)
     ap.add_argument("--gpu-mem", type=float, default=0.9)
     ap.add_argument("--tp", type=int, default=1)
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="Concurrent requests (batch size, default: 1)")
     ap.add_argument("--mode", choices=["serve", "offline"], default="serve",
                     help="serve: HTTP (compatible); offline: vllm.LLM (fast, needs platform support)")
     ap.add_argument("--output-json", type=str, default=None)
