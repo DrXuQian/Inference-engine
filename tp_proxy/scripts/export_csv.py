@@ -111,13 +111,13 @@ def main():
 
     # Load all agent data
     agent_first = {}
-    for scenario, tp_list in [("04_agent_122B", [1, 2]), ("05_agent_397B", [2, 4])]:
+    for scenario, tp_list in [("04_agent_122B", [1, 2]), (("05_agent_397B", [2]))]:
         for tp in tp_list:
             d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
             agent_first[(scenario, tp)] = get_metrics(d) if d else None
 
     agent_hit = {}
-    for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), ("05b_agent_hit_397B", [2, 4])]:
+    for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), (("05b_agent_hit_397B", [2]))]:
         for tp in tp_list:
             d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
             agent_hit[(scenario, tp)] = get_metrics(d) if d else None
@@ -126,21 +126,19 @@ def main():
         ("04_agent_122B", 1): ("04b_agent_hit_122B", 1),
         ("04_agent_122B", 2): ("04b_agent_hit_122B", 2),
         ("05_agent_397B", 2): ("05b_agent_hit_397B", 2),
-        ("05_agent_397B", 4): ("05b_agent_hit_397B", 4),
     }
 
     model_names = {
         ("04_agent_122B", 1): "Qwen3.5-122B-A10B-GPTQ-INT4-TP1",
         ("04_agent_122B", 2): "Qwen3.5-122B-A10B-GPTQ-INT4-TP2",
         ("05_agent_397B", 2): "Qwen3.5-397B-A17B-GPTQ-INT4-TP2",
-        ("05_agent_397B", 4): "Qwen3.5-397B-A17B-GPTQ-INT4-TP4",
     }
 
     # Full task total
     w.writerow(["全任务总延迟:"])
     w.writerow(["模型", "第一次调用总延迟", "后续调用总延迟(×1)", "全任务总延迟"])
     for fk in [("04_agent_122B", 1), ("04_agent_122B", 2),
-               ("05_agent_397B", 2), ("05_agent_397B", 4)]:
+               ("05_agent_397B", 2)]:
         hk = hit_map[fk]
         mf = agent_first.get(fk)
         mh = agent_hit.get(hk)
@@ -155,7 +153,7 @@ def main():
     w.writerow(["第一次调用:"])
     w.writerow(["模型", "TTFT", "TPOT", "TPS", "总延迟"])
     for fk in [("04_agent_122B", 1), ("04_agent_122B", 2),
-               ("05_agent_397B", 2), ("05_agent_397B", 4)]:
+               ("05_agent_397B", 2)]:
         w.writerow([model_names[fk]] + row(agent_first.get(fk)))
     w.writerow([])
 
@@ -163,7 +161,7 @@ def main():
     w.writerow(["后续调用:"])
     w.writerow(["模型", "TTFT", "TPOT", "TPS", "总延迟"])
     for fk in [("04_agent_122B", 1), ("04_agent_122B", 2),
-               ("05_agent_397B", 2), ("05_agent_397B", 4)]:
+               ("05_agent_397B", 2)]:
         hk = hit_map[fk]
         w.writerow([model_names[fk]] + row(agent_hit.get(hk)))
     w.writerow([])

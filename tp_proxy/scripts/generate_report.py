@@ -349,14 +349,14 @@ def main():
     # =========================================================================
     # First call (100K input, 3K output)
     agent_first = {}
-    for scenario, tp_list in [("04_agent_122B", [1, 2]), ("05_agent_397B", [2, 4])]:
+    for scenario, tp_list in [("04_agent_122B", [1, 2]), (("05_agent_397B", [2]))]:
         for tp in tp_list:
             d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
             agent_first[(scenario, tp)] = get_metrics(d) if d else None
 
     # Hit calls (20K input, 3K output)
     agent_hit = {}
-    for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), ("05b_agent_hit_397B", [2, 4])]:
+    for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), (("05b_agent_hit_397B", [2]))]:
         for tp in tp_list:
             d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
             agent_hit[(scenario, tp)] = get_metrics(d) if d else None
@@ -366,7 +366,6 @@ def main():
         ("04b_agent_hit_122B", 1): ("04_agent_122B", 1),
         ("04b_agent_hit_122B", 2): ("04_agent_122B", 2),
         ("05b_agent_hit_397B", 2): ("05_agent_397B", 2),
-        ("05b_agent_hit_397B", 4): ("05_agent_397B", 4),
     }
 
     # Model display names
@@ -374,7 +373,6 @@ def main():
         ("04_agent_122B", 1): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=1",
         ("04_agent_122B", 2): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=2",
         ("05_agent_397B", 2): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=2",
-        ("05_agent_397B", 4): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=4",
     }
 
     # Compute full task total latency: first + 9 × hit
@@ -387,7 +385,7 @@ def main():
         print()
 
     for first_key in [("04_agent_122B", 1), ("04_agent_122B", 2),
-                       ("05_agent_397B", 2), ("05_agent_397B", 4)]:
+                       ("05_agent_397B", 2)]:
         hit_key = [hk for hk, fk in hit_map.items() if fk == first_key]
         hit_key = hit_key[0] if hit_key else None
 
@@ -412,7 +410,7 @@ def main():
         "Agent 第一次调用 (100K input, 3K output)",
         [(model_names[k], agent_first[k]) for k in
          [("04_agent_122B", 1), ("04_agent_122B", 2),
-          ("05_agent_397B", 2), ("05_agent_397B", 4)]],
+          ("05_agent_397B", 2)]],
         fmt,
     )
 
@@ -421,13 +419,12 @@ def main():
         ("04b_agent_hit_122B", 1): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=1",
         ("04b_agent_hit_122B", 2): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=2",
         ("05b_agent_hit_397B", 2): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=2",
-        ("05b_agent_hit_397B", 4): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=4",
     }
     print_scenario(
         "Agent 后续调用 (20K input@80%hit, 3K output)",
         [(hit_names[k], agent_hit[k]) for k in
          [("04b_agent_hit_122B", 1), ("04b_agent_hit_122B", 2),
-          ("05b_agent_hit_397B", 2), ("05b_agent_hit_397B", 4)]],
+          ("05b_agent_hit_397B", 2)]],
         fmt,
     )
 
@@ -457,7 +454,6 @@ def main():
             ("04 Agent 122B TP=1", "04_agent_122B", "tp1", 102400, 3072, 1),
             ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 3072, 2),
             ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 3072, 2),
-            ("05 Agent 397B TP=4", "05_agent_397B", "tp4", 102400, 3072, 4),
             ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1),
         ]
 

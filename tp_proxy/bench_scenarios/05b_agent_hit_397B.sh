@@ -11,7 +11,7 @@ mkdir -p "$OUT"
 echo "=== Agent cache hit: Qwen 397B-A17B, TP=2&4 ==="
 echo "Input=20480, Output=3072"
 
-for TP in 2 4; do
+for TP in 2; do
     echo ""
     echo "--- TP=$TP ---"
     TP_DIR="$OUT/tp${TP}"

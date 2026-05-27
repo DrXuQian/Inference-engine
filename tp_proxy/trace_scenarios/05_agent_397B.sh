@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 BASE=./results/05_agent_397B
 
-for TP in 2 4; do
+for TP in 2; do
     echo "--- TP=$TP ---"
     MODEL=$(ls -d "$BASE/tp${TP}/model/rank_0_"*L 2>/dev/null | head -1)
     [ -z "$MODEL" ] && echo "Model not found for TP=$TP, run bench_scenario first" && continue
