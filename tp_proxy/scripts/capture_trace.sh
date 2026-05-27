@@ -29,7 +29,31 @@ import sys, os, numpy as np
 os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
+def patch_batch_nvtx():
+    """Patch ModelRunner.execute_model to add NVTX marker with batch size.
+    nvtx.range_push/pop is CPU-only (<1us), does not affect GPU timing."""
+    import torch
+    try:
+        from vllm.worker.model_runner import ModelRunner
+        _orig = ModelRunner.execute_model
+        def _patched(self, *args, **kwargs):
+            model_input = args[0] if args else kwargs.get('model_input')
+            bs = 0
+            if hasattr(model_input, 'input_tokens'):
+                bs = model_input.input_tokens.shape[0]
+            elif hasattr(model_input, 'seq_lens'):
+                bs = len(model_input.seq_lens)
+            torch.cuda.nvtx.range_push(f"bs={bs}")
+            result = _orig(self, *args, **kwargs)
+            torch.cuda.nvtx.range_pop()
+            return result
+        ModelRunner.execute_model = _patched
+        print("Patched ModelRunner with batch NVTX markers")
+    except Exception as e:
+        print(f"NVTX patch failed (non-fatal): {e}")
+
 def main():
+    patch_batch_nvtx()
     from vllm import LLM, SamplingParams
 
     model = sys.argv[1]
