@@ -238,10 +238,14 @@ def main():
     else:
         lm_head_final = lm_head_scaled
 
-    tail_ms = lm_head_ms + sampling_ms  # original tail (for subtracting from raw)
-    tail_comp = lm_head_final + sampling_scaled  # compensated tail
-    print(f"  tail (original): {tail_ms:.4f} ms")
-    print(f"  tail (compensated): {tail_comp:.4f} ms")
+    # tail to subtract from raw TPOT (batch-scaled, since bench ran at batch=N)
+    tail_subtract = lm_head_scaled + sampling_scaled
+    # tail to add back (TP-compensated)
+    tail_add = lm_head_final + sampling_scaled
+    print(f"  tail_subtract (from raw): {tail_subtract:.4f} ms "
+          f"(lm_head×1.1^{batch}={lm_head_scaled:.4f} + sampling×{batch}={sampling_scaled:.4f})")
+    print(f"  tail_add (compensated):   {tail_add:.4f} ms "
+          f"(lm_head/{tp_size}={lm_head_final:.4f} + sampling={sampling_scaled:.4f})")
     print()
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===
@@ -265,25 +269,23 @@ def main():
     # === e) Compensated Results ===
     print("=== e) Compensated Results ===" if args.actual_seq_len else "=== d) Compensated Results ===")
     print()
-    print("Step 1: Extract encoder time")
-    print(f"  tail (proxy) = lm_head({lm_head_ms:.4f}) + sampling({sampling_ms:.4f}) = {tail_ms:.4f} ms")
-    print(f"  decode_encoder = raw_TPOT - tail")
-    print(f"  prefill_encoder = raw_TTFT - tail")
+    print("Step 1: Extract encoder (subtract batch-scaled tail)")
+    print(f"  tail_subtract = {tail_subtract:.4f} ms")
+    print(f"  encoder = raw_TPOT - {tail_subtract:.4f}")
     print()
     print("Step 2: Scale encoder by layer ratio")
     print(f"  layer_scale = {original}/{pruned} = {layer_scale:.2f}x")
     print()
-    print("Step 3: Add back tail (compensated) + comm")
-    print(f"  tail_comp = {tail_comp:.4f} ms (lm_head={lm_head_final:.4f} + sampling={sampling_scaled:.4f})")
+    print("Step 3: Add back TP-compensated tail + comm")
+    print(f"  tail_add = {tail_add:.4f} ms")
     print(f"  decode_comm = {decode_comm:.3f} ms, prefill_comm = {prefill_comm:.3f} ms")
     if args.actual_seq_len:
-        print()
         print("Step 4: KV cache compensation (actual_seq > bench input)")
     print()
     print("Formula:")
-    print(f"  comp_TPOT = decode_encoder × {layer_scale:.2f} + {tail_comp:.4f} + {decode_comm:.3f}" +
+    print(f"  comp_TPOT = (raw_TPOT - {tail_subtract:.4f}) × {layer_scale:.2f} + {tail_add:.4f} + {decode_comm:.3f}" +
           (" + kv_extra" if args.actual_seq_len else ""))
-    print(f"  comp_TTFT = prefill_encoder × {layer_scale:.2f} + {tail_comp:.4f} + {prefill_comm:.3f}")
+    print(f"  comp_TTFT = (raw_TTFT - {tail_subtract:.4f}) × {layer_scale:.2f} + {tail_add:.4f} + {prefill_comm:.3f}")
     print()
     print(f"{'input':>8} {'raw_ttft':>10} {'comp_ttft':>10} "
           f"{'raw_tpot':>10} {'comp_tpot':>10} {'comp_total':>10}")
@@ -299,11 +301,11 @@ def main():
         raw_tpot = r["tpot_median_ms"]
         output_tokens = r.get("output_tokens", output_len)
 
-        decode_encoder = max(raw_tpot - tail_ms, 0)
-        prefill_encoder = max(raw_ttft - tail_ms, 0)
+        decode_encoder = max(raw_tpot - tail_subtract, 0)
+        prefill_encoder = max(raw_ttft - tail_subtract, 0)
 
-        comp_tpot = decode_encoder * layer_scale + tail_comp + decode_comm
-        comp_ttft = prefill_encoder * layer_scale + tail_comp + prefill_comm
+        comp_tpot = decode_encoder * layer_scale + tail_add + decode_comm
+        comp_ttft = prefill_encoder * layer_scale + tail_add + prefill_comm
 
         # KV cache compensation: bench tested with input_len=il, but actual
         # decode reads KV for actual_seq_len tokens. Add extra KV read time.
