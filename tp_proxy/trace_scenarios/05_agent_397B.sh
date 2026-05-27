@@ -7,7 +7,7 @@ BASE=./results/05_agent_397B
 
 for TP in 2; do
     echo "--- TP=$TP ---"
-    MODEL=$(ls -d "$BASE/tp${TP}/model/rank_0_"*L 2>/dev/null | head -1)
+    MODEL=$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE/tp${TP}/model")
     [ -z "$MODEL" ] && echo "Model not found for TP=$TP, run bench_scenario first" && continue
     OUT="$BASE/tp${TP}/trace"
 

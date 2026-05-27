@@ -3,8 +3,7 @@
 # Input: 1.5K, Output: 50
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
-MODEL=${MODEL:-./results/01_code_completion_35B/model/rank_0_*L}
-MODEL=$(ls -d $MODEL 2>/dev/null | head -1)
+MODEL=$(bash "$SCRIPT_DIR/get_model_path.sh" "./results/01_code_completion_35B/model")
 OUT=./results/01_code_completion_35B/trace
 
 bash "$SCRIPT_DIR/capture_trace.sh" "$MODEL" 1536 50 "$OUT" 10

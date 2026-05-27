@@ -16,7 +16,7 @@ python3 "$SCRIPT_DIR/split_and_prune.py" \
     --gpu-memory-gb "$GPU_MEM" --max-seq-len 2048 \
     --output-dir "$OUT/model"
 
-PRUNED=$(ls -d "$OUT/model/rank_0_"*L 2>/dev/null | head -1)
+PRUNED=$(python3 -c "import json; print(json.load(open('$OUT/model/split_meta.json'))[\"output_dir\"])" 2>/dev/null)
 [ -z "$PRUNED" ] && PRUNED="$MODEL"
 
 python3 "$SCRIPT_DIR/auto_bench.py" \

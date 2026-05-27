@@ -7,7 +7,7 @@ BASE=./results/03_chat_122B
 for TP in 1 2; do
     echo "--- TP=$TP ---"
     DIR="$BASE/tp${TP}"
-    MODEL=$(ls -d "$DIR/model/rank_0_"*L 2>/dev/null | head -1)
+    MODEL=$(bash "$SCRIPT_DIR/get_model_path.sh" "$DIR/model")
     [ -z "$MODEL" ] && echo "Model not found for TP=$TP" && continue
 
     python3 "$SCRIPT_DIR/compensate_ppu.py" \

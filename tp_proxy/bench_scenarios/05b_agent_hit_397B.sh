@@ -22,7 +22,7 @@ for TP in 2; do
         --gpu-memory-gb "$GPU_MEM" --max-seq-len 26624 \
         --output-dir "$TP_DIR/model"
 
-    PRUNED=$(ls -d "$TP_DIR/model/rank_0_"*L 2>/dev/null | head -1)
+    PRUNED=$(bash "$SCRIPT_DIR/get_model_path.sh" "$TP_DIR/model")
     [ -z "$PRUNED" ] && PRUNED=$(ls -d "$TP_DIR/model/split/rank_0" 2>/dev/null | head -1)
     [ -z "$PRUNED" ] && PRUNED="$MODEL"
 
