@@ -143,8 +143,9 @@ def main():
     ap.add_argument("--original-layers", type=int, default=None)
     ap.add_argument("--tp-size", type=int, default=None)
     ap.add_argument("--lm-head-kernel", default="gemvt_op")
-    ap.add_argument("--batch-size", type=int, default=1,
-                    help="Batch size (for logging only, trace values used directly).")
+    ap.add_argument("--batch-size", type=int, default=1)
+    ap.add_argument("--sampling-trace", default=None,
+                    help="Batch=1 trace sqlite for sampling time (used when --batch-size>=2)")
     ap.add_argument("--actual-seq-len", type=int, default=None,
                     help="Actual decode seq_len (e.g. 100K for agent hit with 80%% prefix cache). "
                          "If set and > bench input_len, compensates extra KV cache read time.")
@@ -221,26 +222,25 @@ def main():
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 
-    # All values from trace at batch=N — no formula scaling needed
-    # TP scaling: lm_head / tp (proxy has full vocab, real TP splits)
+    # For batch>=2: lm_head from batch=N trace, sampling from batch=1 trace
+    if batch >= 2 and args.sampling_trace:
+        print(f"  Reading sampling from batch=1 trace: {args.sampling_trace}")
+        b1_tail = measure_tail_from_trace(args.sampling_trace, "gemvt_op")
+        if b1_tail:
+            sampling_ms = b1_tail["sampling_ms"]
+            print(f"  sampling (batch=1): {sampling_ms:.4f} ms")
+
+    # TP scaling: lm_head / tp
     if tp_size > 1:
         lm_head_final = lm_head_ms / tp_size
         print(f"  TP={tp_size}: lm_head / {tp_size} = {lm_head_final:.4f} ms")
     else:
         lm_head_final = lm_head_ms
 
-    # tail to subtract from raw TPOT (from trace at batch=N)
-    # batch>=2: sampling overlaps across requests, ignore it
-    batch = args.batch_size
-    if batch >= 2:
-        tail_subtract = lm_head_ms
-        tail_add = lm_head_final
-        print(f"  batch={batch}: ignoring sampling (overlapped)")
-    else:
-        tail_subtract = lm_head_ms + sampling_ms
-        tail_add = lm_head_final + sampling_ms
-    print(f"  tail_subtract (from raw): {tail_subtract:.4f} ms")
-    print(f"  tail_add (compensated):   {tail_add:.4f} ms")
+    tail_subtract = lm_head_ms + sampling_ms
+    tail_add = lm_head_final + sampling_ms
+    print(f"  tail_subtract: {tail_subtract:.4f} ms (lm_head={lm_head_ms:.4f} + sampling={sampling_ms:.4f})")
+    print(f"  tail_add:      {tail_add:.4f} ms (lm_head/{tp_size}={lm_head_final:.4f} + sampling={sampling_ms:.4f})")
     print()
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===

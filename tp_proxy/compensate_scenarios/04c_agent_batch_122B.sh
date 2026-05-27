@@ -40,6 +40,11 @@ for TP in 1 2; do
         COMP_ARGS=""
         [ -f "$TRACE" ] && COMP_ARGS="$COMP_ARGS --asys-sqlite $TRACE"
         [ -f "$COMM" ] && COMP_ARGS="$COMP_ARGS --comm-json $COMM"
+        # batch>=2: use batch=1 trace for sampling time
+        B1_TRACE="$BASE_04/tp${TP}/trace/trace.sqlite"
+        if [ $B -ge 2 ] && [ -f "$B1_TRACE" ]; then
+            COMP_ARGS="$COMP_ARGS --sampling-trace $B1_TRACE"
+        fi
 
         python3 "$SCRIPT_DIR/compensate_ppu.py" \
             --bench-results "$BENCH" \
