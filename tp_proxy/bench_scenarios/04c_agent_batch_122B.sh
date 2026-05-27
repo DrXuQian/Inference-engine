@@ -10,7 +10,7 @@ BASE_04=./results/04_agent_122B
 OUT=./results/04c_agent_batch_122B
 INPUT_LEN=${INPUT_LEN:-102400}
 OUTPUT_LEN=${OUTPUT_LEN:-3072}
-NUM_PROMPTS=${NUM_PROMPTS:-5}
+NUM_PROMPTS=${NUM_PROMPTS:-40}
 BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
 
 echo "=== Agent Batch Sweep: Qwen3.5-122B-A10B ==="
