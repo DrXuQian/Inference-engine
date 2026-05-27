@@ -112,7 +112,7 @@ def measure_tail_from_trace(sqlite_path, lm_head_kernel):
 
     print(f"  encoder (CUDA Graph): {encoder_ns/1e6:.4f} ms ({len(graph_evts)} kernels)")
     print(f"  lm_head:  {lm_head_ns/1e6:.4f} ms")
-    print(f"  sampling: {sampling_ns/1e6:.4f} ms ({len(gap_evts)-1 if found_lm else len(gap_evts)} kernels)")
+    print(f"  sampling: {sampling_ns/1e6:.4f} ms ({len(gap_evts)-1 if lm_head_ns>0 else len(gap_evts)} kernels)")
     print(f"  step wall: {step_wall_ns/1e6:.4f} ms")
     print(f"  overhead:  {overhead_ns/1e6:.4f} ms")
 
