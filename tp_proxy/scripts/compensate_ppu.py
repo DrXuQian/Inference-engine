@@ -108,21 +108,70 @@ def measure_tail_from_trace(sqlite_path: str,
             print(f"    {ev[3][:80]}  dur={ev[1]/1e3:.1f}us")
         return None
 
-    # Split tail into lm_head (the gemvt kernel) and sampling (everything after)
-    lm_head_ns = all_events[tail_start_idx][1]
-    sampling_kernels = all_events[tail_start_idx + 1:]
-    sampling_ns = sum(d for _, d, _, _ in sampling_kernels)
-    tail_kernel_ns = lm_head_ns + sampling_ns
+    # Find all lm_head positions to identify step boundaries
+    lm_head_indices = [i for i, (_, _, _, n) in enumerate(all_events) if lm_head_kernel in n]
 
-    print(f"  Last lm_head kernel: '{all_events[tail_start_idx][3][:60]}'")
+    if len(lm_head_indices) < 2:
+        # Only 1 lm_head found, can't compute encoder between two steps
+        lm_head_ns = all_events[tail_start_idx][1]
+        sampling_kernels = all_events[tail_start_idx + 1:]
+        sampling_ns = sum(d for _, d, _, _ in sampling_kernels)
+        print(f"  Last lm_head kernel: '{all_events[tail_start_idx][3][:60]}'")
+        print(f"  lm_head time:  {lm_head_ns / 1e6:.4f} ms")
+        print(f"  sampling time: {sampling_ns / 1e6:.4f} ms")
+        print(f"  WARNING: only 1 lm_head found, cannot compute encoder from trace")
+        return {
+            "lm_head_ms": round(lm_head_ns / 1e6, 4),
+            "sampling_ms": round(sampling_ns / 1e6, 4),
+            "encoder_ms": 0,
+            "overhead_ms": 0,
+            "tail_per_step_ms": round((lm_head_ns + sampling_ns) / 1e6, 4),
+        }
+
+    # Use last two lm_head positions:
+    # prev_lm_head ... [sampling] ... [encoder kernels] ... curr_lm_head ... [sampling]
+    prev_lm = lm_head_indices[-2]
+    curr_lm = lm_head_indices[-1]
+
+    lm_head_ns = all_events[curr_lm][1]
+    sampling_kernels = all_events[curr_lm + 1:]
+    sampling_ns = sum(d for _, d, _, _ in sampling_kernels)
+
+    # Encoder = kernels between prev_lm_head's sampling end and curr_lm_head
+    # prev step's sampling ends after prev_lm, encoder starts after that
+    encoder_kernels = all_events[prev_lm + 1:curr_lm]
+    # Filter out sampling kernels from previous step (between prev_lm and encoder)
+    # Sampling kernels from prev step are right after prev_lm
+    # Encoder kernels start after the gap following prev step's sampling
+    encoder_ns = 0
+    for ev in encoder_kernels:
+        # Skip if it looks like sampling (right after prev lm_head, before gap)
+        encoder_ns += ev[1]
+
+    # Wall clock between the two lm_heads = one full step
+    step_wall_ns = all_events[curr_lm][0] - all_events[prev_lm][0]
+    # Overhead = wall_clock - all kernel durations in that span
+    all_kernels_ns = sum(d for _, d, _, _ in all_events[prev_lm:curr_lm + 1])
+    overhead_ns = max(step_wall_ns - all_kernels_ns, 0)
+
+    # Subtract prev step's lm_head + sampling from encoder_ns
+    prev_lm_ns = all_events[prev_lm][1]
+    encoder_ns = max(encoder_ns - prev_lm_ns, 0)
+
+    print(f"  Last lm_head: '{all_events[curr_lm][3][:60]}'")
+    print(f"  Prev lm_head: '{all_events[prev_lm][3][:60]}'")
+    print(f"  encoder (between 2 lm_heads): {encoder_ns / 1e6:.4f} ms")
     print(f"  lm_head time:  {lm_head_ns / 1e6:.4f} ms")
     print(f"  sampling time: {sampling_ns / 1e6:.4f} ms ({len(sampling_kernels)} kernels)")
-    print(f"  tail total:    {tail_kernel_ns / 1e6:.4f} ms")
+    print(f"  step wall (lm→lm): {step_wall_ns / 1e6:.4f} ms")
+    print(f"  overhead:      {overhead_ns / 1e6:.4f} ms (not scaled)")
 
     return {
         "lm_head_ms": round(lm_head_ns / 1e6, 4),
         "sampling_ms": round(sampling_ns / 1e6, 4),
-        "tail_per_step_ms": round(tail_kernel_ns / 1e6, 4),
+        "encoder_ms": round(encoder_ns / 1e6, 4),
+        "overhead_ms": round(overhead_ns / 1e6, 4),
+        "tail_per_step_ms": round((lm_head_ns + sampling_ns) / 1e6, 4),
     }
 
 
@@ -216,8 +265,10 @@ def main():
         print("=== b) Tail: no trace or kernel not found, using 0 ===")
         tail = {"tail_per_step_ms": 0, "lm_head_ms": 0, "sampling_ms": 0}
 
-    lm_head_ms = tail.get("lm_head_ms", tail["tail_per_step_ms"])
+    lm_head_ms = tail.get("lm_head_ms", 0)
     sampling_ms = tail.get("sampling_ms", 0)
+    encoder_ms = tail.get("encoder_ms", 0)
+    overhead_ms = tail.get("overhead_ms", 0)
     batch = args.batch_size
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
@@ -237,10 +288,14 @@ def main():
     else:
         lm_head_final = lm_head_ms
 
-    tail_subtract = lm_head_ms + sampling_ms
-    tail_add = lm_head_final + sampling_ms
-    print(f"  tail_subtract: {tail_subtract:.4f} ms (lm_head={lm_head_ms:.4f} + sampling={sampling_ms:.4f})")
-    print(f"  tail_add:      {tail_add:.4f} ms (lm_head/{tp_size}={lm_head_final:.4f} + sampling={sampling_ms:.4f})")
+    # New formula: use encoder_ms from trace directly, don't subtract from TPOT
+    # comp_TPOT = encoder_ms × layer_scale + lm_head/tp + sampling + overhead + comm
+    # overhead is NOT scaled (CPU scheduling, not proportional to layers)
+    use_trace_encoder = encoder_ms > 0
+    if use_trace_encoder:
+        print(f"\n  Using trace-based encoder: {encoder_ms:.4f} ms/step ({pruned} layers)")
+        print(f"  overhead (not scaled): {overhead_ms:.4f} ms")
+    print()
     print()
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===
@@ -261,26 +316,20 @@ def main():
         print(f"  peak_bw: {args.peak_bw} GB/s, kv_bw_util: {args.kv_bw_util}")
     print()
 
-    # === e) Compensated Results ===
-    print("=== e) Compensated Results ===" if args.actual_seq_len else "=== d) Compensated Results ===")
+    # === Compensated Results ===
+    print("=== Compensated Results ===")
     print()
-    print("Step 1: Extract encoder (subtract batch-scaled tail)")
-    print(f"  tail_subtract = {tail_subtract:.4f} ms")
-    print(f"  encoder = raw_TPOT - {tail_subtract:.4f}")
-    print()
-    print("Step 2: Scale encoder by layer ratio")
-    print(f"  layer_scale = {original}/{pruned} = {layer_scale:.2f}x")
-    print()
-    print("Step 3: Add back TP-compensated tail + comm")
-    print(f"  tail_add = {tail_add:.4f} ms")
-    print(f"  decode_comm = {decode_comm:.3f} ms, prefill_comm = {prefill_comm:.3f} ms")
-    if args.actual_seq_len:
-        print("Step 4: KV cache compensation (actual_seq > bench input)")
-    print()
-    print("Formula:")
-    print(f"  comp_TPOT = (raw_TPOT - {tail_subtract:.4f}) × {layer_scale:.2f} + {tail_add:.4f} + {decode_comm:.3f}" +
-          (" + kv_extra" if args.actual_seq_len else ""))
-    print(f"  comp_TTFT = (raw_TTFT - {tail_subtract:.4f}) × {layer_scale:.2f} + {tail_add:.4f} + {prefill_comm:.3f}")
+    if use_trace_encoder:
+        print("Formula (trace-based, precise):")
+        print(f"  comp_TPOT = encoder({encoder_ms:.4f}) × {layer_scale:.2f} "
+              f"+ lm_head({lm_head_final:.4f}) + sampling({sampling_ms:.4f}) "
+              f"+ overhead({overhead_ms:.4f}) + comm({decode_comm:.3f})")
+    else:
+        tail_subtract = lm_head_ms + sampling_ms
+        tail_add = lm_head_final + sampling_ms
+        print("Formula (TPOT-based, fallback):")
+        print(f"  comp_TPOT = (raw_TPOT - {tail_subtract:.4f}) × {layer_scale:.2f} "
+              f"+ {tail_add:.4f} + {decode_comm:.3f}")
     print()
     print(f"{'input':>8} {'raw_ttft':>10} {'comp_ttft':>10} "
           f"{'raw_tpot':>10} {'comp_tpot':>10} {'comp_total':>10}")
@@ -296,11 +345,20 @@ def main():
         raw_tpot = r["tpot_median_ms"]
         output_tokens = r.get("output_tokens", output_len)
 
-        decode_encoder = max(raw_tpot - tail_subtract, 0)
-        prefill_encoder = max(raw_ttft - tail_subtract, 0)
-
-        comp_tpot = decode_encoder * layer_scale + tail_add + decode_comm
-        comp_ttft = prefill_encoder * layer_scale + tail_add + prefill_comm
+        if use_trace_encoder:
+            # Precise: encoder from trace, overhead not scaled
+            comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + overhead_ms + decode_comm
+            # For TTFT: use raw_TTFT - (encoder + lm_head + sampling + overhead) as prefill non-encoder,
+            # then scale encoder part. Simpler: scale proportionally.
+            prefill_encoder = max(raw_ttft - lm_head_ms - sampling_ms - overhead_ms, 0)
+            comp_ttft = prefill_encoder * layer_scale + lm_head_final + sampling_ms + overhead_ms + prefill_comm
+        else:
+            tail_subtract = lm_head_ms + sampling_ms
+            tail_add = lm_head_final + sampling_ms
+            decode_encoder = max(raw_tpot - tail_subtract, 0)
+            prefill_encoder = max(raw_ttft - tail_subtract, 0)
+            comp_tpot = decode_encoder * layer_scale + tail_add + decode_comm
+            comp_ttft = prefill_encoder * layer_scale + tail_add + prefill_comm
 
         # KV cache compensation: bench tested with input_len=il, but actual
         # decode reads KV for actual_seq_len tokens. Add extra KV read time.
