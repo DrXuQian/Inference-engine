@@ -96,7 +96,8 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
         "--random-output-len", str(output_len),
         "--num-prompts", str(n),
         "--max-concurrency", str(concurrency),
-        "--request-rate", "inf",
+        "--request-rate", "10",
+        "--percentile-metrics", "ttft,tpot,throughput",
         "--trust-remote-code",
     ]
     env = os.environ.copy()
@@ -157,7 +158,7 @@ def main():
     ap = argparse.ArgumentParser(description="Find critical batch size (TPS drops to 50%)")
     ap.add_argument("--model", required=True)
     ap.add_argument("--input-len", type=int, required=True)
-    ap.add_argument("--output-len", type=int, default=128)
+    ap.add_argument("--output-len", type=int, default=1500)
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
     ap.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128")
     ap.add_argument("--num-prompts", type=int, default=10)
