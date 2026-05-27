@@ -10,12 +10,12 @@ TPOT (decode, BW-bound):
   For decode, comm is latency-bound (small messages), NOT throughput-bound.
 
 Usage:
-    # Single target
+    # Single target (link latency in us, BW in GB/s, FLOPS in TFLOPS)
     python scale_report.py \
         --input-csv results/input_sweep/summary.csv \
         --scenario-dir results/scenarios/ \
-        --src-flops 312 --src-bw 2039 --src-link-latency 0.005 \
-        --tgt-flops 100 --tgt-bw 680 --tgt-link-latency 0.026 \
+        --src-flops 312 --src-bw 2039 --src-link-latency 5 \
+        --tgt-flops 100 --tgt-bw 680 --tgt-link-latency 26 \
         --name "ICN" --tp-size 2 \
         -o scaled_icn.json
 
@@ -43,14 +43,17 @@ def scale_ttft(ttft_src, src_flops, tgt_flops):
     return ttft_src * (src_flops / tgt_flops)
 
 
-def scale_tpot(tpot_src, src_bw, tgt_bw, src_link_lat, tgt_link_lat):
-    """Scale TPOT: subtract src link latency, scale DDR part, add tgt link latency.
-    tpot_tgt = (tpot_src - src_link_lat) × (src_bw / tgt_bw) + tgt_link_lat
+def scale_tpot(tpot_src_ms, src_bw, tgt_bw, src_link_lat_us, tgt_link_lat_us):
+    """Scale TPOT (ms): subtract src link latency, scale DDR part, add tgt link latency.
+    Link latency in us, converted to ms internally.
+    tpot_tgt = (tpot_src - src_lat) × (src_bw / tgt_bw) + tgt_lat
     """
     if src_bw <= 0 or tgt_bw <= 0:
-        return tpot_src
-    ddr_time = max(tpot_src - src_link_lat, 0)
-    return ddr_time * (src_bw / tgt_bw) + tgt_link_lat
+        return tpot_src_ms
+    src_lat_ms = src_link_lat_us / 1000
+    tgt_lat_ms = tgt_link_lat_us / 1000
+    ddr_time = max(tpot_src_ms - src_lat_ms, 0)
+    return ddr_time * (src_bw / tgt_bw) + tgt_lat_ms
 
 
 def parse_log(path):
@@ -97,15 +100,15 @@ def do_scale(args):
     result = {
         "name": args.name,
         "src_flops": args.src_flops, "src_bw": args.src_bw,
-        "src_link_latency_ms": args.src_link_latency,
+        "src_link_latency_us": args.src_link_latency,
         "tgt_flops": args.tgt_flops, "tgt_bw": args.tgt_bw,
-        "tgt_link_latency_ms": args.tgt_link_latency,
+        "tgt_link_latency_us": args.tgt_link_latency,
         "tp_size": args.tp_size,
     }
 
     print(f"Name: {args.name}")
-    print(f"Source: {args.src_flops} TFLOPS, {args.src_bw} GB/s, link_lat={args.src_link_latency}ms")
-    print(f"Target: {args.tgt_flops} TFLOPS, {args.tgt_bw} GB/s, link_lat={args.tgt_link_latency}ms")
+    print(f"Source: {args.src_flops} TFLOPS, {args.src_bw} GB/s, link_lat={args.src_link_latency}us")
+    print(f"Target: {args.tgt_flops} TFLOPS, {args.tgt_bw} GB/s, link_lat={args.tgt_link_latency}us")
     print(f"TTFT scale: x{args.src_flops / args.tgt_flops:.2f}")
     print(f"TPOT DDR scale: x{args.src_bw / args.tgt_bw:.2f}")
     print()
@@ -258,11 +261,11 @@ def main():
     ap.add_argument("--src-flops", type=float, default=0)
     ap.add_argument("--src-bw", type=float, default=0)
     ap.add_argument("--src-link-latency", type=float, default=0,
-                    help="Source per-step decode link latency ms (e.g. NVLink AR ~0.005ms)")
+                    help="Source per-step decode link latency us (e.g. NVLink AR ~5us)")
     ap.add_argument("--tgt-flops", type=float, default=0)
     ap.add_argument("--tgt-bw", type=float, default=0)
     ap.add_argument("--tgt-link-latency", type=float, default=0,
-                    help="Target per-step decode link latency ms (e.g. PCIe AR ~0.026ms)")
+                    help="Target per-step decode link latency us (e.g. PCIe AR ~26us)")
     ap.add_argument("--input-csv", default=None)
     ap.add_argument("--scenario-dir", default=None)
     ap.add_argument("--tp-size", type=int, default=1)
