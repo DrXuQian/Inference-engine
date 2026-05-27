@@ -434,7 +434,32 @@ def main():
     )
 
     # =========================================================================
-    # 4. RAG Repo Understanding (800K input, 3K output)
+    # 4. Batch Sweep (04c/05c)
+    # =========================================================================
+    batch_rows_122b = []
+    batch_rows_397b = []
+    for b in [1, 2, 4, 8]:
+        for tp, rows in [(1, batch_rows_122b), (2, batch_rows_122b)]:
+            d = load_json(os.path.join(rd, "04c_agent_batch_122B", f"tp{tp}",
+                                       f"compensated_batch{b}.json"))
+            m = get_metrics(d) if d else None
+            rows.append((f"TP={tp} batch={b}", m))
+        d = load_json(os.path.join(rd, "05c_agent_batch_397B", "tp2",
+                                   f"compensated_batch{b}.json"))
+        m = get_metrics(d) if d else None
+        batch_rows_397b.append((f"TP=2 batch={b}", m))
+
+    if any(m for _, m in batch_rows_122b):
+        print_scenario(
+            "Agent Batch Sweep 122B (100K input, 3K output)",
+            batch_rows_122b, fmt)
+    if any(m for _, m in batch_rows_397b):
+        print_scenario(
+            "Agent Batch Sweep 397B (100K input, 3K output)",
+            batch_rows_397b, fmt)
+
+    # =========================================================================
+    # 5. RAG Repo Understanding (800K input, 3K output)
     # =========================================================================
     d06 = load_json(os.path.join(rd, "06_rag_35B", "compensated.json"))
     m06 = get_metrics(d06) if d06 else None
