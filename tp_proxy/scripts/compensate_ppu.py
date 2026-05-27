@@ -273,8 +273,8 @@ def main():
     print("Step 2: Scale encoder by layer ratio")
     print(f"  layer_scale = {original}/{pruned} = {layer_scale:.2f}x")
     print()
-    print("Step 3: Add back tail (lm_head compensated) + comm")
-    print(f"  tail_comp = lm_head/{tp_size}({lm_head_comp:.4f}) + sampling({sampling_ms:.4f}) = {tail_comp:.4f} ms")
+    print("Step 3: Add back tail (compensated) + comm")
+    print(f"  tail_comp = {tail_comp:.4f} ms (lm_head={lm_head_final:.4f} + sampling={sampling_scaled:.4f})")
     print(f"  decode_comm = {decode_comm:.3f} ms, prefill_comm = {prefill_comm:.3f} ms")
     if args.actual_seq_len:
         print()
