@@ -75,11 +75,12 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
 
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
 
-    # Parse output for TPOT
+    # Parse output for TPOT — check both stdout and stderr
+    output = result.stdout + "\n" + result.stderr
     tpot = None
     ttft = None
     throughput = None
-    for line in result.stdout.split("\n"):
+    for line in output.split("\n"):
         line = line.strip()
         # Match: "Median TPOT (ms): 9.09" or "Median Inter-token Latency: 9.09 ms"
         if "median" in line.lower() and ("tpot" in line.lower() or "inter-token" in line.lower()):
@@ -100,7 +101,7 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
                 pass
 
     # Also try parsing JSON output if available
-    for line in result.stdout.split("\n"):
+    for line in output.split("\n"):
         line = line.strip()
         if line.startswith("{") and "tpot" in line.lower():
             try:
@@ -116,7 +117,7 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
         "ttft_ms": ttft,
         "throughput_rps": throughput,
         "tps": round(1000 / tpot, 1) if tpot and tpot > 0 else None,
-        "stdout": result.stdout[-500:] if not tpot else "",
+        "stdout": output[-500:] if not tpot else "",
     }
 
 
