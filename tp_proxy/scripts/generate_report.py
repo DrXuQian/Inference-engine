@@ -147,8 +147,10 @@ def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1,
              n_lin_layers * (lin_attn_flops + ffn_flops))
     # LM head
     total += 2 * S * H * V
-    # Per-GPU (TP splits compute), scale by batch
-    total = total * batch_size / tp_size
+    # Per-GPU (TP splits compute)
+    # Note: batch prefills run in parallel on GPU, TTFT measures wall clock
+    # for one request. FLOPs = single request FLOPs (not × batch).
+    total = total / tp_size
 
     return total
 
