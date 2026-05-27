@@ -86,9 +86,11 @@ def count_full_attn_layers(cfg: dict) -> tuple[int, int]:
     return N, 0  # default: all full attention
 
 
-def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
-    """Compute total FLOPs for one prefill pass (forward only).
+def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1,
+                          batch_size: int = 1) -> float:
+    """Compute total FLOPs for one prefill step (forward only).
 
+    With batch>1, FLOPs scale linearly (batch independent prefills).
     For each linear layer: FLOPs = 2 × M × K × N
     Attention: 2 × seq × seq × head_dim × n_heads (for QK^T and attn×V)
     """
@@ -145,16 +147,18 @@ def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
              n_lin_layers * (lin_attn_flops + ffn_flops))
     # LM head
     total += 2 * S * H * V
-    # Per-GPU (TP splits compute)
-    total = total / tp_size
+    # Per-GPU (TP splits compute), scale by batch
+    total = total * batch_size / tp_size
 
     return total
 
 
-def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
+def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1,
+                         batch_size: int = 1) -> float:
     """Compute total bytes read per decode step: weights + KV cache.
 
-    Weights: same as bandwidth_util.py (active weights per step)
+    Weights: read once per step, shared across batch (no duplication).
+    KV cache: each request has its own KV → total = batch × per_request_KV.
     KV cache: for each full-attention layer, read K and V of all seq_len tokens
               KV per layer = 2 × n_kv_heads × head_dim × seq_len × 2 (bf16)
               Linear attention: fixed state, negligible
@@ -245,7 +249,8 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1) -> float:
         lin_state_per_layer = 0
     total_lin_kv = n_lin_layers * lin_state_per_layer
 
-    total_kv = total_full_kv + total_lin_kv
+    # KV cache is per-request, duplicated across batch
+    total_kv = (total_full_kv + total_lin_kv) * batch_size
 
     return total_weight + total_kv, total_weight, total_kv
 
@@ -445,17 +450,25 @@ def main():
     if args.peak_flops > 0 or args.peak_bw > 0:
         # Collect all scenarios: (name, model_dir, input_len, output_len, tp_size, metrics)
         scenarios = []
-        # Map scenario dirs to (name, model_dir_pattern, input_len, output_len, tp)
+        # (name, scenario_dir, sub_dir, input_len, output_len, tp, batch)
         scenario_defs = [
-            ("01 Code Completion 35B", "01_code_completion_35B", None, 1536, 50, 1),
-            ("02 Chat 27B", "02_chat_27B", None, 25600, 1024, 1),
-            ("03 Chat 122B TP=1", "03_chat_122B", "tp1", 25600, 1024, 1),
-            ("03 Chat 122B TP=2", "03_chat_122B", "tp2", 25600, 1024, 2),
-            ("04 Agent 122B TP=1", "04_agent_122B", "tp1", 102400, 3072, 1),
-            ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 3072, 2),
-            ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 3072, 2),
-            ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1),
+            ("01 Code Completion 35B", "01_code_completion_35B", None, 1536, 50, 1, 1),
+            ("02 Chat 27B", "02_chat_27B", None, 25600, 1024, 1, 1),
+            ("03 Chat 122B TP=1", "03_chat_122B", "tp1", 25600, 1024, 1, 1),
+            ("03 Chat 122B TP=2", "03_chat_122B", "tp2", 25600, 1024, 2, 1),
+            ("04 Agent 122B TP=1", "04_agent_122B", "tp1", 102400, 3072, 1, 1),
+            ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 3072, 2, 1),
+            ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 3072, 2, 1),
+            ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1, 1),
         ]
+        # Add batch scenarios (04c/05c)
+        for b in [1, 2, 4, 8]:
+            scenario_defs.append(
+                (f"04c 122B TP=1 B={b}", "04c_agent_batch_122B", "tp1", 102400, 3072, 1, b))
+            scenario_defs.append(
+                (f"04c 122B TP=2 B={b}", "04c_agent_batch_122B", "tp2", 102400, 3072, 2, b))
+            scenario_defs.append(
+                (f"05c 397B TP=2 B={b}", "05c_agent_batch_397B", "tp2", 102400, 3072, 2, b))
 
         if fmt == "markdown":
             print(f"\n### Prefill MFU & Decode Bandwidth Utilization")
@@ -475,21 +488,32 @@ def main():
                 sep += "---------------|---------|----------|"
             print(sep)
 
-        for name, sc_dir, sub, input_len, output_len, tp in scenario_defs:
+        for name, sc_dir, sub, input_len, output_len, tp, batch in scenario_defs:
             if sub:
                 base = os.path.join(rd, sc_dir, sub)
             else:
                 base = os.path.join(rd, sc_dir)
 
-            comp = load_json(os.path.join(base, "compensated.json"))
+            # For batch scenarios, compensated file is per-batch
+            if batch > 1:
+                comp_file = os.path.join(base, f"compensated_batch{batch}.json")
+            else:
+                comp_file = os.path.join(base, "compensated.json")
+            comp = load_json(comp_file)
             m = get_metrics(comp) if comp else None
 
-            # Find model config
-            model_dirs = []
+            # Find model config (batch scenarios reuse model from parent scenario)
             import glob as _glob
             model_dirs = _glob.glob(os.path.join(base, "model", "rank_0_*L"))
             if not model_dirs:
                 model_dirs = _glob.glob(os.path.join(base, "model", "split", "rank_0"))
+            # Fallback: batch scenarios (04c/05c) reuse model from 04/05
+            if not model_dirs:
+                parent = sc_dir.replace("04c_agent_batch_122B", "04_agent_122B") \
+                               .replace("05c_agent_batch_397B", "05_agent_397B")
+                if parent != sc_dir:
+                    parent_base = os.path.join(rd, parent, sub) if sub else os.path.join(rd, parent)
+                    model_dirs = _glob.glob(os.path.join(parent_base, "model", "rank_0_*L"))
             cfg = load_model_config(model_dirs[0]) if model_dirs else None
 
             # Pruned config has TP-split values and truncated layer_types.
@@ -529,7 +553,7 @@ def main():
 
             if cfg and m:
                 if args.peak_flops > 0:
-                    flops = compute_prefill_flops(cfg, input_len, tp)
+                    flops = compute_prefill_flops(cfg, input_len, tp, batch)
                     ttft_s = m["ttft"] / 1000
                     actual_tflops = flops / ttft_s / 1e12 if ttft_s > 0 else 0
                     mfu = actual_tflops / args.peak_flops * 100
@@ -539,13 +563,13 @@ def main():
                     # avg_seq_len during decode = input_len + output_len/2
                     avg_seq = input_len + output_len // 2
                     total_bytes, weight_bytes, kv_bytes = compute_decode_bytes(
-                        cfg, avg_seq, tp)
+                        cfg, avg_seq, tp, batch)
                     tpot_s = m["tpot"] / 1000
                     bw_used = total_bytes / tpot_s / 1e9 if tpot_s > 0 else 0
                     bw_util = bw_used / args.peak_bw * 100
                     bw_str = f"{bw_util:.1f}%"
                     w_str = f"{weight_bytes / 1e9:.2f}GB"
-                    kv_str = f"{kv_bytes / 1e9:.2f}GB"
+                    kv_str = f"{kv_bytes / 1e9:.2f}GB (×{batch})"
 
             if fmt == "csv":
                 print(f"Utilization,{name},{mfu_str},{bw_str},{w_str},{kv_str}")
