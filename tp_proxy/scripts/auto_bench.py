@@ -21,7 +21,7 @@ import tempfile
 def run_bench(model_dir: str, input_len: int, output_len: int,
               num_prompts: int, num_warmup: int, gpu_mem: float,
               tp: int, max_model_len: int | None,
-              batch_size: int = 1) -> dict:
+              batch_size: int = 1, mode: str = "offline") -> dict:
     """Run generate_bench.py for one input_len, return results dict."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generate_bench.py")
     tmp = tempfile.mktemp(suffix=".json")
@@ -39,6 +39,7 @@ def run_bench(model_dir: str, input_len: int, output_len: int,
         "--gpu-mem", str(gpu_mem),
         "--tp", str(tp),
         "--batch-size", str(batch_size),
+        "--mode", mode,
         "--output-json", tmp,
     ]
 
@@ -69,7 +70,9 @@ def main():
     ap.add_argument("--tp", type=int, default=1)
     ap.add_argument("--max-model-len", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=1,
-                    help="Concurrent requests (batch size, default: 1)")
+                    help="Batch size (default: 1)")
+    ap.add_argument("--mode", choices=["serve", "offline"], default="offline",
+                    help="offline: vllm.LLM (default); serve: HTTP")
     ap.add_argument("--output-json", default="bench_results.json")
     args = ap.parse_args()
 
@@ -88,7 +91,7 @@ def main():
             args.model_dir, il, args.output_len,
             args.num_prompts, args.num_warmup,
             args.gpu_mem, args.tp, args.max_model_len,
-            args.batch_size,
+            args.batch_size, args.mode,
         )
         all_results.append(data)
         if "error" not in data:

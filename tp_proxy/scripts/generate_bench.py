@@ -270,8 +270,8 @@ def main():
     ap.add_argument("--tp", type=int, default=1)
     ap.add_argument("--batch-size", type=int, default=1,
                     help="Concurrent requests (batch size, default: 1)")
-    ap.add_argument("--mode", choices=["serve", "offline"], default="serve",
-                    help="serve: HTTP (compatible); offline: vllm.LLM (fast, needs platform support)")
+    ap.add_argument("--mode", choices=["serve", "offline"], default="offline",
+                    help="offline: vllm.LLM (default, proper batching); serve: HTTP (fallback)")
     ap.add_argument("--output-json", type=str, default=None)
     args = ap.parse_args()
 
