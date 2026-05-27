@@ -78,7 +78,21 @@ def measure_tail_from_trace(sqlite_path, lm_head_kernel):
     if not consistent_steps:
         return None
 
-    # Use last consistent step (most stable)
+    # Filter by lm_head kernel match, pick largest lm_head duration (= largest batch)
+    matched = []
+    for g, gap in consistent_steps:
+        for ev in gap:
+            if lm_head_kernel in ev[3]:
+                matched.append((g, gap, ev[1]))
+                break
+    if matched:
+        lm_durs = sorted([d for _, _, d in matched])
+        threshold = lm_durs[len(lm_durs) * 3 // 4] if len(lm_durs) > 4 else lm_durs[0]
+        top = [(g, gap) for g, gap, d in matched if d >= threshold]
+        print(f"  lm_head dur: {lm_durs[0]/1e3:.1f}-{lm_durs[-1]/1e3:.1f}us, "
+              f"p75={threshold/1e3:.1f}us, top={len(top)}")
+        consistent_steps = top
+
     graph_evts, gap_evts = consistent_steps[-1]
 
     # Encoder = sum of graph kernel durations

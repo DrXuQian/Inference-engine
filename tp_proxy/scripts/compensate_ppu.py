@@ -157,16 +157,26 @@ def measure_tail_from_trace(sqlite_path: str,
         return None
 
     # Among consistent steps, find ones with matching lm_head kernel
-    # (filters correct batch size by lm_head name match)
     matched_steps = []
     for g, gap in consistent_steps:
-        if any(lm_head_kernel in ev[3] for ev in gap):
-            matched_steps.append((g, gap))
+        for ev in gap:
+            if lm_head_kernel in ev[3]:
+                matched_steps.append((g, gap, ev[1]))  # (graph, gap, lm_head_dur)
+                break
     if matched_steps:
         print(f"  Steps with '{lm_head_kernel}' in gap: {len(matched_steps)}")
-        consistent_steps = matched_steps
+        # Pick steps with largest lm_head duration (= largest actual batch size)
+        # Cluster: take top 25% by lm_head duration
+        lm_durs = sorted([d for _, _, d in matched_steps])
+        threshold = lm_durs[len(lm_durs) * 3 // 4] if len(lm_durs) > 4 else lm_durs[0]
+        top_steps = [(g, gap) for g, gap, d in matched_steps if d >= threshold]
+        print(f"  lm_head dur range: {lm_durs[0]/1e3:.1f} - {lm_durs[-1]/1e3:.1f} us, "
+              f"threshold(p75): {threshold/1e3:.1f} us, selected: {len(top_steps)} steps")
+        consistent_steps = top_steps
+    else:
+        print(f"  WARNING: '{lm_head_kernel}' not found in any gap")
 
-    # Use last consistent step (most stable)
+    # Use last step from the top-batch cluster
     graph_evts, gap_evts = consistent_steps[-1]
 
     # Encoder = sum of graph kernel durations
