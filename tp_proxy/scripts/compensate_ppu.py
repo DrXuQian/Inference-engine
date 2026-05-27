@@ -144,7 +144,7 @@ def main():
     ap.add_argument("--tp-size", type=int, default=None)
     ap.add_argument("--lm-head-kernel", default="gemvt_op")
     ap.add_argument("--batch-size", type=int, default=1,
-                    help="Batch size. lm_head scales by 1.1^batch, sampling scales by batch.")
+                    help="Batch size (for logging only, trace values used directly).")
     ap.add_argument("--actual-seq-len", type=int, default=None,
                     help="Actual decode seq_len (e.g. 100K for agent hit with 80%% prefix cache). "
                          "If set and > bench input_len, compensates extra KV cache read time.")
@@ -209,8 +209,8 @@ def main():
         print("=== b) Tail from trace (lm_head + sampling) ===")
         tail = measure_tail_from_trace(args.asys_sqlite, args.lm_head_kernel)
         if tail:
-            print(f"  lm_head (batch=1): {tail['lm_head_ms']:.4f} ms")
-            print(f"  sampling (batch=1): {tail['sampling_ms']:.4f} ms")
+            print(f"  lm_head: {tail['lm_head_ms']:.4f} ms")
+            print(f"  sampling: {tail['sampling_ms']:.4f} ms")
     if not tail:
         print("=== b) Tail: no trace or kernel not found, using 0 ===")
         tail = {"tail_per_step_ms": 0, "lm_head_ms": 0, "sampling_ms": 0}
@@ -236,7 +236,7 @@ def main():
     print(f"  tail_subtract (from raw): {tail_subtract:.4f} ms "
           f"(lm_head={lm_head_ms:.4f} + sampling={sampling_ms:.4f})")
     print(f"  tail_add (compensated):   {tail_add:.4f} ms "
-          f"(lm_head/{tp_size}={lm_head_final:.4f} + sampling={sampling_scaled:.4f})")
+          f"(lm_head/{tp_size}={lm_head_final:.4f} + sampling={sampling_ms:.4f})")
     print()
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===
