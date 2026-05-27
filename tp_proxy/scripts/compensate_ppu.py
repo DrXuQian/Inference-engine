@@ -230,13 +230,17 @@ def main():
         lm_head_final = lm_head_ms
 
     # tail to subtract from raw TPOT (from trace at batch=N)
-    tail_subtract = lm_head_ms + sampling_ms
-    # tail to add back (TP-compensated lm_head + sampling as-is)
-    tail_add = lm_head_final + sampling_ms
-    print(f"  tail_subtract (from raw): {tail_subtract:.4f} ms "
-          f"(lm_head={lm_head_ms:.4f} + sampling={sampling_ms:.4f})")
-    print(f"  tail_add (compensated):   {tail_add:.4f} ms "
-          f"(lm_head/{tp_size}={lm_head_final:.4f} + sampling={sampling_ms:.4f})")
+    # batch>=2: sampling overlaps across requests, ignore it
+    batch = args.batch_size
+    if batch >= 2:
+        tail_subtract = lm_head_ms
+        tail_add = lm_head_final
+        print(f"  batch={batch}: ignoring sampling (overlapped)")
+    else:
+        tail_subtract = lm_head_ms + sampling_ms
+        tail_add = lm_head_final + sampling_ms
+    print(f"  tail_subtract (from raw): {tail_subtract:.4f} ms")
+    print(f"  tail_add (compensated):   {tail_add:.4f} ms")
     print()
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===
