@@ -4,8 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 BASE_04=./results/05_agent_397B
 OUT=./results/05c_agent_batch_397B
-INPUT_LEN=${INPUT_LEN:-102400}
-OUTPUT_LEN=${OUTPUT_LEN:-3072}
+# Short input for trace: ensures all prompts finish prefill together
+# → all enter decode at same batch size. Decode kernel timing is
+# independent of input length (same CUDA Graph, same weights).
+INPUT_LEN=${INPUT_LEN:-64}
+OUTPUT_LEN=${OUTPUT_LEN:-200}
 BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
 
 for TP in 2; do
