@@ -185,12 +185,24 @@ def main():
     # Start server if requested
     server_proc = None
     if args.start_server:
+        # Find a free port — if args.port is occupied, try next ones
+        port = args.port
+        import socket
+        for _ in range(10):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("127.0.0.1", port)) != 0:
+                    break  # port is free
+                print(f"  Port {port} is in use, trying {port + 1}")
+                port += 1
+        base_url = f"http://127.0.0.1:{port}"
+        print(f"  Using port {port}")
+
         max_model_len = args.input_len + args.output_len + 64
         env = os.environ.copy()
         env["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
         server_proc = subprocess.Popen(
             ["vllm", "serve", args.model,
-             "--host", "127.0.0.1", "--port", str(args.port),
+             "--host", "127.0.0.1", "--port", str(port),
              "--tensor-parallel-size", "1",
              "--max-model-len", str(max_model_len),
              "--trust-remote-code", "--no-enable-prefix-caching",
