@@ -117,7 +117,11 @@ def main():
                 scenarios[sc_name] = {"ttft_ms": ttft, "tpot_ms": tpot}
         configs.append({"name": name, "scenarios": scenarios})
 
-    all_scenarios = []
+    # Fixed order: mainstream first
+    SCENARIO_ORDER = ["mainstream", "heavy_prefill", "heavy_decode"]
+    all_scenarios = [s for s in SCENARIO_ORDER
+                     if any(s in cfg["scenarios"] for cfg in configs)]
+    # Append any extra scenarios not in the predefined order
     for cfg in configs:
         for sc in cfg["scenarios"]:
             if sc not in all_scenarios:

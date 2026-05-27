@@ -91,12 +91,16 @@ def main():
         print("Need at least 1 JSON file", file=sys.stderr)
         sys.exit(1)
 
-    # Collect all scenario names
-    all_scenarios = []
+    # Fixed order: mainstream first
+    SCENARIO_ORDER = ["mainstream", "heavy_prefill", "heavy_decode"]
+    found = set()
     for cfg in configs:
         for sc in cfg.get("scenarios", []):
-            if sc["name"] not in all_scenarios:
-                all_scenarios.append(sc["name"])
+            found.add(sc["name"])
+    all_scenarios = [s for s in SCENARIO_ORDER if s in found]
+    for s in sorted(found):
+        if s not in all_scenarios:
+            all_scenarios.append(s)
 
     if not all_scenarios:
         print("No scenarios found in JSON files", file=sys.stderr)
