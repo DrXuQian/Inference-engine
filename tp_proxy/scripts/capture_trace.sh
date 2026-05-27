@@ -10,11 +10,12 @@
 
 set -euo pipefail
 
-MODEL="$(readlink -f "${1:?Usage: $0 <model_dir> <input_len> <output_len> <output_dir> [num_prompts]}")"
+MODEL="$(readlink -f "${1:?Usage: $0 <model_dir> <input_len> <output_len> <output_dir> [num_prompts] [batch_size]}")"
 INPUT_LEN="${2:?}"
 OUTPUT_LEN="${3:?}"
 OUT_DIR="${4:?}"
 NUM_PROMPTS="${5:-10}"
+BATCH_SIZE="${6:-1}"
 PORT=8200
 MAX_MODEL_LEN=$((INPUT_LEN + OUTPUT_LEN + 64))
 
@@ -64,7 +65,7 @@ echo "[3/5] Running bench serve (${NUM_PROMPTS} prompts, input=${INPUT_LEN}, out
 MAX_MODEL_LEN=$((INPUT_LEN + OUTPUT_LEN + 64))
 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 vllm bench serve \
     --model "$MODEL" \
-    --max-concurrency 1 --base-url "http://127.0.0.1:${PORT}" \
+    --max-concurrency $BATCH_SIZE --base-url "http://127.0.0.1:${PORT}" \
     --dataset-name random \
     --random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN" \
     --num-prompts "$NUM_PROMPTS" --request-rate 5 \
