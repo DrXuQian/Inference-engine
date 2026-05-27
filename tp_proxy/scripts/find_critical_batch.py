@@ -1,45 +1,43 @@
 #!/usr/bin/env python3
 """
-Find the batch size at which per-request TPS drops to 50% of batch=1.
+Find the batch size at which compensated per-request TPS drops to 50%.
 
-Sweeps concurrency from 1 to max, measures TPOT at each level.
-Per-request TPS = 1000 / TPOT. Finds where it drops to half of baseline.
+Sweeps concurrency from 1 to max, measures TPOT at each level,
+applies layer-scale compensation, finds 50% TPS drop point.
 
 Usage:
-    # Start server first, then run:
+    # Server already running:
     python find_critical_batch.py \
         --model /path/to/model \
-        --input-len 102400 --output-len 1024 \
+        --input-len 4096 --output-len 128 \
         --base-url http://127.0.0.1:8000
 
-    # Or let the script start/stop the server:
+    # Auto start/stop server:
     python find_critical_batch.py \
         --model /path/to/model \
-        --input-len 102400 --output-len 1024 \
+        --input-len 4096 --output-len 128 \
         --start-server --gpu-mem 0.9
 
-    # Custom batch sizes:
+    # With compensation (from split_meta.json or explicit):
     python find_critical_batch.py \
-        --model /path/to/model \
-        --input-len 102400 --output-len 1024 \
-        --batch-sizes 1,2,4,8,16,32,64
+        --model /path/to/pruned_model \
+        --input-len 4096 --output-len 128 \
+        --base-url http://127.0.0.1:8000 \
+        --tail-ms 0.15 --pruned-layers 8 --original-layers 48
 """
 
 import argparse
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
 
-import numpy as np
 import requests
 
 
 def wait_for_server(base_url: str, server_proc=None) -> bool:
-    """Block until server is ready. No timeout — waits forever.
-    Returns False only if server process dies."""
+    """Block until server /health returns 200. Only fail if process dies."""
     t0 = time.time()
     while True:
         try:
@@ -50,23 +48,45 @@ def wait_for_server(base_url: str, server_proc=None) -> bool:
                 return True
         except Exception:
             pass
-        # Check if server process died
         if server_proc and server_proc.poll() is not None:
             print(f"  Server process exited with code {server_proc.returncode}")
             return False
         elapsed = int(time.time() - t0)
-        if elapsed % 30 == 0 and elapsed > 0:
+        if elapsed > 0 and elapsed % 30 == 0:
             print(f"  Waiting for server... ({elapsed}s)")
         time.sleep(2)
+
+
+def parse_metrics(text: str) -> dict:
+    """Parse TPOT/TTFT/throughput from vllm bench serve output."""
+    tpot = ttft = throughput = None
+    for line in text.split("\n"):
+        if "warning" in line.lower() or "Warning" in line:
+            continue
+        ll = line.lower().strip()
+        if "median" in ll and ("tpot" in ll or "inter-token" in ll):
+            try:
+                tpot = float(line.split(":")[-1].strip().replace("ms", "").strip())
+            except ValueError:
+                pass
+        if "median" in ll and "ttft" in ll:
+            try:
+                ttft = float(line.split(":")[-1].strip().replace("ms", "").strip())
+            except ValueError:
+                pass
+        if "request throughput" in ll:
+            try:
+                throughput = float(line.split(":")[-1].strip().split()[0])
+            except (ValueError, IndexError):
+                pass
+    return {"tpot_ms": tpot, "ttft_ms": ttft, "throughput_rps": throughput}
 
 
 def bench_concurrency(base_url: str, model: str, input_len: int,
                       output_len: int, concurrency: int,
                       num_prompts: int = 10) -> dict:
-    """Run benchmark at given concurrency, return TPOT stats."""
-    # Use at least concurrency+2 prompts for stable measurement
+    """Run vllm bench serve at given concurrency."""
     n = max(num_prompts, concurrency + 2)
-
     cmd = [
         "vllm", "bench", "serve",
         "--model", model,
@@ -79,76 +99,76 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
         "--request-rate", "inf",
         "--trust-remote-code",
     ]
-
     env = os.environ.copy()
     env["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
-
-    # Parse output for TPOT — check both stdout and stderr, skip warnings
     output = result.stdout + "\n" + result.stderr
-    tpot = None
-    ttft = None
-    throughput = None
-    for line in output.split("\n"):
-        # Skip pydantic/warning noise
-        if "Warning" in line or "warning" in line:
-            continue
-        line = line.strip()
-        # Match: "Median TPOT (ms): 9.09" or "Median Inter-token Latency: 9.09 ms"
-        if "median" in line.lower() and ("tpot" in line.lower() or "inter-token" in line.lower()):
-            try:
-                tpot = float(line.split(":")[-1].strip().replace("ms", "").strip())
-            except ValueError:
-                pass
-        # Match: "Median TTFT (ms): 4425.85"
-        if "median" in line.lower() and "ttft" in line.lower():
-            try:
-                ttft = float(line.split(":")[-1].strip().replace("ms", "").strip())
-            except ValueError:
-                pass
-        if "request throughput" in line.lower():
-            try:
-                throughput = float(line.split(":")[-1].strip().split()[0])
-            except (ValueError, IndexError):
-                pass
+    m = parse_metrics(output)
+    m["concurrency"] = concurrency
+    m["raw_output"] = output
+    return m
 
-    # Also try parsing JSON output if available
-    for line in output.split("\n"):
-        line = line.strip()
-        if line.startswith("{") and "tpot" in line.lower():
-            try:
-                d = json.loads(line)
-                tpot = tpot or d.get("median_tpot_ms") or d.get("tpot_median_ms")
-                ttft = ttft or d.get("median_ttft_ms") or d.get("ttft_median_ms")
-            except json.JSONDecodeError:
-                pass
+
+def load_compensation(model_dir: str, args) -> dict:
+    """Load compensation params from split_meta.json or CLI args."""
+    tail_ms = args.tail_ms
+    pruned = args.pruned_layers
+    original = args.original_layers
+
+    # Try split_meta.json
+    for d in [model_dir, os.path.dirname(model_dir)]:
+        meta_path = os.path.join(d, "split_meta.json")
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                meta = json.load(f)
+            if pruned is None:
+                pruned = meta.get("pruned_layers")
+            if original is None:
+                original = meta.get("original_layers")
+            break
+
+    # Defaults
+    if pruned is None or original is None:
+        pruned = pruned or 1
+        original = original or pruned
+
+    layer_scale = original / pruned if pruned > 0 else 1
+    if tail_ms is None:
+        tail_ms = 0  # no trace available
 
     return {
-        "concurrency": concurrency,
-        "tpot_ms": tpot,
-        "ttft_ms": ttft,
-        "throughput_rps": throughput,
-        "tps": round(1000 / tpot, 1) if tpot and tpot > 0 else None,
-        "stdout": output[-2000:] if not tpot else "",
+        "tail_ms": tail_ms,
+        "pruned": pruned,
+        "original": original,
+        "layer_scale": layer_scale,
     }
+
+
+def compensate_tpot(raw_tpot: float, comp: dict) -> float:
+    """Apply layer-scale compensation to raw TPOT.
+    comp_TPOT = (raw - tail) × scale + tail
+    """
+    encoder = max(raw_tpot - comp["tail_ms"], 0)
+    return encoder * comp["layer_scale"] + comp["tail_ms"]
 
 
 def main():
     ap = argparse.ArgumentParser(description="Find critical batch size (TPS drops to 50%)")
-    ap.add_argument("--model", required=True, help="Model path")
+    ap.add_argument("--model", required=True)
     ap.add_argument("--input-len", type=int, required=True)
-    ap.add_argument("--output-len", type=int, default=128,
-                    help="Output len per request (default: 128, keep short for faster sweep)")
+    ap.add_argument("--output-len", type=int, default=128)
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
-    ap.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
-                    help="Comma-separated batch sizes to test")
-    ap.add_argument("--num-prompts", type=int, default=10,
-                    help="Number of prompts per batch size test")
-    ap.add_argument("--start-server", action="store_true",
-                    help="Start vllm serve automatically")
+    ap.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128")
+    ap.add_argument("--num-prompts", type=int, default=10)
+    ap.add_argument("--start-server", action="store_true")
     ap.add_argument("--gpu-mem", type=float, default=0.9)
     ap.add_argument("--port", type=int, default=8000)
+    # Compensation params
+    ap.add_argument("--tail-ms", type=float, default=None,
+                    help="Tail time (lm_head+sampling) from trace. 0 = no compensation.")
+    ap.add_argument("--pruned-layers", type=int, default=None)
+    ap.add_argument("--original-layers", type=int, default=None)
     ap.add_argument("--output-json", default=None)
     args = ap.parse_args()
 
@@ -157,6 +177,10 @@ def main():
         base_url = f"http://127.0.0.1:{args.port}"
 
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
+
+    # Load compensation
+    comp = load_compensation(args.model, args)
+    has_comp = comp["layer_scale"] > 1
 
     # Start server if requested
     server_proc = None
@@ -174,18 +198,30 @@ def main():
             env=env,
         )
         print(f"Starting server (port {args.port})...")
-        if not wait_for_server(base_url, server_proc):
-            print("ERROR: server process died")
-            sys.exit(1)
-        print("Server ready\n")
+
+    # Always wait for server to be ready before benchmarking
+    print(f"Waiting for server at {base_url} ...")
+    if not wait_for_server(base_url, server_proc):
+        print("ERROR: server not available")
+        sys.exit(1)
 
     try:
-        print(f"Model: {args.model}")
+        print(f"\nModel: {args.model}")
         print(f"Input: {args.input_len}, Output: {args.output_len}")
         print(f"Batch sizes: {batch_sizes}")
+        if has_comp:
+            print(f"Compensation: layers {comp['pruned']}/{comp['original']} "
+                  f"(scale={comp['layer_scale']:.2f}x), tail={comp['tail_ms']:.4f}ms")
         print()
-        print(f"{'batch':>6} {'TPOT(ms)':>10} {'TPS':>8} {'TPS%':>8} {'throughput':>12}")
-        print("-" * 50)
+
+        header = f"{'batch':>6} {'raw_tpot':>10}"
+        if has_comp:
+            header += f" {'comp_tpot':>10} {'comp_tps':>10}"
+        else:
+            header += f" {'TPS':>10}"
+        header += f" {'TPS%':>8} {'throughput':>12}"
+        print(header)
+        print("-" * len(header))
 
         results = []
         baseline_tps = None
@@ -194,43 +230,64 @@ def main():
         for bs in batch_sizes:
             r = bench_concurrency(base_url, args.model, args.input_len,
                                   args.output_len, bs, args.num_prompts)
-            results.append(r)
 
-            if r["tps"] is None:
-                print(f"{bs:>6} {'FAIL':>10} {'':>8} {'':>8} {'':>12}")
-                if r["stdout"]:
-                    # Show last few lines, skip warnings
-                    useful = [l for l in r["stdout"].split("\n")
-                              if l.strip() and "warning" not in l.lower()]
-                    for line in useful[-5:]:
-                        print(f"       {line.strip()[:120]}")
+            if r["tpot_ms"] is None:
+                print(f"{bs:>6} {'FAIL':>10}")
+                useful = [l for l in r["raw_output"].split("\n")
+                          if l.strip() and "warning" not in l.lower()]
+                for line in useful[-5:]:
+                    print(f"       {line.strip()[:120]}")
+                results.append({"concurrency": bs, "error": "no tpot"})
                 continue
 
-            if baseline_tps is None:
-                baseline_tps = r["tps"]
+            raw_tpot = r["tpot_ms"]
+            if has_comp:
+                comp_tpot = compensate_tpot(raw_tpot, comp)
+            else:
+                comp_tpot = raw_tpot
 
-            tps_pct = r["tps"] / baseline_tps * 100 if baseline_tps else 0
+            tps = round(1000 / comp_tpot, 1) if comp_tpot > 0 else 0
+
+            if baseline_tps is None:
+                baseline_tps = tps
+
+            tps_pct = tps / baseline_tps * 100 if baseline_tps else 0
             tp_str = f"{r['throughput_rps']:.2f} rps" if r["throughput_rps"] else ""
 
-            print(f"{bs:>6} {r['tpot_ms']:>10.2f} {r['tps']:>8.1f} {tps_pct:>7.1f}% {tp_str:>12}")
+            row = f"{bs:>6} {raw_tpot:>10.2f}"
+            if has_comp:
+                row += f" {comp_tpot:>10.2f} {tps:>10.1f}"
+            else:
+                row += f" {tps:>10.1f}"
+            row += f" {tps_pct:>7.1f}% {tp_str:>12}"
+            print(row)
 
             if critical_batch is None and tps_pct <= 50:
                 critical_batch = bs
 
+            results.append({
+                "concurrency": bs,
+                "raw_tpot_ms": raw_tpot,
+                "comp_tpot_ms": comp_tpot if has_comp else raw_tpot,
+                "tps": tps,
+                "tps_pct": round(tps_pct, 1),
+                "throughput_rps": r["throughput_rps"],
+            })
+
         print()
         if critical_batch:
-            print(f"Critical batch size (TPS ≤ 50%): {critical_batch}")
+            print(f"Critical batch size (TPS <= 50%): {critical_batch}")
         elif baseline_tps:
             print(f"TPS did not drop to 50% within tested range (max batch={batch_sizes[-1]})")
         else:
             print("ERROR: could not measure baseline TPS")
 
-        # Save results
         if args.output_json:
             output = {
                 "model": args.model,
                 "input_len": args.input_len,
                 "output_len": args.output_len,
+                "compensation": comp if has_comp else None,
                 "baseline_tps": baseline_tps,
                 "critical_batch": critical_batch,
                 "results": results,
