@@ -173,25 +173,26 @@ def measure_tail_from_trace(sqlite_path: str,
     encoder_ns = sum(d for _, d, _, _, _ in graph_evts)
     encoder_wall_ns = graph_evts[-1][2] - graph_evts[0][0]
 
-    # Gap: find lm_head and sampling
+    # Gap = lm_head + sampling (between two CUDA Graph regions)
+    # lm_head = kernel matching lm_head_kernel name
+    # sampling = gap total - lm_head
+    gap_total_ns = sum(d for _, d, _, _, _ in gap_evts)
     lm_head_ns = 0
-    sampling_ns = 0
-    found_lm = False
     for ev in gap_evts:
-        if not found_lm and lm_head_kernel in ev[3]:
+        if lm_head_kernel in ev[3]:
             lm_head_ns = ev[1]
-            found_lm = True
-        elif found_lm:
-            sampling_ns += ev[1]
+            break
+    sampling_ns = gap_total_ns - lm_head_ns
 
-    if not found_lm:
+    if lm_head_ns == 0:
         print(f"  WARNING: '{lm_head_kernel}' not found in gap. Gap kernels:")
         for ev in gap_evts[:5]:
             print(f"    {ev[3][:70]}  dur={ev[1]/1e3:.1f}us")
+        # Fallback: largest kernel = lm_head
         if gap_evts:
-            largest = max(range(len(gap_evts)), key=lambda i: gap_evts[i][1])
-            lm_head_ns = gap_evts[largest][1]
-            sampling_ns = sum(d for j, (_, d, _, _, _) in enumerate(gap_evts) if j != largest)
+            largest = max(gap_evts, key=lambda e: e[1])
+            lm_head_ns = largest[1]
+            sampling_ns = gap_total_ns - lm_head_ns
 
     # Overhead
     gap_wall_ns = gap_evts[-1][2] - gap_evts[0][0] if gap_evts else 0
