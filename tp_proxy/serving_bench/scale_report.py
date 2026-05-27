@@ -37,10 +37,23 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def scale_ttft(ttft_src, src_flops, tgt_flops):
+def scale_ttft(ttft_src, src_flops, tgt_flops,
+               src_link_bw=0, tgt_link_bw=0, prefill_comm_frac=0):
+    """Scale TTFT: compute scales with FLOPS, prefill comm scales with link BW.
+    ttft = compute + prefill_comm
+    compute_tgt = compute_src × (src_flops / tgt_flops)
+    comm_tgt = comm_src × (src_link_bw / tgt_link_bw)
+    """
     if tgt_flops <= 0 or src_flops <= 0:
         return ttft_src
-    return ttft_src * (src_flops / tgt_flops)
+    compute = ttft_src * (1 - prefill_comm_frac)
+    comm_src = ttft_src * prefill_comm_frac
+    compute_tgt = compute * (src_flops / tgt_flops)
+    if prefill_comm_frac > 0 and src_link_bw > 0 and tgt_link_bw > 0:
+        comm_tgt = comm_src * (src_link_bw / tgt_link_bw)
+    else:
+        comm_tgt = comm_src
+    return compute_tgt + comm_tgt
 
 
 def scale_tpot(tpot_src_ms, src_bw, tgt_bw, src_link_lat_us, tgt_link_lat_us):
@@ -97,19 +110,29 @@ MARKERS = ['-o', '--^', '-s', '--D', '-v', '--P']
 
 def do_scale(args):
     """Scale and save results to JSON."""
+    pf_comm_frac = args.prefill_comm_fraction
+    if args.tp_size > 1 and pf_comm_frac == 0 and args.src_link_bw > 0:
+        pf_comm_frac = 0.05  # rough default for TP>1
+
     result = {
         "name": args.name,
         "src_flops": args.src_flops, "src_bw": args.src_bw,
         "src_link_latency_us": args.src_link_latency,
+        "src_link_bw": args.src_link_bw,
         "tgt_flops": args.tgt_flops, "tgt_bw": args.tgt_bw,
         "tgt_link_latency_us": args.tgt_link_latency,
+        "tgt_link_bw": args.tgt_link_bw,
+        "prefill_comm_fraction": pf_comm_frac,
         "tp_size": args.tp_size,
     }
 
     print(f"Name: {args.name}")
-    print(f"Source: {args.src_flops} TFLOPS, {args.src_bw} GB/s, link_lat={args.src_link_latency}us")
-    print(f"Target: {args.tgt_flops} TFLOPS, {args.tgt_bw} GB/s, link_lat={args.tgt_link_latency}us")
-    print(f"TTFT scale: x{args.src_flops / args.tgt_flops:.2f}")
+    print(f"Source: {args.src_flops} TFLOPS, {args.src_bw} GB/s, "
+          f"link_lat={args.src_link_latency}us, link_bw={args.src_link_bw} GB/s")
+    print(f"Target: {args.tgt_flops} TFLOPS, {args.tgt_bw} GB/s, "
+          f"link_lat={args.tgt_link_latency}us, link_bw={args.tgt_link_bw} GB/s")
+    print(f"TTFT scale: compute x{args.src_flops / args.tgt_flops:.2f}, "
+          f"prefill_comm_frac={pf_comm_frac:.2f}")
     print(f"TPOT DDR scale: x{args.src_bw / args.tgt_bw:.2f}")
     print()
 
@@ -128,7 +151,7 @@ def do_scale(args):
                 tpot = float(row["tpot_median_ms"]) if row.get("tpot_median_ms") else None
                 if ttft is None or tpot is None:
                     continue
-                t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops)
+                t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
                 t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
                                     args.src_link_latency, args.tgt_link_latency)
                 t_tps = 1000 / t_tpot if t_tpot > 0 else 0
@@ -156,7 +179,7 @@ def do_scale(args):
             if ttft is None or tpot is None:
                 continue
             name = log_name.replace(".log", "")
-            t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops)
+            t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
             t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
                                 args.src_link_latency, args.tgt_link_latency)
             print(f"{name:>20} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}")
@@ -261,11 +284,17 @@ def main():
     ap.add_argument("--src-flops", type=float, default=0)
     ap.add_argument("--src-bw", type=float, default=0)
     ap.add_argument("--src-link-latency", type=float, default=0,
-                    help="Source per-step decode link latency us (e.g. NVLink AR ~5us)")
+                    help="Source decode link latency us (e.g. NVLink AR ~5us)")
+    ap.add_argument("--src-link-bw", type=float, default=0,
+                    help="Source inter-chip bandwidth GB/s (for prefill comm scaling)")
     ap.add_argument("--tgt-flops", type=float, default=0)
     ap.add_argument("--tgt-bw", type=float, default=0)
     ap.add_argument("--tgt-link-latency", type=float, default=0,
-                    help="Target per-step decode link latency us (e.g. PCIe AR ~26us)")
+                    help="Target decode link latency us (e.g. PCIe AR ~26us)")
+    ap.add_argument("--tgt-link-bw", type=float, default=0,
+                    help="Target inter-chip bandwidth GB/s (for prefill comm scaling)")
+    ap.add_argument("--prefill-comm-fraction", type=float, default=0.0,
+                    help="Fraction of TTFT spent on prefill communication (0-1)")
     ap.add_argument("--input-csv", default=None)
     ap.add_argument("--scenario-dir", default=None)
     ap.add_argument("--tp-size", type=int, default=1)
