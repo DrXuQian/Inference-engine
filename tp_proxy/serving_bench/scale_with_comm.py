@@ -93,14 +93,16 @@ def parse_scenario_log(path: str) -> dict:
         text = f.read()
     for line in text.split("\n"):
         ll = line.lower().strip()
-        if "median ttft" in ll or ("ttft" in ll and "median" in ll):
-            m = re.search(r'([\d.]+)\s*ms', line)
-            if m:
-                metrics["ttft"] = float(m.group(1))
-        if ("median" in ll and "inter-token" in ll) or ("median" in ll and "tpot" in ll):
-            m = re.search(r'([\d.]+)\s*ms', line)
-            if m:
-                metrics["tpot"] = float(m.group(1))
+        if "median" in ll and "ttft" in ll:
+            try:
+                metrics["ttft"] = float(line.split(":")[-1].strip().replace("ms", "").strip())
+            except ValueError:
+                pass
+        if "median" in ll and ("tpot" in ll or "inter-token" in ll):
+            try:
+                metrics["tpot"] = float(line.split(":")[-1].strip().replace("ms", "").strip())
+            except ValueError:
+                pass
     return metrics
 
 

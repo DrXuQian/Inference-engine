@@ -295,14 +295,16 @@ def main():
             ttft = tpot = None
             for line in text.split("\n"):
                 ll = line.lower().strip()
-                if "median ttft" in ll or ("ttft" in ll and "median" in ll):
-                    m = re.search(r'([\d.]+)\s*ms', line)
-                    if m:
-                        ttft = float(m.group(1))
-                if ("median" in ll and "inter-token" in ll) or ("median" in ll and "tpot" in ll):
-                    m = re.search(r'([\d.]+)\s*ms', line)
-                    if m:
-                        tpot = float(m.group(1))
+                if "median" in ll and "ttft" in ll:
+                    try:
+                        ttft = float(line.split(":")[-1].strip().replace("ms", "").strip())
+                    except ValueError:
+                        pass
+                if "median" in ll and ("tpot" in ll or "inter-token" in ll):
+                    try:
+                        tpot = float(line.split(":")[-1].strip().replace("ms", "").strip())
+                    except ValueError:
+                        pass
 
             if ttft is not None and tpot is not None:
                 t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops)
