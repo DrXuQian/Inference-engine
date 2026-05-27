@@ -214,25 +214,39 @@ def run_offline_mode(args):
         for i in range(args.num_warmup):
             llm.generate([prompts[i]], sampling_params=sp)
 
+    batch = getattr(args, 'batch_size', 1) or 1
+
     with nvtx_range("bench"):
-        print(f"Benchmarking ({args.num_prompts} prompts)...")
+        print(f"Benchmarking ({args.num_prompts} prompts, batch={batch})...")
         results = []
-        for i in range(args.num_prompts):
-            with nvtx_range(f"request_{i}"):
+        idx = args.num_warmup
+        remaining = args.num_prompts
+        while remaining > 0:
+            n = min(batch, remaining)
+            batch_prompts = prompts[idx:idx + n]
+            with nvtx_range(f"batch_{idx}"):
                 t0 = time.perf_counter()
-                outputs = llm.generate([prompts[args.num_warmup + i]], sampling_params=sp)
+                outputs = llm.generate(batch_prompts, sampling_params=sp)
                 total_ms = (time.perf_counter() - t0) * 1000
-            n_output = len(outputs[0].outputs[0].token_ids)
-            results.append({"total_ms": total_ms, "n_output": n_output})
+            # Per-request metrics: total time / batch, each request's output tokens
+            per_req_ms = total_ms / n
+            for out in outputs:
+                n_output = len(out.outputs[0].token_ids)
+                results.append({"total_ms": per_req_ms, "n_output": n_output})
+            idx += n
+            remaining -= n
 
     with nvtx_range("ttft_measure"):
         print("Measuring TTFT...")
         sp_short = SamplingParams(max_tokens=1, temperature=0)
         ttft_times = []
-        for i in range(min(5, args.num_prompts)):
+        ttft_batch = prompts[idx:idx + min(5, args.num_prompts)]
+        for i in range(0, len(ttft_batch), max(batch, 1)):
+            b = ttft_batch[i:i + batch]
             t0 = time.perf_counter()
-            llm.generate([prompts[args.num_warmup + args.num_prompts + i]], sampling_params=sp_short)
-            ttft_times.append((time.perf_counter() - t0) * 1000)
+            llm.generate(b, sampling_params=sp_short)
+            per_req = (time.perf_counter() - t0) * 1000
+            ttft_times.append(per_req)
 
     ttft_times.sort()
     totals = sorted(r["total_ms"] for r in results)
@@ -246,6 +260,7 @@ def run_offline_mode(args):
         "tpot_median_ms": round(tpot, 3),
         "total_median_ms": round(totals[mid], 3),
         "output_tokens": n_outs[mid],
+        "batch_size": batch,
     }
 
 
