@@ -60,16 +60,18 @@ while ! curl -s "http://127.0.0.1:${PORT}/health" > /dev/null 2>&1; do
 done
 echo "       Server ready"
 
-# Run bench serve
-echo "[3/5] Running bench serve (${NUM_PROMPTS} prompts, input=${INPUT_LEN}, output=${OUTPUT_LEN})..."
-MAX_MODEL_LEN=$((INPUT_LEN + OUTPUT_LEN + 64))
-VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 vllm bench serve \
+# Run bench (same method as auto_bench/generate_bench)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "[3/5] Running generate_bench (${NUM_PROMPTS} prompts, batch=${BATCH_SIZE}, input=${INPUT_LEN}, output=${OUTPUT_LEN})..."
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+python3 "$SCRIPT_DIR/generate_bench.py" \
     --model "$MODEL" \
-    --max-concurrency $BATCH_SIZE --base-url "http://127.0.0.1:${PORT}" \
-    --dataset-name random \
-    --random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN" \
-    --num-prompts "$NUM_PROMPTS" --request-rate 5 \
-    --trust-remote-code 2>&1 | tee "$OUT_DIR/bench_serve.txt"
+    --input-len "$INPUT_LEN" --output-len "$OUTPUT_LEN" \
+    --num-prompts "$NUM_PROMPTS" --num-warmup 2 \
+    --batch-size "$BATCH_SIZE" \
+    --base-url "http://127.0.0.1:${PORT}" \
+    --output-json "$OUT_DIR/bench_trace.json" \
+    2>&1 | tee "$OUT_DIR/bench_serve.txt"
 
 # Kill server → profiler saves trace
 echo "[4/5] Stopping server..."
