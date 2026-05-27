@@ -1,40 +1,35 @@
 #!/usr/bin/env python3
 """
-Scale serving benchmark results from source platform to target platform.
+Scale serving benchmark results to target platform.
 
-Given source platform specs (FP16 TFLOPS, DDR BW, inter-chip BW) and
-target platform specs, scale TTFT/TPOT accordingly:
+TTFT (prefill, compute-bound): scales with FLOPS ratio
+TPOT (decode, BW-bound):
+  tpot_tgt = (tpot_src - src_link_latency) × (src_bw / tgt_bw) + tgt_link_latency
 
-  TTFT (prefill) is compute-bound:
-    TTFT_target = TTFT_source × (src_flops / tgt_flops)
-
-  TPOT (decode) is bandwidth-bound:
-    TPOT = weight_time + kv_time + comm_time
-    weight_time scales with DDR BW
-    kv_time scales with DDR BW
-    comm_time scales with inter-chip BW (for TP>1)
+  link_latency = per-step communication latency for decode (TP>1).
+  For decode, comm is latency-bound (small messages), NOT throughput-bound.
 
 Usage:
-    # Scale input sweep results
+    # Single target
     python scale_report.py \
         --input-csv results/input_sweep/summary.csv \
-        --src-flops 312 --src-bw 2039 --src-link-bw 600 \
-        --tgt-flops 100 --tgt-bw 680 --tgt-link-bw 200 \
-        --model-dir /path/to/model --tp-size 2 \
-        -o report_scaled.png
-
-    # Scale scenario results
-    python scale_report.py \
         --scenario-dir results/scenarios/ \
-        --src-flops 312 --src-bw 2039 --src-link-bw 600 \
-        --tgt-flops 100 --tgt-bw 680 --tgt-link-bw 200 \
-        -o scenario_scaled.txt
+        --src-flops 312 --src-bw 2039 --src-link-latency 0.005 \
+        --tgt-flops 100 --tgt-bw 680 --tgt-link-latency 0.026 \
+        --name "ICN" --tp-size 2 \
+        -o scaled_icn.json
+
+    # Compare multiple targets (run multiple times, then plot)
+    python scale_report.py ... --name "ICN" -o icn.json
+    python scale_report.py ... --name "PCIe" -o pcie.json
+    python scale_report.py --plot icn.json pcie.json -o comparison.png
 """
 
 import argparse
 import csv
 import json
 import os
+import re
 import sys
 
 import matplotlib
@@ -42,74 +37,42 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def load_model_config(model_dir: str) -> dict | None:
-    p = os.path.join(model_dir, "config.json")
-    if not os.path.exists(p):
-        return None
-    with open(p) as f:
-        cfg = json.load(f)
-    tc = cfg.get("text_config", cfg)
-    layer_types = tc.get("layer_types", [])
-    n_layers = tc.get("num_hidden_layers", 0)
-    n_full = sum(1 for lt in layer_types[:n_layers] if lt == "full_attention") if layer_types else n_layers
-    return {
-        "num_hidden_layers": n_layers,
-        "num_key_value_heads": tc.get("num_key_value_heads", 2),
-        "head_dim": tc.get("head_dim", 256),
-        "n_full_attn_layers": n_full,
-        "n_lin_attn_layers": n_layers - n_full,
-        "linear_num_key_heads": tc.get("linear_num_key_heads", 0),
-        "linear_key_head_dim": tc.get("linear_key_head_dim", 0),
-    }
-
-
-def compute_kv_fraction(cfg: dict, seq_len: int, tp_size: int,
-                        total_decode_bytes: float) -> float:
-    """Estimate what fraction of decode bandwidth is KV cache vs weights."""
-    n_kv = cfg["num_key_value_heads"]
-    head_dim = cfg["head_dim"]
-    n_full = cfg["n_full_attn_layers"]
-    kv_heads_per_rank = n_kv if tp_size > n_kv else n_kv // tp_size
-
-    full_kv = n_full * 2 * kv_heads_per_rank * head_dim * seq_len * 2
-    lin_qk = cfg.get("linear_num_key_heads", 0)
-    lin_kd = cfg.get("linear_key_head_dim", 0)
-    lin_kv = cfg["n_lin_attn_layers"] * lin_qk * lin_kd * lin_kd * 2 if lin_qk > 0 else 0
-
-    kv_total = full_kv + lin_kv
-    if total_decode_bytes > 0:
-        return kv_total / total_decode_bytes
-    return 0.3  # fallback estimate
-
-
-def scale_ttft(ttft_src: float, src_flops: float, tgt_flops: float) -> float:
-    """Scale TTFT (compute-bound): inversely proportional to FLOPS."""
+def scale_ttft(ttft_src, src_flops, tgt_flops):
     if tgt_flops <= 0 or src_flops <= 0:
         return ttft_src
     return ttft_src * (src_flops / tgt_flops)
 
 
-def scale_tpot(tpot_src: float, src_bw: float, tgt_bw: float,
-               src_link: float, tgt_link: float,
-               comm_fraction: float = 0.0) -> float:
-    """Scale TPOT (bandwidth-bound): memory part scales with DDR BW,
-    comm part scales with link BW.
-
-    tpot = ddr_time + comm_time
-    ddr_time = tpot * (1 - comm_fraction)
-    comm_time = tpot * comm_fraction
+def scale_tpot(tpot_src, src_bw, tgt_bw, src_link_lat, tgt_link_lat):
+    """Scale TPOT: subtract src link latency, scale DDR part, add tgt link latency.
+    tpot_tgt = (tpot_src - src_link_lat) × (src_bw / tgt_bw) + tgt_link_lat
     """
     if src_bw <= 0 or tgt_bw <= 0:
         return tpot_src
-    ddr_time = tpot_src * (1 - comm_fraction) * (src_bw / tgt_bw)
-    if comm_fraction > 0 and src_link > 0 and tgt_link > 0:
-        comm_time = tpot_src * comm_fraction * (src_link / tgt_link)
-    else:
-        comm_time = tpot_src * comm_fraction
-    return ddr_time + comm_time
+    ddr_time = max(tpot_src - src_link_lat, 0)
+    return ddr_time * (src_bw / tgt_bw) + tgt_link_lat
 
 
-def fmt_ms(v: float) -> str:
+def parse_log(path):
+    """Extract median TTFT/TPOT from vllm bench serve log."""
+    ttft = tpot = None
+    with open(path) as f:
+        for line in f:
+            ll = line.lower().strip()
+            if "median" in ll and "ttft" in ll:
+                try:
+                    ttft = float(line.split(":")[-1].strip().replace("ms", "").strip())
+                except ValueError:
+                    pass
+            if "median" in ll and ("tpot" in ll or "inter-token" in ll):
+                try:
+                    tpot = float(line.split(":")[-1].strip().replace("ms", "").strip())
+                except ValueError:
+                    pass
+    return ttft, tpot
+
+
+def fmt_ms(v):
     if v < 1:
         return f"{v * 1000:.1f}us"
     if v < 1000:
@@ -121,197 +84,204 @@ def fmt_ms(v: float) -> str:
     return f"{v / 3600000:.2f}h"
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Scale benchmark results to target platform")
+def fmt_len(n):
+    return f"{n // 1024}K" if n >= 1024 else str(n)
 
-    # Source platform
-    ap.add_argument("--src-flops", type=float, required=True,
-                    help="Source platform FP16 TFLOPS per GPU")
-    ap.add_argument("--src-bw", type=float, required=True,
-                    help="Source platform DDR bandwidth GB/s per GPU")
-    ap.add_argument("--src-link-bw", type=float, default=0,
-                    help="Source platform inter-chip bandwidth GB/s (e.g. NVLink)")
 
-    # Target platform
-    ap.add_argument("--tgt-flops", type=float, required=True,
-                    help="Target platform FP16 TFLOPS per GPU")
-    ap.add_argument("--tgt-bw", type=float, required=True,
-                    help="Target platform DDR bandwidth GB/s per GPU")
-    ap.add_argument("--tgt-link-bw", type=float, default=0,
-                    help="Target platform inter-chip bandwidth GB/s")
+COLORS = ['#378ADD', '#D85A30', '#2CA02C', '#9467BD', '#8C564B', '#E377C2']
+MARKERS = ['-o', '--^', '-s', '--D', '-v', '--P']
 
-    # Data inputs
-    ap.add_argument("--input-csv", default=None,
-                    help="Input sweep summary.csv from bench_input_sweep.sh")
-    ap.add_argument("--scenario-dir", default=None,
-                    help="Directory with scenario logs (mainstream.log, etc.)")
-    ap.add_argument("--concurrency-dir", default=None,
-                    help="Directory with concurrency logs (c1.log, etc.)")
-    ap.add_argument("--model-dir", default=None,
-                    help="Model config dir (for KV cache fraction estimation)")
-    ap.add_argument("--tp-size", type=int, default=1)
-    ap.add_argument("--comm-fraction", type=float, default=0.0,
-                    help="Fraction of TPOT spent on inter-chip communication (auto-estimated if model-dir provided)")
 
-    ap.add_argument("-o", "--output", default="scaled_report.png")
-    ap.add_argument("--src-label", default="Source")
-    ap.add_argument("--tgt-label", default="Target")
-    args = ap.parse_args()
+def do_scale(args):
+    """Scale and save results to JSON."""
+    result = {
+        "name": args.name,
+        "src_flops": args.src_flops, "src_bw": args.src_bw,
+        "src_link_latency_ms": args.src_link_latency,
+        "tgt_flops": args.tgt_flops, "tgt_bw": args.tgt_bw,
+        "tgt_link_latency_ms": args.tgt_link_latency,
+        "tp_size": args.tp_size,
+    }
 
-    # Comm fraction for TP>1
-    comm_frac = args.comm_fraction
-    if args.tp_size > 1 and comm_frac == 0 and args.src_link_bw > 0:
-        comm_frac = 0.05  # rough default: ~5% of TPOT is comm for TP=2
-
-    print(f"Source: {args.src_flops} TFLOPS, {args.src_bw} GB/s DDR, {args.src_link_bw} GB/s link")
-    print(f"Target: {args.tgt_flops} TFLOPS, {args.tgt_bw} GB/s DDR, {args.tgt_link_bw} GB/s link")
-    print(f"TP={args.tp_size}, comm_fraction={comm_frac:.2f}")
-    print(f"TTFT scale: ×{args.src_flops / args.tgt_flops:.2f}")
-    print(f"TPOT DDR scale: ×{args.src_bw / args.tgt_bw:.2f}")
-    if args.src_link_bw > 0 and args.tgt_link_bw > 0:
-        print(f"TPOT link scale: ×{args.src_link_bw / args.tgt_link_bw:.2f}")
+    print(f"Name: {args.name}")
+    print(f"Source: {args.src_flops} TFLOPS, {args.src_bw} GB/s, link_lat={args.src_link_latency}ms")
+    print(f"Target: {args.tgt_flops} TFLOPS, {args.tgt_bw} GB/s, link_lat={args.tgt_link_latency}ms")
+    print(f"TTFT scale: x{args.src_flops / args.tgt_flops:.2f}")
+    print(f"TPOT DDR scale: x{args.src_bw / args.tgt_bw:.2f}")
     print()
 
-    # ========================================
-    # Input sweep scaling
-    # ========================================
+    # Input sweep
     if args.input_csv:
-        print("=== Input Sweep Scaling ===")
-        print(f"{'input':>8} {'src_ttft':>10} {'tgt_ttft':>10} "
-              f"{'src_tpot':>10} {'tgt_tpot':>10} {'src_tps':>8} {'tgt_tps':>8}")
-        print("-" * 70)
+        print("=== Input Sweep ===")
+        print(f"{'input':>8} {'tgt_ttft':>10} {'tgt_tpot':>10} {'tgt_tps':>8}")
+        print("-" * 40)
 
-        input_lens = []
-        src_ttfts = []; tgt_ttfts = []
-        src_tpots = []; tgt_tpots = []
-
+        sweep = []
         with open(args.input_csv) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 il = int(row["input_len"])
                 ttft = float(row["ttft_median_ms"]) if row.get("ttft_median_ms") else None
                 tpot = float(row["tpot_median_ms"]) if row.get("tpot_median_ms") else None
-
                 if ttft is None or tpot is None:
                     continue
-
                 t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops)
                 t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                    args.src_link_bw, args.tgt_link_bw, comm_frac)
+                                    args.src_link_latency, args.tgt_link_latency)
+                t_tps = 1000 / t_tpot if t_tpot > 0 else 0
+                print(f"{il:>8} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10} {t_tps:>7.1f}")
+                sweep.append({
+                    "input_len": il,
+                    "ttft_ms": round(t_ttft, 2),
+                    "tpot_ms": round(t_tpot, 3),
+                    "tps": round(t_tps, 1),
+                })
+        result["input_sweep"] = sweep
+        print()
 
-                src_tps = 1000 / tpot if tpot > 0 else 0
-                tgt_tps = 1000 / t_tpot if t_tpot > 0 else 0
-
-                print(f"{il:>8} {fmt_ms(ttft):>10} {fmt_ms(t_ttft):>10} "
-                      f"{fmt_ms(tpot):>10} {fmt_ms(t_tpot):>10} "
-                      f"{src_tps:>7.1f} {tgt_tps:>7.1f}")
-
-                input_lens.append(il)
-                src_ttfts.append(ttft); tgt_ttfts.append(t_ttft)
-                src_tpots.append(tpot); tgt_tpots.append(t_tpot)
-
-        # Save scaled CSV
-        csv_out = args.output.replace('.png', '_input_sweep.csv')
-        with open(csv_out, 'w', newline='') as f:
-            w = csv.writer(f)
-            w.writerow(["input_len", "src_ttft_ms", "tgt_ttft_ms",
-                         "src_tpot_ms", "tgt_tpot_ms", "src_tps", "tgt_tps"])
-            for i in range(len(input_lens)):
-                w.writerow([input_lens[i],
-                            f"{src_ttfts[i]:.2f}", f"{tgt_ttfts[i]:.2f}",
-                            f"{src_tpots[i]:.3f}", f"{tgt_tpots[i]:.3f}",
-                            f"{1000/src_tpots[i]:.1f}", f"{1000/tgt_tpots[i]:.1f}"])
-        print(f"\nSaved: {csv_out}")
-
-        # Plot
-        if input_lens:
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-
-            def fmt_len(n):
-                return f"{n // 1024}K" if n >= 1024 else str(n)
-
-            ax = axes[0]
-            ax.plot(input_lens, src_ttfts, '-o', color='#378ADD', lw=2, ms=6,
-                    label=args.src_label)
-            ax.plot(input_lens, tgt_ttfts, '--^', color='#D85A30', lw=2, ms=7,
-                    label=args.tgt_label)
-            ax.set_xscale('log', base=2)
-            ax.set_yscale('log')
-            ax.set_xticks(input_lens)
-            ax.set_xticklabels([fmt_len(il) for il in input_lens], rotation=45)
-            ax.set_xlabel('Input Length (tokens)')
-            ax.set_ylabel('TTFT (ms, log)')
-            ax.set_title('TTFT Median', fontsize=12)
-            ax.grid(True, which='both', alpha=0.25)
-            ax.legend(frameon=False)
-
-            ax = axes[1]
-            ax.plot(input_lens, src_tpots, '-o', color='#378ADD', lw=2, ms=6,
-                    label=args.src_label)
-            ax.plot(input_lens, tgt_tpots, '--^', color='#D85A30', lw=2, ms=7,
-                    label=args.tgt_label)
-            ax.set_xscale('log', base=2)
-            ax.set_xticks(input_lens)
-            ax.set_xticklabels([fmt_len(il) for il in input_lens], rotation=45)
-            ax.set_xlabel('Input Length (tokens)')
-            ax.set_ylabel('TPOT (ms)')
-            ax.set_title('TPOT Median', fontsize=12)
-            ax.grid(True, which='both', alpha=0.25)
-            ax.legend(frameon=False)
-
-            if len(input_lens) >= 2:
-                gap = tgt_tpots[-1] - src_tpots[-1]
-                mid = (src_tpots[-1] + tgt_tpots[-1]) / 2
-                ax.annotate(f'gap = {gap:+.2f} ms',
-                            xy=(input_lens[-1], mid),
-                            xytext=(input_lens[-3] if len(input_lens) >= 3 else input_lens[0], mid + abs(gap) * 0.5),
-                            fontsize=10, color='#555',
-                            arrowprops=dict(arrowstyle='->', color='#888', lw=0.8))
-
-            plt.tight_layout()
-            plt.savefig(args.output, dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"Saved: {args.output}")
-
-    # ========================================
-    # Scenario scaling
-    # ========================================
+    # Scenarios
     if args.scenario_dir:
-        import re
-        print("\n=== Scenario Scaling ===")
-        print(f"{'scenario':>20} {'src_ttft':>10} {'tgt_ttft':>10} "
-              f"{'src_tpot':>10} {'tgt_tpot':>10}")
-        print("-" * 65)
+        print("=== Scenarios ===")
+        print(f"{'scenario':>20} {'tgt_ttft':>10} {'tgt_tpot':>10}")
+        print("-" * 45)
 
+        scenarios = []
         for log_name in sorted(os.listdir(args.scenario_dir)):
             if not log_name.endswith(".log"):
                 continue
-            log_path = os.path.join(args.scenario_dir, log_name)
+            ttft, tpot = parse_log(os.path.join(args.scenario_dir, log_name))
+            if ttft is None or tpot is None:
+                continue
             name = log_name.replace(".log", "")
+            t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops)
+            t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
+                                args.src_link_latency, args.tgt_link_latency)
+            print(f"{name:>20} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}")
+            scenarios.append({
+                "name": name,
+                "ttft_ms": round(t_ttft, 2),
+                "tpot_ms": round(t_tpot, 3),
+            })
+        result["scenarios"] = scenarios
 
-            with open(log_path) as f:
-                text = f.read()
+    # Save JSON
+    with open(args.output, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"\nSaved: {args.output}")
 
-            ttft = tpot = None
-            for line in text.split("\n"):
-                ll = line.lower().strip()
-                if "median" in ll and "ttft" in ll:
-                    try:
-                        ttft = float(line.split(":")[-1].strip().replace("ms", "").strip())
-                    except ValueError:
-                        pass
-                if "median" in ll and ("tpot" in ll or "inter-token" in ll):
-                    try:
-                        tpot = float(line.split(":")[-1].strip().replace("ms", "").strip())
-                    except ValueError:
-                        pass
 
-            if ttft is not None and tpot is not None:
-                t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops)
-                t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                    args.src_link_bw, args.tgt_link_bw, comm_frac)
-                print(f"{name:>20} {fmt_ms(ttft):>10} {fmt_ms(t_ttft):>10} "
-                      f"{fmt_ms(tpot):>10} {fmt_ms(t_tpot):>10}")
+def do_plot(args):
+    """Plot comparison from multiple scaled JSON files."""
+    datasets = []
+    for path in args.plot:
+        with open(path) as f:
+            datasets.append(json.load(f))
+
+    # Check if input_sweep data exists
+    has_sweep = any("input_sweep" in d for d in datasets)
+    has_scenarios = any("scenarios" in d for d in datasets)
+
+    if has_sweep:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+        # TTFT
+        ax = axes[0]
+        for i, d in enumerate(datasets):
+            sweep = d.get("input_sweep", [])
+            if not sweep:
+                continue
+            ils = [s["input_len"] for s in sweep]
+            ttfts = [s["ttft_ms"] for s in sweep]
+            ax.plot(ils, ttfts, MARKERS[i % len(MARKERS)],
+                    color=COLORS[i % len(COLORS)], lw=2, ms=6, label=d["name"])
+        ax.set_xscale('log', base=2)
+        ax.set_yscale('log')
+        all_ils = sorted(set(s["input_len"] for d in datasets for s in d.get("input_sweep", [])))
+        if all_ils:
+            ax.set_xticks(all_ils)
+            ax.set_xticklabels([fmt_len(il) for il in all_ils], rotation=45)
+        ax.set_xlabel('Input Length (tokens)')
+        ax.set_ylabel('TTFT (ms, log)')
+        ax.set_title('TTFT Median')
+        ax.grid(True, which='both', alpha=0.25)
+        ax.legend(frameon=False)
+
+        # TPOT
+        ax = axes[1]
+        for i, d in enumerate(datasets):
+            sweep = d.get("input_sweep", [])
+            if not sweep:
+                continue
+            ils = [s["input_len"] for s in sweep]
+            tpots = [s["tpot_ms"] for s in sweep]
+            ax.plot(ils, tpots, MARKERS[i % len(MARKERS)],
+                    color=COLORS[i % len(COLORS)], lw=2, ms=6, label=d["name"])
+        ax.set_xscale('log', base=2)
+        if all_ils:
+            ax.set_xticks(all_ils)
+            ax.set_xticklabels([fmt_len(il) for il in all_ils], rotation=45)
+        ax.set_xlabel('Input Length (tokens)')
+        ax.set_ylabel('TPOT (ms)')
+        ax.set_title('TPOT Median')
+        ax.grid(True, which='both', alpha=0.25)
+        ax.legend(frameon=False)
+
+        plt.tight_layout()
+        plt.savefig(args.output, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved: {args.output}")
+
+    if has_scenarios:
+        # Print comparison table
+        print("\n=== Scenario Comparison ===")
+        names = sorted(set(s["name"] for d in datasets for s in d.get("scenarios", [])))
+        header = f"{'scenario':>20}"
+        for d in datasets:
+            header += f" | {d['name']:>12} TTFT {d['name']:>12} TPOT"
+        print(header)
+        print("-" * len(header))
+        for sname in names:
+            row = f"{sname:>20}"
+            for d in datasets:
+                sc = next((s for s in d.get("scenarios", []) if s["name"] == sname), None)
+                if sc:
+                    row += f" | {fmt_ms(sc['ttft_ms']):>12} {fmt_ms(sc['tpot_ms']):>12}"
+                else:
+                    row += f" | {'N/A':>12} {'N/A':>12}"
+            print(row)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Scale benchmark results / plot comparison")
+
+    # Mode 1: Scale
+    ap.add_argument("--src-flops", type=float, default=0)
+    ap.add_argument("--src-bw", type=float, default=0)
+    ap.add_argument("--src-link-latency", type=float, default=0,
+                    help="Source per-step decode link latency ms (e.g. NVLink AR ~0.005ms)")
+    ap.add_argument("--tgt-flops", type=float, default=0)
+    ap.add_argument("--tgt-bw", type=float, default=0)
+    ap.add_argument("--tgt-link-latency", type=float, default=0,
+                    help="Target per-step decode link latency ms (e.g. PCIe AR ~0.026ms)")
+    ap.add_argument("--input-csv", default=None)
+    ap.add_argument("--scenario-dir", default=None)
+    ap.add_argument("--tp-size", type=int, default=1)
+    ap.add_argument("--name", default="Target",
+                    help="Label for this configuration (e.g. 'ICN', 'PCIe')")
+
+    # Mode 2: Plot comparison
+    ap.add_argument("--plot", nargs="+", default=None,
+                    help="JSON files from previous runs to compare (e.g. icn.json pcie.json)")
+
+    ap.add_argument("-o", "--output", default="scaled_report.json")
+    args = ap.parse_args()
+
+    if args.plot:
+        do_plot(args)
+    elif args.src_flops > 0:
+        do_scale(args)
+    else:
+        ap.print_help()
 
 
 if __name__ == "__main__":
