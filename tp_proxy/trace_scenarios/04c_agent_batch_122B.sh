@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 BASE_04=./results/04_agent_122B
 OUT=./results/04c_agent_batch_122B
-INPUT_LEN=${INPUT_LEN:-4096}
-OUTPUT_LEN=${OUTPUT_LEN:-1500}
+INPUT_LEN=${INPUT_LEN:-102400}
+OUTPUT_LEN=${OUTPUT_LEN:-3072}
 BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
 
 for TP in 1 2; do

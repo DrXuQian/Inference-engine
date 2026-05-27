@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3.5-122B-A10B-GPTQ-Int4}
 OUT=./results/04c_agent_batch_122B
-INPUT_LEN=${INPUT_LEN:-4096}
+INPUT_LEN=${INPUT_LEN:-102400}
 BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
 
 # TP=1: no comm
