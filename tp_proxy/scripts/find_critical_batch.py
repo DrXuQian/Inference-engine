@@ -81,16 +81,14 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
     throughput = None
     for line in result.stdout.split("\n"):
         line = line.strip()
-        if "Inter-token Latency" in line and "median" not in line.lower():
-            continue
-        # vllm bench serve outputs lines like:
-        # Median Inter-token Latency: X.XX ms
-        if "inter-token" in line.lower() and "median" in line.lower():
+        # Match: "Median TPOT (ms): 9.09" or "Median Inter-token Latency: 9.09 ms"
+        if "median" in line.lower() and ("tpot" in line.lower() or "inter-token" in line.lower()):
             try:
                 tpot = float(line.split(":")[-1].strip().replace("ms", "").strip())
             except ValueError:
                 pass
-        if "median ttft" in line.lower() or ("ttft" in line.lower() and "median" in line.lower()):
+        # Match: "Median TTFT (ms): 4425.85"
+        if "median" in line.lower() and "ttft" in line.lower():
             try:
                 ttft = float(line.split(":")[-1].strip().replace("ms", "").strip())
             except ValueError:

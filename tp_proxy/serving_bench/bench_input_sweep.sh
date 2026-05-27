@@ -70,10 +70,11 @@ for IL in $INPUT_LENS; do
         echo "$IL,,,," >> "$SUMMARY"
     else
         # Extract metrics from log
-        TTFT_MED=$(grep -i "median ttft" "$LOG" | tail -1 | grep -oP '[\d.]+(?=\s*ms)' || echo "")
-        TTFT_P99=$(grep -i "p99 ttft" "$LOG" | tail -1 | grep -oP '[\d.]+(?=\s*ms)' || echo "")
-        TPOT_MED=$(grep -i "median.*inter-token" "$LOG" | tail -1 | grep -oP '[\d.]+(?=\s*ms)' || echo "")
-        TPOT_P99=$(grep -i "p99.*inter-token" "$LOG" | tail -1 | grep -oP '[\d.]+(?=\s*ms)' || echo "")
+        # Format: "Median TTFT (ms):   4425.85" or "Mean TPOT (ms):   9.09"
+        TTFT_MED=$(grep -i "median ttft" "$LOG" | tail -1 | awk -F: '{print $NF}' | tr -d ' ' || echo "")
+        TTFT_P99=$(grep -i "p99 ttft" "$LOG" | tail -1 | awk -F: '{print $NF}' | tr -d ' ' || echo "")
+        TPOT_MED=$(grep -i "median tpot\|median.*inter-token" "$LOG" | tail -1 | awk -F: '{print $NF}' | tr -d ' ' || echo "")
+        TPOT_P99=$(grep -i "p99 tpot\|p99.*inter-token" "$LOG" | tail -1 | awk -F: '{print $NF}' | tr -d ' ' || echo "")
         echo "$IL,$TTFT_MED,$TTFT_P99,$TPOT_MED,$TPOT_P99" >> "$SUMMARY"
         echo "[OK] input=$IL → TTFT=${TTFT_MED}ms, TPOT=${TPOT_MED}ms"
     fi
