@@ -221,11 +221,11 @@ def main():
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 
-    # Apply batch scaling: lm_head × 1.1^batch, sampling × batch
+    # Apply batch scaling: sampling × batch (lm_head not scaled for now)
     if batch > 1:
-        lm_head_scaled = lm_head_ms * (1.1 ** batch)
+        lm_head_scaled = lm_head_ms
         sampling_scaled = sampling_ms * batch
-        print(f"  batch={batch}: lm_head × 1.1^{batch} = {lm_head_scaled:.4f} ms")
+        print(f"  batch={batch}: lm_head = {lm_head_scaled:.4f} ms (no batch scaling)")
         print(f"  batch={batch}: sampling × {batch} = {sampling_scaled:.4f} ms")
     else:
         lm_head_scaled = lm_head_ms
