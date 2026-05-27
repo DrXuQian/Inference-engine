@@ -75,12 +75,15 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
 
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
 
-    # Parse output for TPOT — check both stdout and stderr
+    # Parse output for TPOT — check both stdout and stderr, skip warnings
     output = result.stdout + "\n" + result.stderr
     tpot = None
     ttft = None
     throughput = None
     for line in output.split("\n"):
+        # Skip pydantic/warning noise
+        if "Warning" in line or "warning" in line:
+            continue
         line = line.strip()
         # Match: "Median TPOT (ms): 9.09" or "Median Inter-token Latency: 9.09 ms"
         if "median" in line.lower() and ("tpot" in line.lower() or "inter-token" in line.lower()):
@@ -117,7 +120,7 @@ def bench_concurrency(base_url: str, model: str, input_len: int,
         "ttft_ms": ttft,
         "throughput_rps": throughput,
         "tps": round(1000 / tpot, 1) if tpot and tpot > 0 else None,
-        "stdout": output[-500:] if not tpot else "",
+        "stdout": output[-2000:] if not tpot else "",
     }
 
 
@@ -187,7 +190,11 @@ def main():
             if r["tps"] is None:
                 print(f"{bs:>6} {'FAIL':>10} {'':>8} {'':>8} {'':>12}")
                 if r["stdout"]:
-                    print(f"       Last output: {r['stdout'][:200]}")
+                    # Show last few lines, skip warnings
+                    useful = [l for l in r["stdout"].split("\n")
+                              if l.strip() and "warning" not in l.lower()]
+                    for line in useful[-5:]:
+                        print(f"       {line.strip()[:120]}")
                 continue
 
             if baseline_tps is None:
