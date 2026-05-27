@@ -108,8 +108,21 @@ def measure_tail_from_trace(sqlite_path: str,
             print(f"    {ev[3][:80]}  dur={ev[1]/1e3:.1f}us")
         return None
 
-    # Find all lm_head positions to identify step boundaries
-    lm_head_indices = [i for i, (_, _, _, n) in enumerate(all_events) if lm_head_kernel in n]
+    # Find all lm_head positions, sorted by duration descending.
+    # In multi-batch cases, different batches may produce different-sized lm_head kernels.
+    # Pick the two largest (= full batch lm_head) to measure encoder between them.
+    lm_head_all = [(i, all_events[i][1]) for i, (_, _, _, n) in enumerate(all_events)
+                   if lm_head_kernel in n]
+    # Sort by duration descending, take top candidates
+    lm_head_all.sort(key=lambda x: -x[1])
+    if len(lm_head_all) >= 2:
+        # Pick two largest, then order by position (earlier first)
+        top2 = sorted(lm_head_all[:2], key=lambda x: x[0])
+        lm_head_indices = [top2[0][0], top2[1][0]]
+        print(f"  Found {len(lm_head_all)} lm_head kernels, "
+              f"selected 2 largest: dur={top2[0][1]/1e3:.1f}us, {top2[1][1]/1e3:.1f}us")
+    else:
+        lm_head_indices = [x[0] for x in lm_head_all]
 
     if len(lm_head_indices) < 2:
         # Only 1 lm_head found, can't compute encoder between two steps
