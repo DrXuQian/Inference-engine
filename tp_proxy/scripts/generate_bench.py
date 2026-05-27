@@ -99,65 +99,7 @@ def http_generate(port, prompt_ids, max_tokens, model_name):
     return {"ttft_ms": ttft, "tpot_ms": tpot, "total_ms": total_ms, "n_output": n_tokens}
 
 
-def run_bench_on_server(port, args):
-    """Run benchmark against a server already listening on port."""
-    prompts = [np.random.randint(0, 10000, size=args.input_len).tolist()
-               for _ in range(args.num_prompts + args.num_warmup)]
-
-    print(f"Warmup ({args.num_warmup})...")
-    for i in range(args.num_warmup):
-        http_generate(port, prompts[i], args.output_len, args.model)
-
-    batch = getattr(args, 'batch_size', 1) or 1
-    print(f"Benchmarking ({args.num_prompts} prompts, batch={batch})...")
-    results = []
-    if batch <= 1:
-        for i in range(args.num_prompts):
-            r = http_generate(port, prompts[args.num_warmup + i],
-                              args.output_len, args.model)
-            results.append(r)
-    else:
-        import concurrent.futures
-        idx = args.num_warmup
-        remaining = args.num_prompts
-        while remaining > 0:
-            n = min(batch, remaining)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
-                futs = [pool.submit(http_generate, port,
-                                    prompts[idx + j], args.output_len, args.model)
-                        for j in range(n)]
-                for f in concurrent.futures.as_completed(futs):
-                    results.append(f.result())
-            idx += n
-            remaining -= n
-
-    mid = len(results) // 2
-    ttfts = sorted(r["ttft_ms"] for r in results)
-    tpots = sorted(r["tpot_ms"] for r in results)
-    totals = sorted(r["total_ms"] for r in results)
-    n_outs = sorted(r["n_output"] for r in results)
-
-    return {
-        "ttft_median_ms": round(ttfts[mid], 3),
-        "tpot_median_ms": round(tpots[mid], 3),
-        "total_median_ms": round(totals[mid], 3),
-        "output_tokens": n_outs[mid],
-    }
-
-
 def run_serve_mode(args):
-    # If --base-url is provided, connect to existing server
-    if getattr(args, 'base_url', None):
-        from urllib.parse import urlparse
-        parsed = urlparse(args.base_url)
-        port = parsed.port or 8000
-        print(f"Connecting to existing server at {args.base_url}")
-        if not wait_for_server(port):
-            print("ERROR: server not reachable", file=sys.stderr)
-            sys.exit(1)
-        return run_bench_on_server(port, args)
-
-    # Start own server
     port = 8199
     mml = args.max_model_len or (args.input_len + args.output_len + 64)
     env = os.environ.copy()
@@ -183,11 +125,59 @@ def run_serve_mode(args):
         print(f"Starting vllm serve (port {port})...")
         if not wait_for_server(port):
             print("ERROR: server failed to start.", file=sys.stderr)
-            ret = server.poll()
-            print(f"Server process exited with code: {ret}", file=sys.stderr)
+            try:
+                with open("/tmp/generate_bench_server.log") as f:
+                    log = f.read()
+                    print(log[-2000:], file=sys.stderr)
+            except FileNotFoundError:
+                # Server process may have died before creating log
+                ret = server.poll()
+                print(f"Server process exited with code: {ret}", file=sys.stderr)
             cleanup(); sys.exit(1)
         print("Server ready")
-        return run_bench_on_server(port, args)
+
+        prompts = [np.random.randint(0, 10000, size=args.input_len).tolist()
+                   for _ in range(args.num_prompts + args.num_warmup)]
+
+        print(f"Warmup ({args.num_warmup})...")
+        for i in range(args.num_warmup):
+            http_generate(port, prompts[i], args.output_len, args.model)
+
+        batch = getattr(args, 'batch_size', 1) or 1
+        print(f"Benchmarking ({args.num_prompts} prompts, batch={batch})...")
+        results = []
+        if batch <= 1:
+            for i in range(args.num_prompts):
+                r = http_generate(port, prompts[args.num_warmup + i],
+                                  args.output_len, args.model)
+                results.append(r)
+        else:
+            import concurrent.futures
+            idx = args.num_warmup
+            remaining = args.num_prompts
+            while remaining > 0:
+                n = min(batch, remaining)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+                    futs = [pool.submit(http_generate, port,
+                                        prompts[idx + j], args.output_len, args.model)
+                            for j in range(n)]
+                    for f in concurrent.futures.as_completed(futs):
+                        results.append(f.result())
+                idx += n
+                remaining -= n
+
+        mid = len(results) // 2
+        ttfts = sorted(r["ttft_ms"] for r in results)
+        tpots = sorted(r["tpot_ms"] for r in results)
+        totals = sorted(r["total_ms"] for r in results)
+        n_outs = sorted(r["n_output"] for r in results)
+
+        return {
+            "ttft_median_ms": round(ttfts[mid], 3),
+            "tpot_median_ms": round(tpots[mid], 3),
+            "total_median_ms": round(totals[mid], 3),
+            "output_tokens": n_outs[mid],
+        }
     finally:
         cleanup()
 
@@ -280,8 +270,6 @@ def main():
     ap.add_argument("--tp", type=int, default=1)
     ap.add_argument("--batch-size", type=int, default=1,
                     help="Concurrent requests (batch size, default: 1)")
-    ap.add_argument("--base-url", default=None,
-                    help="Connect to existing server (skip server startup)")
     ap.add_argument("--mode", choices=["serve", "offline"], default="serve",
                     help="serve: HTTP (compatible); offline: vllm.LLM (fast, needs platform support)")
     ap.add_argument("--output-json", type=str, default=None)
