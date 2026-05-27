@@ -64,10 +64,13 @@ def load_meta(model_dir: str) -> dict | None:
 
 def measure_tail_from_trace(sqlite_path: str,
                             lm_head_kernel: str) -> dict | None:
-    """Extract tail time (lm_head + sampling) per decode step from trace.
+    """Extract per-step decode breakdown from trace using graphNodeId.
 
-    Walk backward from end of trace to find the last lm_head kernel
-    (substring match). Sum kernel durations from there to end = tail.
+    Uses graphNodeId > 0 to identify CUDA Graph (decode) kernels.
+    Within decode kernels, finds two consecutive lm_head kernels (largest),
+    measures encoder = kernels between them (excluding prev lm_head + sampling).
+
+    Returns: lm_head_ms, sampling_ms, encoder_ms, overhead_ms
     """
     conn = sqlite3.connect(sqlite_path)
     cursor = conn.cursor()
@@ -82,102 +85,140 @@ def measure_tail_from_trace(sqlite_path: str,
         conn.close()
         return None
 
-    cursor.execute(f"""
-        SELECT k.start, k."end" - k.start AS dur, k."end", s.value AS name
-        FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
-        ORDER BY k.start
-    """)
-    all_events = [(r[0], r[1], r[2], r[3]) for r in cursor.fetchall()]
+    # Check if graphNodeId column exists
+    cursor.execute(f'PRAGMA table_info("{kt}")')
+    columns = [c[1] for c in cursor.fetchall()]
+    has_graph_id = "graphNodeId" in columns
+
+    # Query: include graphNodeId if available
+    if has_graph_id:
+        cursor.execute(f"""
+            SELECT k.start, k."end" - k.start AS dur, k."end",
+                   s.value AS name, k.graphNodeId
+            FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
+            ORDER BY k.start
+        """)
+        all_events = [(r[0], r[1], r[2], r[3], r[4] or 0) for r in cursor.fetchall()]
+    else:
+        cursor.execute(f"""
+            SELECT k.start, k."end" - k.start AS dur, k."end", s.value AS name
+            FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
+            ORDER BY k.start
+        """)
+        all_events = [(r[0], r[1], r[2], r[3], 0) for r in cursor.fetchall()]
     conn.close()
 
     if not all_events:
         return None
 
-    # Walk backward from end to find last lm_head kernel (substring match)
-    tail_start_idx = None
-    for i in range(len(all_events) - 1, -1, -1):
-        if lm_head_kernel in all_events[i][3]:
-            tail_start_idx = i
-            break
+    # Filter decode-only kernels (graphNodeId > 0)
+    if has_graph_id:
+        decode_events = [(s, d, e, n, g) for s, d, e, n, g in all_events if g > 0]
+        n_graph = len(decode_events)
+        n_nongraph = len(all_events) - n_graph
+        print(f"  graphNodeId: {n_graph} decode, {n_nongraph} non-decode (prefill/setup)")
+    else:
+        decode_events = all_events
+        print(f"  WARNING: no graphNodeId column, using all {len(all_events)} kernels")
 
-    if tail_start_idx is None:
-        print("  WARNING: lm_head kernel not found by substring match")
-        print(f"  Looking for: '{lm_head_kernel}'")
-        print(f"  Last 10 kernels:")
-        for ev in all_events[-10:]:
+    if not decode_events:
+        print("  WARNING: no decode kernels found")
+        return None
+
+    # Find all lm_head kernels in decode
+    lm_heads = [(i, decode_events[i][1]) for i in range(len(decode_events))
+                if lm_head_kernel in decode_events[i][3]]
+
+    if not lm_heads:
+        print(f"  WARNING: lm_head kernel '{lm_head_kernel}' not found in decode kernels")
+        print(f"  Last 10 decode kernels:")
+        for ev in decode_events[-10:]:
             print(f"    {ev[3][:80]}  dur={ev[1]/1e3:.1f}us")
         return None
 
-    # Find all lm_head positions, sorted by duration descending.
-    # In multi-batch cases, different batches may produce different-sized lm_head kernels.
-    # Pick the two largest (= full batch lm_head) to measure encoder between them.
-    lm_head_all = [(i, all_events[i][1]) for i, (_, _, _, n) in enumerate(all_events)
-                   if lm_head_kernel in n]
-    # Sort by duration descending, take top candidates
-    lm_head_all.sort(key=lambda x: -x[1])
-    if len(lm_head_all) >= 2:
-        # Pick two largest, then order by position (earlier first)
-        top2 = sorted(lm_head_all[:2], key=lambda x: x[0])
-        lm_head_indices = [top2[0][0], top2[1][0]]
-        print(f"  Found {len(lm_head_all)} lm_head kernels, "
-              f"selected 2 largest: dur={top2[0][1]/1e3:.1f}us, {top2[1][1]/1e3:.1f}us")
-    else:
-        lm_head_indices = [x[0] for x in lm_head_all]
+    print(f"  Found {len(lm_heads)} lm_head kernels in decode")
 
-    if len(lm_head_indices) < 2:
-        # Only 1 lm_head found, can't compute encoder between two steps
-        lm_head_ns = all_events[tail_start_idx][1]
-        sampling_kernels = all_events[tail_start_idx + 1:]
-        sampling_ns = sum(d for _, d, _, _ in sampling_kernels)
-        print(f"  Last lm_head kernel: '{all_events[tail_start_idx][3][:60]}'")
-        print(f"  lm_head time:  {lm_head_ns / 1e6:.4f} ms")
-        print(f"  sampling time: {sampling_ns / 1e6:.4f} ms")
-        print(f"  WARNING: only 1 lm_head found, cannot compute encoder from trace")
+    # Cluster lm_head by duration: split into groups where durations are similar.
+    # In multi-batch, batch=1 lm_head (small) and batch=N lm_head (large) coexist.
+    # Use simple threshold: sort by duration, find largest gap → two clusters.
+    durations = sorted(set(h[1] for h in lm_heads))
+    if len(durations) >= 2:
+        # Find largest relative gap between consecutive sorted durations
+        max_gap_ratio = 0
+        split_val = durations[-1]
+        for i in range(1, len(durations)):
+            ratio = durations[i] / durations[i - 1] if durations[i - 1] > 0 else 1
+            if ratio > max_gap_ratio:
+                max_gap_ratio = ratio
+                split_val = (durations[i - 1] + durations[i]) / 2
+        # Take the cluster with largest durations (≥ split_val)
+        large_cluster = [(idx, dur) for idx, dur in lm_heads if dur >= split_val]
+        small_cluster = [(idx, dur) for idx, dur in lm_heads if dur < split_val]
+        if large_cluster:
+            print(f"  Clusters: large={len(large_cluster)} (≥{split_val/1e3:.1f}us), "
+                  f"small={len(small_cluster)} (<{split_val/1e3:.1f}us)")
+            lm_heads = large_cluster
+        # If gap ratio < 1.5, all lm_heads are similar size → single cluster
+        if max_gap_ratio < 1.5:
+            print(f"  No significant gap (ratio={max_gap_ratio:.2f}), single cluster")
+            lm_heads = [(idx, dur) for idx, dur in lm_heads]  # keep all
+
+    if len(lm_heads) < 2:
+        idx = lm_heads[0][0]
+        lm_head_ns = decode_events[idx][1]
+        samp_ns = sum(d for _, d, _, _, _ in decode_events[idx + 1:])
+        print(f"  lm_head: {lm_head_ns / 1e6:.4f} ms")
+        print(f"  sampling: {samp_ns / 1e6:.4f} ms")
+        print(f"  WARNING: only 1 lm_head in cluster, cannot compute encoder")
         return {
             "lm_head_ms": round(lm_head_ns / 1e6, 4),
-            "sampling_ms": round(sampling_ns / 1e6, 4),
-            "encoder_ms": 0,
-            "overhead_ms": 0,
-            "tail_per_step_ms": round((lm_head_ns + sampling_ns) / 1e6, 4),
+            "sampling_ms": round(samp_ns / 1e6, 4),
+            "encoder_ms": 0, "overhead_ms": 0,
+            "tail_per_step_ms": round((lm_head_ns + samp_ns) / 1e6, 4),
         }
 
-    # Use last two lm_head positions:
-    # prev_lm_head ... [sampling] ... [encoder kernels] ... curr_lm_head ... [sampling]
-    prev_lm = lm_head_indices[-2]
-    curr_lm = lm_head_indices[-1]
+    # Pick last two adjacent lm_heads from the large cluster
+    lm_heads.sort(key=lambda x: x[0])  # sort by position
+    prev_idx, prev_dur = lm_heads[-2]
+    curr_idx, curr_dur = lm_heads[-1]
+    print(f"  Selected adjacent pair: dur={prev_dur/1e3:.1f}us (pos {prev_idx}), "
+          f"{curr_dur/1e3:.1f}us (pos {curr_idx})")
 
-    lm_head_ns = all_events[curr_lm][1]
-    sampling_kernels = all_events[curr_lm + 1:]
-    sampling_ns = sum(d for _, d, _, _ in sampling_kernels)
+    # lm_head time = current (last) lm_head duration
+    lm_head_ns = curr_dur
 
-    # Encoder = kernels between prev_lm_head's sampling end and curr_lm_head
-    # prev step's sampling ends after prev_lm, encoder starts after that
-    encoder_kernels = all_events[prev_lm + 1:curr_lm]
-    # Filter out sampling kernels from previous step (between prev_lm and encoder)
-    # Sampling kernels from prev step are right after prev_lm
-    # Encoder kernels start after the gap following prev step's sampling
-    encoder_ns = 0
-    for ev in encoder_kernels:
-        # Skip if it looks like sampling (right after prev lm_head, before gap)
-        encoder_ns += ev[1]
+    # sampling = decode kernels after curr_lm_head (until next lm_head or end)
+    # Find next lm_head after curr_idx (if any), otherwise use end
+    next_lm = len(decode_events)
+    for i in range(curr_idx + 1, len(decode_events)):
+        if lm_head_kernel in decode_events[i][3]:
+            next_lm = i
+            break
+    sampling_ns = sum(d for _, d, _, _, _ in decode_events[curr_idx + 1:next_lm])
 
-    # Wall clock between the two lm_heads = one full step
-    step_wall_ns = all_events[curr_lm][0] - all_events[prev_lm][0]
-    # Overhead = wall_clock - all kernel durations in that span
-    all_kernels_ns = sum(d for _, d, _, _ in all_events[prev_lm:curr_lm + 1])
-    overhead_ns = max(step_wall_ns - all_kernels_ns, 0)
+    # encoder = decode kernels between prev_lm_head and curr_lm_head,
+    # excluding prev_lm_head itself and prev step's sampling
+    # Structure: [prev_lm_head] [prev_sampling...] [encoder...] [curr_lm_head]
+    between = decode_events[prev_idx + 1:curr_idx]
 
-    # Subtract prev step's lm_head + sampling from encoder_ns
-    prev_lm_ns = all_events[prev_lm][1]
-    encoder_ns = max(encoder_ns - prev_lm_ns, 0)
+    # prev step's sampling = kernels right after prev_lm_head until
+    # next encoder-like kernel. Use same logic: find next lm_head-like
+    # pattern. Simpler: total_between - prev_lm - sampling ≈ encoder
+    # Best: encoder = total_between - (sampling from prev step)
+    # prev sampling ≈ same as curr sampling
+    total_between_ns = sum(d for _, d, _, _, _ in between)
+    encoder_ns = max(total_between_ns - sampling_ns, 0)  # subtract prev step's sampling
 
-    print(f"  Last lm_head: '{all_events[curr_lm][3][:60]}'")
-    print(f"  Prev lm_head: '{all_events[prev_lm][3][:60]}'")
-    print(f"  encoder (between 2 lm_heads): {encoder_ns / 1e6:.4f} ms")
-    print(f"  lm_head time:  {lm_head_ns / 1e6:.4f} ms")
-    print(f"  sampling time: {sampling_ns / 1e6:.4f} ms ({len(sampling_kernels)} kernels)")
-    print(f"  step wall (lm→lm): {step_wall_ns / 1e6:.4f} ms")
-    print(f"  overhead:      {overhead_ns / 1e6:.4f} ms (not scaled)")
+    # Wall clock for one step
+    step_wall_ns = decode_events[curr_idx][0] - decode_events[prev_idx][0]
+    all_kernel_ns = sum(d for _, d, _, _, _ in decode_events[prev_idx:curr_idx + 1])
+    overhead_ns = max(step_wall_ns - all_kernel_ns, 0)
+
+    print(f"  encoder (between 2 lm_heads - sampling): {encoder_ns / 1e6:.4f} ms")
+    print(f"  lm_head:  {lm_head_ns / 1e6:.4f} ms")
+    print(f"  sampling: {sampling_ns / 1e6:.4f} ms")
+    print(f"  step wall: {step_wall_ns / 1e6:.4f} ms")
+    print(f"  overhead:  {overhead_ns / 1e6:.4f} ms (not scaled)")
 
     return {
         "lm_head_ms": round(lm_head_ns / 1e6, 4),
