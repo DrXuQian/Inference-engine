@@ -221,29 +221,20 @@ def main():
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 
-    # Batch scaling: sampling × batch, lm_head read directly from trace (no scaling)
-    if batch > 1:
-        lm_head_scaled = lm_head_ms  # already batch-N value from trace
-        sampling_scaled = sampling_ms * batch
-        print(f"  batch={batch}: lm_head = {lm_head_scaled:.4f} ms (from trace)")
-        print(f"  batch={batch}: sampling × {batch} = {sampling_scaled:.4f} ms")
-    else:
-        lm_head_scaled = lm_head_ms
-        sampling_scaled = sampling_ms
-
-    # Apply TP scaling: lm_head / tp
+    # All values from trace at batch=N — no formula scaling needed
+    # TP scaling: lm_head / tp (proxy has full vocab, real TP splits)
     if tp_size > 1:
-        lm_head_final = lm_head_scaled / tp_size
+        lm_head_final = lm_head_ms / tp_size
         print(f"  TP={tp_size}: lm_head / {tp_size} = {lm_head_final:.4f} ms")
     else:
-        lm_head_final = lm_head_scaled
+        lm_head_final = lm_head_ms
 
-    # tail to subtract from raw TPOT (batch-scaled, since bench ran at batch=N)
-    tail_subtract = lm_head_scaled + sampling_scaled
-    # tail to add back (TP-compensated)
-    tail_add = lm_head_final + sampling_scaled
+    # tail to subtract from raw TPOT (from trace at batch=N)
+    tail_subtract = lm_head_ms + sampling_ms
+    # tail to add back (TP-compensated lm_head + sampling as-is)
+    tail_add = lm_head_final + sampling_ms
     print(f"  tail_subtract (from raw): {tail_subtract:.4f} ms "
-          f"(lm_head×1.1^{batch}={lm_head_scaled:.4f} + sampling×{batch}={sampling_scaled:.4f})")
+          f"(lm_head={lm_head_ms:.4f} + sampling={sampling_ms:.4f})")
     print(f"  tail_add (compensated):   {tail_add:.4f} ms "
           f"(lm_head/{tp_size}={lm_head_final:.4f} + sampling={sampling_scaled:.4f})")
     print()
