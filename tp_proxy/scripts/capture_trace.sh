@@ -39,6 +39,7 @@ def main():
         spec.loader.exec_module(mod)
         mod.apply()
 
+    import torch
     from vllm import LLM, SamplingParams
 
     model = sys.argv[1]
@@ -52,18 +53,22 @@ def main():
               gpu_memory_utilization=0.9, trust_remote_code=True)
     sp = SamplingParams(max_tokens=output_len, temperature=0, ignore_eos=True)
 
-    # Warmup
+    # Warmup (marked with NVTX)
+    torch.cuda.nvtx.range_push("warmup")
     warmup = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
               for _ in range(batch_size)]
     llm.generate(warmup, sampling_params=sp)
+    torch.cuda.nvtx.range_pop()
     print(f"Warmup done (batch={batch_size})")
 
-    # Bench rounds
+    # Bench rounds (each marked with NVTX)
     n_rounds = max(num_prompts // batch_size, 3)
     for r in range(n_rounds):
+        torch.cuda.nvtx.range_push(f"round_{r}")
         prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
                    for _ in range(batch_size)]
         outputs = llm.generate(prompts, sampling_params=sp)
+        torch.cuda.nvtx.range_pop()
         toks = [len(o.outputs[0].token_ids) for o in outputs]
         print(f"Round {r}: batch={len(outputs)}, tokens={toks}")
 
