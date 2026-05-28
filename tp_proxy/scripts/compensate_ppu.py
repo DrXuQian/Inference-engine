@@ -64,198 +64,142 @@ def load_meta(model_dir: str) -> dict | None:
 
 def measure_tail_from_trace(sqlite_path: str,
                             lm_head_kernel: str) -> dict | None:
-    """Extract per-step decode breakdown using graphNodeId.
+    """One decode step = CUDA Graph (encoder) + gap to next CUDA Graph (tail).
 
-    Decode step structure:
-      [CUDA Graph: encoder, graphNodeId>0] [gap: lm_head+sampling, graphNodeId=0]
-
-    Uses graph kernel count consistency to filter correct batch size steps.
+    encoder = graph_end - graph_start  (wall clock)
+    tail    = graph_end → next gap_end (wall clock, = lm_head + sampling)
+    tpot    = encoder + tail
     """
     from collections import Counter
 
     conn = sqlite3.connect(sqlite_path)
-    cursor = conn.cursor()
+    c = conn.cursor()
 
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    kt = ""
-    for r in cursor.fetchall():
-        if "KERNEL" in r[0].upper() and "ACTIVITY" in r[0].upper():
-            kt = r[0]; break
+    c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    kt = [r[0] for r in c.fetchall() if 'KERNEL' in r[0].upper() and 'ACTIVITY' in r[0].upper()]
     if not kt:
         conn.close(); return None
+    kt = kt[0]
 
-    cursor.execute(f'PRAGMA table_info("{kt}")')
-    columns = [c[1] for c in cursor.fetchall()]
-    if "graphNodeId" not in columns:
-        # Fallback: no graphNodeId, use last lm_head
-        cursor.execute(f"""
-            SELECT k.start, k."end" - k.start AS dur, k."end", s.value AS name
-            FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
-            ORDER BY k.start
-        """)
-        all_events = [(r[0], r[1], r[2], r[3]) for r in cursor.fetchall()]
+    # Check graphNodeId
+    c.execute(f'PRAGMA table_info("{kt}")')
+    if "graphNodeId" not in [col[1] for col in c.fetchall()]:
         conn.close()
-        if not all_events:
-            return None
-        for i in range(len(all_events) - 1, -1, -1):
-            if lm_head_kernel in all_events[i][3]:
-                lm_ns = all_events[i][1]
-                samp_ns = sum(d for _, d, _, _ in all_events[i+1:])
-                print(f"  WARNING: no graphNodeId, fallback to last lm_head")
-                return {"lm_head_ms": round(lm_ns/1e6, 4),
-                        "sampling_ms": round(samp_ns/1e6, 4),
-                        "encoder_ms": 0, "overhead_ms": 0,
-                        "tail_per_step_ms": round((lm_ns+samp_ns)/1e6, 4)}
+        print("  WARNING: no graphNodeId column")
         return None
 
-    cursor.execute(f'''
+    c.execute(f'''
         SELECT k.start, k."end" - k.start AS dur, k."end",
                s.value AS name, k.graphNodeId
         FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
         ORDER BY k.start
     ''')
-    all_events = [(r[0], r[1], r[2], r[3], r[4] or 0) for r in cursor.fetchall()]
+    evts = [(r[0], r[1], r[2], r[3], r[4] or 0) for r in c.fetchall()]
     conn.close()
 
-    n_graph = sum(1 for *_, g in all_events if g > 0)
-    print(f"  Total: {len(all_events)} kernels ({n_graph} graph, {len(all_events)-n_graph} non-graph)")
+    n_g = sum(1 for *_, g in evts if g > 0)
+    print(f"  kernels: {len(evts)} ({n_g} graph, {len(evts)-n_g} non-graph)")
 
-    # Split into alternating graph/gap segments
-    segments = []
-    cur_type = "graph" if all_events[0][4] > 0 else "gap"
-    cur_evts = [all_events[0]]
-    for ev in all_events[1:]:
-        t = "graph" if ev[4] > 0 else "gap"
-        if t == cur_type:
-            cur_evts.append(ev)
+    # Split into graph/gap segments
+    segs = []
+    ct = "graph" if evts[0][4] > 0 else "gap"
+    ce = [evts[0]]
+    for e in evts[1:]:
+        t = "graph" if e[4] > 0 else "gap"
+        if t == ct:
+            ce.append(e)
         else:
-            segments.append((cur_type, cur_evts))
-            cur_type = t
-            cur_evts = [ev]
-    segments.append((cur_type, cur_evts))
+            segs.append((ct, ce))
+            ct, ce = t, [e]
+    segs.append((ct, ce))
 
-    # Pair: each decode step = (graph_seg, gap_seg)
+    # Each decode step: graph_seg → gap_seg
+    # encoder = graph wall, tail = graph_end to gap_end
     steps = []
-    for i in range(len(segments) - 1):
-        if segments[i][0] == "graph" and segments[i+1][0] == "gap":
-            steps.append((segments[i][1], segments[i+1][1]))
+    for i in range(len(segs) - 1):
+        if segs[i][0] == "graph" and segs[i+1][0] == "gap":
+            g = segs[i][1]
+            gap = segs[i+1][1]
+            g_start, g_end = g[0][0], g[-1][2]
+            gap_end = gap[-1][2]
+            lm_dur = 0
+            for ev in gap:
+                if lm_head_kernel in ev[3]:
+                    lm_dur = ev[1]; break
+            steps.append({
+                "encoder_wall": g_end - g_start,
+                "tail_wall": gap_end - g_end,
+                "step_wall": gap_end - g_start,
+                "lm_head_dur": lm_dur,
+                "graph_kernels": len(g),
+            })
 
     if not steps:
-        print("  WARNING: no (graph, gap) pairs found")
+        print("  WARNING: no decode steps found")
         return None
-    print(f"  Decode steps (graph→gap pairs): {len(steps)}")
+    print(f"  decode steps: {len(steps)}")
 
-    # Filter to consistent graph kernel count (skip warmup/capture)
-    graph_counts = [len(s[0]) for s in steps]
-    count_freq = Counter(graph_counts)
-    most_common_count = count_freq.most_common(1)[0][0]
-    consistent_steps = [(g, gap) for g, gap in steps if len(g) == most_common_count]
-    print(f"  Graph kernel count mode: {most_common_count} "
-          f"({len(consistent_steps)}/{len(steps)} steps)")
+    # Filter: consistent graph kernel count
+    counts = Counter(s["graph_kernels"] for s in steps)
+    mode = counts.most_common(1)[0][0]
+    filtered = [s for s in steps if s["graph_kernels"] == mode]
+    print(f"  graph kernel mode: {mode} ({len(filtered)}/{len(steps)} steps)")
 
-    if not consistent_steps:
-        return None
-
-    # Among consistent steps, find ones with matching lm_head kernel
-    matched_steps = []
-    for g, gap in consistent_steps:
-        for ev in gap:
-            if lm_head_kernel in ev[3]:
-                matched_steps.append((g, gap, ev[1]))  # (graph, gap, lm_head_dur)
-                break
-    if matched_steps:
-        print(f"  Steps with '{lm_head_kernel}' in gap: {len(matched_steps)}")
-        # Pick steps with largest lm_head duration (= largest actual batch size)
-        # Cluster: take top 25% by lm_head duration
-        lm_durs = sorted([d for _, _, d in matched_steps])
-        threshold = lm_durs[len(lm_durs) * 3 // 4] if len(lm_durs) > 4 else lm_durs[0]
-        top_steps = [(g, gap) for g, gap, d in matched_steps if d >= threshold]
-        print(f"  lm_head dur range: {lm_durs[0]/1e3:.1f} - {lm_durs[-1]/1e3:.1f} us, "
-              f"threshold(p75): {threshold/1e3:.1f} us, selected: {len(top_steps)} steps")
-        consistent_steps = top_steps
+    # Filter: has matching lm_head, pick top 25% by duration (= largest batch)
+    matched = [s for s in filtered if s["lm_head_dur"] > 0]
+    if matched:
+        matched.sort(key=lambda s: s["lm_head_dur"])
+        thr = matched[len(matched) * 3 // 4]["lm_head_dur"] if len(matched) > 4 else matched[0]["lm_head_dur"]
+        top = [s for s in matched if s["lm_head_dur"] >= thr]
+        print(f"  lm_head: {matched[0]['lm_head_dur']/1e3:.1f}-{matched[-1]['lm_head_dur']/1e3:.1f}us, "
+              f"p75={thr/1e3:.1f}us, selected={len(top)}")
+        selected = top
     else:
-        print(f"  WARNING: '{lm_head_kernel}' not found in any gap")
+        print(f"  WARNING: '{lm_head_kernel}' not found in gaps")
+        selected = filtered
 
-    # Use last step from the top-batch cluster
-    graph_evts, gap_evts = consistent_steps[-1]
+    s = selected[-1]
+    encoder_ms = s["encoder_wall"] / 1e6
+    tail_ms = s["tail_wall"] / 1e6
+    lm_head_ms = s["lm_head_dur"] / 1e6
+    sampling_ms = max(tail_ms - lm_head_ms, 0)
+    tpot_ms = s["step_wall"] / 1e6
 
-    # Encoder = wall clock of CUDA Graph region (not kernel sum, kernels may overlap)
-    encoder_ns = graph_evts[-1][2] - graph_evts[0][0]
-
-    # Gap = wall clock between two CUDA Graph regions
-    # lm_head = kernel matching lm_head_kernel name
-    # sampling = gap wall - lm_head
-    gap_wall_ns = gap_evts[-1][2] - gap_evts[0][0] if len(gap_evts) > 1 else (gap_evts[0][1] if gap_evts else 0)
-    gap_total_ns = gap_wall_ns
-    lm_head_ns = 0
-    for ev in gap_evts:
-        if lm_head_kernel in ev[3]:
-            lm_head_ns = ev[1]
+    # Prefill: wall clock before first consistent graph
+    first_idx = next(i for i, st in enumerate(steps) if st["graph_kernels"] == mode)
+    seg_count = 0
+    first_graph_time = evts[0][0]
+    for stype, sevts in segs:
+        if stype == "graph" and seg_count + 1 < len(segs):
+            # Check if this is the first_idx-th step
+            if seg_count // 1 >= first_idx:  # rough
+                first_graph_time = sevts[0][0]
+                break
+        if stype == "graph":
+            seg_count += 1
+    # Simpler: use the graph start of the first filtered step
+    for stype, sevts in segs:
+        if stype == "graph" and len(sevts) == mode:
+            first_graph_time = sevts[0][0]
             break
-    sampling_ns = gap_total_ns - lm_head_ns
+    ttft_ms = (first_graph_time - evts[0][0]) / 1e6
 
-    if lm_head_ns == 0:
-        print(f"  WARNING: '{lm_head_kernel}' not found in gap. Gap kernels:")
-        for ev in gap_evts[:5]:
-            print(f"    {ev[3][:70]}  dur={ev[1]/1e3:.1f}us")
-        # Fallback: largest kernel = lm_head
-        if gap_evts:
-            largest = max(gap_evts, key=lambda e: e[1])
-            lm_head_ns = largest[1]
-            sampling_ns = gap_total_ns - lm_head_ns
-
-    # Step wall = from first graph kernel to last gap kernel (full step)
-    step_wall_ns = gap_evts[-1][2] - graph_evts[0][0] if gap_evts else encoder_wall_ns
-    step_kernel_ns = encoder_ns + lm_head_ns + sampling_ns
-    overhead_ns = max(step_wall_ns - step_kernel_ns, 0)
-
-    # TPOT = step wall clock (one decode step)
-    tpot_ms = step_wall_ns / 1e6
-
-    # Prefill (TTFT): find the last large gap segment before decode starts.
-    # Prefill = non-graph kernels, typically the largest gap segment.
-    # Look for the gap segment right before the first consistent graph segment.
-    first_consistent_graph = consistent_steps[0][0]
-    first_graph_start = first_consistent_graph[0][0]  # start time of first graph kernel
-
-    # All non-graph kernels before first consistent decode graph = prefill
-    prefill_ns = 0
-    prefill_count = 0
-    for s, d, e, n, g in all_events:
-        if s >= first_graph_start:
-            break
-        if g == 0:
-            prefill_ns += d
-            prefill_count += 1
-    # Prefill wall clock
-    prefill_wall_ns = first_graph_start - all_events[0][0]
-    ttft_ms = prefill_wall_ns / 1e6
-
-    # Count decode steps for averaging
-    n_decode_steps = len(consistent_steps)
-
-    print(f"  === Decode (per step) ===")
-    print(f"  encoder (CUDA Graph): {encoder_ns/1e6:.4f} ms ({len(graph_evts)} kernels)")
-    print(f"  lm_head:  {lm_head_ns/1e6:.4f} ms")
-    print(f"  sampling: {sampling_ns/1e6:.4f} ms")
-    print(f"  overhead: {overhead_ns/1e6:.4f} ms")
-    print(f"  TPOT (step wall): {tpot_ms:.4f} ms")
-    print(f"  === Prefill ===")
-    print(f"  prefill kernels: {prefill_count}, kernel time: {prefill_ns/1e6:.2f} ms")
-    print(f"  TTFT (wall): {ttft_ms:.2f} ms")
-    print(f"  === Summary ===")
-    print(f"  decode steps: {n_decode_steps}")
+    print(f"\n  encoder (graph wall): {encoder_ms:.4f} ms")
+    print(f"  tail (to next graph): {tail_ms:.4f} ms")
+    print(f"    lm_head: {lm_head_ms:.4f} ms")
+    print(f"    sampling: {sampling_ms:.4f} ms")
+    print(f"  TPOT (step wall):     {tpot_ms:.4f} ms")
+    print(f"  TTFT (prefill wall):  {ttft_ms:.2f} ms")
+    print(f"  check: encoder + tail = {encoder_ms + tail_ms:.4f} ms == TPOT")
 
     return {
-        "lm_head_ms": round(lm_head_ns / 1e6, 4),
-        "sampling_ms": round(sampling_ns / 1e6, 4),
-        "encoder_ms": round(encoder_ns / 1e6, 4),
-        "overhead_ms": round(overhead_ns / 1e6, 4),
+        "encoder_ms": round(encoder_ms, 4),
+        "lm_head_ms": round(lm_head_ms, 4),
+        "sampling_ms": round(sampling_ms, 4),
         "tpot_ms": round(tpot_ms, 4),
         "ttft_ms": round(ttft_ms, 2),
-        "prefill_kernel_ms": round(prefill_ns / 1e6, 2),
-        "n_decode_steps": n_decode_steps,
-        "tail_per_step_ms": round((lm_head_ns + sampling_ns) / 1e6, 4),
+        "overhead_ms": 0,
+        "tail_per_step_ms": round(tail_ms, 4),
     }
 
 
