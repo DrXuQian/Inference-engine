@@ -40,6 +40,11 @@ def main():
         mod.apply()
 
     import torch
+    try:
+        import nvtx
+        has_nvtx = True
+    except ImportError:
+        has_nvtx = False
     from vllm import LLM, SamplingParams
 
     model = sys.argv[1]
@@ -53,22 +58,26 @@ def main():
               gpu_memory_utilization=0.9, trust_remote_code=True)
     sp = SamplingParams(max_tokens=output_len, temperature=0, ignore_eos=True)
 
-    # Warmup (marked with NVTX)
-    torch.cuda.nvtx.range_push("warmup")
+    # Warmup
+    if has_nvtx:
+        rng = nvtx.start_range("warmup", color="red")
     warmup = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
               for _ in range(batch_size)]
     llm.generate(warmup, sampling_params=sp)
-    torch.cuda.nvtx.range_pop()
+    if has_nvtx:
+        nvtx.end_range(rng)
     print(f"Warmup done (batch={batch_size})")
 
-    # Bench rounds (each marked with NVTX)
+    # Bench rounds
     n_rounds = max(num_prompts // batch_size, 3)
     for r in range(n_rounds):
-        torch.cuda.nvtx.range_push(f"round_{r}")
+        if has_nvtx:
+            rng = nvtx.start_range(f"round_{r}", color="green")
         prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
                    for _ in range(batch_size)]
         outputs = llm.generate(prompts, sampling_params=sp)
-        torch.cuda.nvtx.range_pop()
+        if has_nvtx:
+            nvtx.end_range(rng)
         toks = [len(o.outputs[0].token_ids) for o in outputs]
         print(f"Round {r}: batch={len(outputs)}, tokens={toks}")
 
