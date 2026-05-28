@@ -12,6 +12,8 @@
  *   ./bench_oneshot 2 50 200
  */
 
+#include <thread>
+#include <atomic>
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -269,43 +271,55 @@ void bench_size(GPUState* states, int ngpus, size_t bytes,
     }
   }
 
-  // Capture per-GPU CUDA Graphs (each GPU captures its own kernel)
+  // Capture per-GPU CUDA Graphs with N repeats per graph
+  // This amortizes graph launch overhead across N allreduce calls
+  const int REPEATS_PER_GRAPH = 20;
   cudaGraph_t graphs[8];
   cudaGraphExec_t graph_execs[8];
   for (int r = 0; r < ngpus; r++) {
     CHECK_CUDA(cudaSetDevice(r));
     CHECK_CUDA(cudaStreamBeginCapture(states[r].stream, cudaStreamCaptureModeThreadLocal));
-    if (ngpus == 2) launch_1stage<half, 2>(states, r, sg, packed_size, nblocks);
-    else if (ngpus == 4) launch_1stage<half, 4>(states, r, sg, packed_size, nblocks);
-    else if (ngpus == 8) launch_1stage<half, 8>(states, r, sg, packed_size, nblocks);
+    for (int rep = 0; rep < REPEATS_PER_GRAPH; rep++) {
+      if (ngpus == 2) launch_1stage<half, 2>(states, r, sg, packed_size, nblocks);
+      else if (ngpus == 4) launch_1stage<half, 4>(states, r, sg, packed_size, nblocks);
+      else if (ngpus == 8) launch_1stage<half, 8>(states, r, sg, packed_size, nblocks);
+    }
     CHECK_CUDA(cudaStreamEndCapture(states[r].stream, &graphs[r]));
     CHECK_CUDA(cudaGraphInstantiate(&graph_execs[r], graphs[r], nullptr, nullptr, 0));
   }
 
-  // Warmup with graph replay
-  for (int w = 0; w < warmup; w++) {
+  // Thread-parallel graph launch: all GPUs launch simultaneously
+  auto parallel_launch = [&](cudaGraphExec_t* execs) {
+    std::atomic<int> ready{0};
+    std::thread threads[8];
     for (int r = 0; r < ngpus; r++) {
-      CHECK_CUDA(cudaSetDevice(r));
-      CHECK_CUDA(cudaGraphLaunch(graph_execs[r], states[r].stream));
+      threads[r] = std::thread([&, r]() {
+        CHECK_CUDA(cudaSetDevice(r));
+        ready.fetch_add(1);
+        while (ready.load() < ngpus) {}  // spin until all ready
+        CHECK_CUDA(cudaGraphLaunch(execs[r], states[r].stream));
+      });
     }
+    for (int r = 0; r < ngpus; r++) threads[r].join();
+  };
+
+  // Warmup with parallel graph replay
+  for (int w = 0; w < warmup; w++) {
+    parallel_launch(graph_execs);
     for (int r = 0; r < ngpus; r++) {
       CHECK_CUDA(cudaSetDevice(r));
       CHECK_CUDA(cudaStreamSynchronize(states[r].stream));
     }
   }
 
-  // Benchmark with per-GPU graph replay
+  // Benchmark
   float total_us = 0;
   float times[4096];
   for (int it = 0; it < iters; it++) {
     CHECK_CUDA(cudaSetDevice(0));
     CHECK_CUDA(cudaEventRecord(states[0].start, states[0].stream));
 
-    // Launch all GPU graphs (minimal CPU overhead)
-    for (int r = 0; r < ngpus; r++) {
-      CHECK_CUDA(cudaSetDevice(r));
-      CHECK_CUDA(cudaGraphLaunch(graph_execs[r], states[r].stream));
-    }
+    parallel_launch(graph_execs);
 
     CHECK_CUDA(cudaSetDevice(0));
     CHECK_CUDA(cudaEventRecord(states[0].stop, states[0].stream));
@@ -316,6 +330,7 @@ void bench_size(GPUState* states, int ngpus, size_t bytes,
 
     float ms;
     CHECK_CUDA(cudaEventElapsedTime(&ms, states[0].start, states[0].stop));
+    ms /= REPEATS_PER_GRAPH;  // per-allreduce time
     times[it] = ms * 1000.0f;
     total_us += times[it];
   }
