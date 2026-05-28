@@ -104,24 +104,22 @@ def measure_tail_from_trace(sqlite_path, lm_head_kernel):
     sampling_ms = tail_ms - lm_head_ms
     tpot_ms = s["step_wall"] / 1e6
 
-    # Prefill: everything before first consistent graph
-    first_graph_start = filtered[0]["step_wall"]  # wrong, need actual timestamp
-    # Recalculate from raw data
-    first_filtered_idx = next(i for i, st in enumerate(steps) if st["graph_kernels"] == mode_count)
-    # Find the actual graph segment for this step
-    graph_seg_idx = 0
-    step_count = 0
+    # Prefill: last gap before first mode-count graph (kernel time only)
+    first_mode_seg_idx = None
     for si, (stype, sevts) in enumerate(segs):
-        if stype == "graph" and si + 1 < len(segs) and segs[si+1][0] == "gap":
-            if step_count == first_filtered_idx:
-                first_graph_time = sevts[0][0]
-                break
-            step_count += 1
-    else:
-        first_graph_time = evts[0][0]
+        if stype == "graph" and len(sevts) == mode_count:
+            first_mode_seg_idx = si
+            break
 
-    prefill_wall_ns = first_graph_time - evts[0][0]
-    ttft_ms = prefill_wall_ns / 1e6
+    ttft_ms = 0
+    if first_mode_seg_idx and first_mode_seg_idx > 0:
+        prev = segs[first_mode_seg_idx - 1]
+        if prev[0] == "gap":
+            pf_kernel = sum(d for _, d, _, _, _ in prev[1])
+            pf_wall = prev[1][-1][2] - prev[1][0][0]
+            ttft_ms = pf_kernel / 1e6
+            print(f"  Prefill: {len(prev[1])} kernels, "
+                  f"kernel={pf_kernel/1e6:.2f}ms, wall={pf_wall/1e6:.2f}ms")
 
     print(f"\n  === Result ===")
     print(f"  encoder (graph wall): {encoder_ms:.4f} ms")

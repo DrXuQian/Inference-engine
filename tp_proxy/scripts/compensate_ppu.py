@@ -165,24 +165,43 @@ def measure_tail_from_trace(sqlite_path: str,
     sampling_ms = max(tail_ms - lm_head_ms, 0)
     tpot_ms = s["step_wall"] / 1e6
 
-    # Prefill: wall clock before first consistent graph
-    first_idx = next(i for i, st in enumerate(steps) if st["graph_kernels"] == mode)
-    seg_count = 0
-    first_graph_time = evts[0][0]
-    for stype, sevts in segs:
-        if stype == "graph" and seg_count + 1 < len(segs):
-            # Check if this is the first_idx-th step
-            if seg_count // 1 >= first_idx:  # rough
-                first_graph_time = sevts[0][0]
-                break
-        if stype == "graph":
-            seg_count += 1
-    # Simpler: use the graph start of the first filtered step
-    for stype, sevts in segs:
+    # Prefill: find the LAST gap segment before the consistent decode region.
+    # This is the prefill of the last inference round (after warmup).
+    # Only count non-graph KERNEL time (not wall clock, to exclude scheduler overhead).
+    #
+    # Strategy: walk backward from the first selected decode step to find
+    # the gap segment immediately before it = last prefill.
+    first_selected_graph_start = selected[0]["step_wall"]  # not useful, need actual time
+    # Find the segment index of the first selected step's graph
+    # The selected steps come from filtered steps, which come from (graph, gap) pairs
+    # Find the last large gap before the decode region starts
+    # Decode region = many consecutive (graph, gap) pairs with mode kernel count
+    # Prefill = the gap segment right before the first such pair
+
+    # Find index of first mode-count graph segment
+    first_mode_seg_idx = None
+    for si, (stype, sevts) in enumerate(segs):
         if stype == "graph" and len(sevts) == mode:
-            first_graph_time = sevts[0][0]
+            first_mode_seg_idx = si
             break
-    ttft_ms = (first_graph_time - evts[0][0]) / 1e6
+
+    if first_mode_seg_idx and first_mode_seg_idx > 0:
+        # The gap before this graph = last prefill
+        # Sum kernel durations in that gap (not wall clock)
+        prev_seg = segs[first_mode_seg_idx - 1]
+        if prev_seg[0] == "gap":
+            prefill_kernel_ns = sum(d for _, d, _, _, _ in prev_seg[1])
+            prefill_wall_ns = prev_seg[1][-1][2] - prev_seg[1][0][0]
+            ttft_ms = prefill_kernel_ns / 1e6  # kernel time only
+            print(f"\n  Prefill: last gap before decode ({len(prev_seg[1])} kernels)")
+            print(f"    kernel time: {prefill_kernel_ns/1e6:.2f} ms")
+            print(f"    wall time:   {prefill_wall_ns/1e6:.2f} ms")
+        else:
+            ttft_ms = 0
+            print(f"\n  WARNING: no gap before first decode graph")
+    else:
+        ttft_ms = 0
+        print(f"\n  WARNING: no mode-count graph found for prefill")
 
     print(f"\n  encoder (graph wall): {encoder_ms:.4f} ms")
     print(f"  tail (to next graph): {tail_ms:.4f} ms")
