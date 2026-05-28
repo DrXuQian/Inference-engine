@@ -8,3 +8,10 @@ profiling/vllm_cpu_overhead/raw/
 *.prof
 *.sqlite
 *.log
+
+# allreduce bench binaries
+tp_proxy/scripts/allreduce_bench/bench_oneshot
+tp_proxy/scripts/allreduce_bench/bench_breakdown
+tp_proxy/scripts/allreduce_bench/bench_ringll_breakdown
+tp_proxy/scripts/allreduce_bench/standalone_ringll
+tp_proxy/scripts/allreduce_bench/standalone_ringll_*
