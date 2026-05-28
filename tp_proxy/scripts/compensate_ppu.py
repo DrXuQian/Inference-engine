@@ -179,14 +179,14 @@ def measure_tail_from_trace(sqlite_path: str,
     # Use last step from the top-batch cluster
     graph_evts, gap_evts = consistent_steps[-1]
 
-    # Encoder = sum of graph kernel durations
-    encoder_ns = sum(d for _, d, _, _, _ in graph_evts)
-    encoder_wall_ns = graph_evts[-1][2] - graph_evts[0][0]
+    # Encoder = wall clock of CUDA Graph region (not kernel sum, kernels may overlap)
+    encoder_ns = graph_evts[-1][2] - graph_evts[0][0]
 
-    # Gap = lm_head + sampling (between two CUDA Graph regions)
+    # Gap = wall clock between two CUDA Graph regions
     # lm_head = kernel matching lm_head_kernel name
-    # sampling = gap total - lm_head
-    gap_total_ns = sum(d for _, d, _, _, _ in gap_evts)
+    # sampling = gap wall - lm_head
+    gap_wall_ns = gap_evts[-1][2] - gap_evts[0][0] if len(gap_evts) > 1 else (gap_evts[0][1] if gap_evts else 0)
+    gap_total_ns = gap_wall_ns
     lm_head_ns = 0
     for ev in gap_evts:
         if lm_head_kernel in ev[3]:
