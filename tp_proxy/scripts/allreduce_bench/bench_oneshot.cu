@@ -247,8 +247,8 @@ void bench_size(GPUState* states, int ngpus, size_t bytes,
     CHECK_CUDA(cudaMemset(states[i].signal, 0, sizeof(Signal)));
   }
 
-  // Warmup
-  for (int w = 0; w < warmup; w++) {
+  // Lambda to launch kernel on all GPUs
+  auto launch_all = [&]() {
     for (int r = 0; r < ngpus; r++) {
       CHECK_CUDA(cudaSetDevice(r));
       if (ngpus == 2)
@@ -257,6 +257,36 @@ void bench_size(GPUState* states, int ngpus, size_t bytes,
         launch_1stage<half, 4>(states, r, sg, packed_size, nblocks);
       else if (ngpus == 8)
         launch_1stage<half, 8>(states, r, sg, packed_size, nblocks);
+    }
+  };
+
+  // Warmup (direct launch)
+  for (int w = 0; w < 5; w++) {
+    launch_all();
+    for (int r = 0; r < ngpus; r++) {
+      CHECK_CUDA(cudaSetDevice(r));
+      CHECK_CUDA(cudaStreamSynchronize(states[r].stream));
+    }
+  }
+
+  // Capture per-GPU CUDA Graphs (each GPU captures its own kernel)
+  cudaGraph_t graphs[8];
+  cudaGraphExec_t graph_execs[8];
+  for (int r = 0; r < ngpus; r++) {
+    CHECK_CUDA(cudaSetDevice(r));
+    CHECK_CUDA(cudaStreamBeginCapture(states[r].stream, cudaStreamCaptureModeThreadLocal));
+    if (ngpus == 2) launch_1stage<half, 2>(states, r, sg, packed_size, nblocks);
+    else if (ngpus == 4) launch_1stage<half, 4>(states, r, sg, packed_size, nblocks);
+    else if (ngpus == 8) launch_1stage<half, 8>(states, r, sg, packed_size, nblocks);
+    CHECK_CUDA(cudaStreamEndCapture(states[r].stream, &graphs[r]));
+    CHECK_CUDA(cudaGraphInstantiate(&graph_execs[r], graphs[r], nullptr, nullptr, 0));
+  }
+
+  // Warmup with graph replay
+  for (int w = 0; w < warmup; w++) {
+    for (int r = 0; r < ngpus; r++) {
+      CHECK_CUDA(cudaSetDevice(r));
+      CHECK_CUDA(cudaGraphLaunch(graph_execs[r], states[r].stream));
     }
     for (int r = 0; r < ngpus; r++) {
       CHECK_CUDA(cudaSetDevice(r));
@@ -264,22 +294,17 @@ void bench_size(GPUState* states, int ngpus, size_t bytes,
     }
   }
 
-  // Benchmark
+  // Benchmark with per-GPU graph replay
   float total_us = 0;
   float times[4096];
   for (int it = 0; it < iters; it++) {
-    // Record start on GPU 0
     CHECK_CUDA(cudaSetDevice(0));
     CHECK_CUDA(cudaEventRecord(states[0].start, states[0].stream));
 
+    // Launch all GPU graphs (minimal CPU overhead)
     for (int r = 0; r < ngpus; r++) {
       CHECK_CUDA(cudaSetDevice(r));
-      if (ngpus == 2)
-        launch_1stage<half, 2>(states, r, sg, packed_size, nblocks);
-      else if (ngpus == 4)
-        launch_1stage<half, 4>(states, r, sg, packed_size, nblocks);
-      else if (ngpus == 8)
-        launch_1stage<half, 8>(states, r, sg, packed_size, nblocks);
+      CHECK_CUDA(cudaGraphLaunch(graph_execs[r], states[r].stream));
     }
 
     CHECK_CUDA(cudaSetDevice(0));
@@ -291,8 +316,13 @@ void bench_size(GPUState* states, int ngpus, size_t bytes,
 
     float ms;
     CHECK_CUDA(cudaEventElapsedTime(&ms, states[0].start, states[0].stop));
-    times[it] = ms * 1000.0f;  // us
+    times[it] = ms * 1000.0f;
     total_us += times[it];
+  }
+
+  for (int r = 0; r < ngpus; r++) {
+    cudaGraphExecDestroy(graph_execs[r]);
+    cudaGraphDestroy(graphs[r]);
   }
 
   // Sort and compute median
