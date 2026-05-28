@@ -9,9 +9,10 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-MODEL="${1:?Usage: $0 <model> <tp_size> [output_dir]}"
-TP="${2:?Usage: $0 <model> <tp_size> [output_dir]}"
+MODEL="${1:?Usage: $0 <model> <tp_size> [output_dir] [max_model_len]}"
+TP="${2:?Usage: $0 <model> <tp_size> [output_dir] [max_model_len]}"
 OUTPUT_DIR="${3:-./serving_results/$(basename "$MODEL")_tp${TP}}"
+MAX_MODEL_LEN="${4:-16384}"
 PORT="${PORT:-8000}"
 GPU_IDS="${GPU_IDS:-$(seq -s, 0 $((TP-1)))}"
 BASE_URL="http://127.0.0.1:${PORT}"
@@ -33,6 +34,7 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 vllm serve "$MODEL" \
     --host 127.0.0.1 --port $PORT \
     --tensor-parallel-size $TP \
+    --max-model-len $MAX_MODEL_LEN \
     --trust-remote-code \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.9 > "$OUTPUT_DIR/server.log" 2>&1 &

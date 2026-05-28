@@ -7,7 +7,7 @@
  *   nvcc -O3 -std=c++17 -arch=sm_80 bench_oneshot.cu -o bench_oneshot -lpthread
  *
  * Run:
- *   ./bench_oneshot [num_gpus] [warmup] [iters]
+ *   ./bench_oneshot [num_gpus] [warmup] [iters] [size_bytes]
  *   ./bench_oneshot 2 50 200
  *   ./bench_oneshot 4 100 500
  */
@@ -278,13 +278,16 @@ int main(int argc, char** argv) {
   int ngpus = argc > 1 ? atoi(argv[1]) : 2;
   int warmup = argc > 2 ? atoi(argv[2]) : 50;
   int iters = argc > 3 ? atoi(argv[3]) : 200;
+  size_t single_size = argc > 4 ? strtoull(argv[4], nullptr, 0) : 0;
 
   if (ngpus != 2 && ngpus != 4 && ngpus != 8) {
     fprintf(stderr, "Only 2, 4, 8 GPUs supported\n"); return 1;
   }
 
-  size_t sizes[] = {1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576};
-  int nsizes = sizeof(sizes) / sizeof(sizes[0]);
+  size_t default_sizes[] = {1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576};
+  size_t single_sizes[] = {single_size};
+  size_t* sizes = single_size ? single_sizes : default_sizes;
+  int nsizes = single_size ? 1 : (int)(sizeof(default_sizes) / sizeof(default_sizes[0]));
 
   GPUState states[8];
   setup_gpus(states, ngpus, sizes[nsizes-1]);

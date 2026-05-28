@@ -118,6 +118,9 @@ def do_scale(args):
     if args.tp_size > 1 and pf_comm_frac == 0 and args.src_link_bw > 0:
         pf_comm_frac = 0.05  # rough default for TP>1
 
+    n_ar = args.num_layers * 2
+    tgt_decode_comm_ms = args.tgt_link_latency * n_ar / 1000  # per decode step
+
     result = {
         "name": args.name,
         "src_flops": args.src_flops, "src_bw": args.src_bw,
@@ -128,6 +131,8 @@ def do_scale(args):
         "tgt_link_bw": args.tgt_link_bw,
         "prefill_comm_fraction": pf_comm_frac,
         "tp_size": args.tp_size,
+        "num_layers": args.num_layers,
+        "tgt_decode_comm_ms": round(tgt_decode_comm_ms, 4),
     }
 
     print(f"Name: {args.name}")
@@ -187,12 +192,15 @@ def do_scale(args):
             t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
             t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
                                 args.src_link_latency, args.tgt_link_latency,
-                                args.num_layers * 2)
+                                n_ar)
+            pf_comm_ms = t_ttft * pf_comm_frac if pf_comm_frac > 0 else 0
             print(f"{name:>20} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}")
             scenarios.append({
                 "name": name,
                 "ttft_ms": round(t_ttft, 2),
                 "tpot_ms": round(t_tpot, 3),
+                "prefill_comm_ms": round(pf_comm_ms, 3),
+                "decode_comm_ms": round(tgt_decode_comm_ms, 4),
             })
         result["scenarios"] = scenarios
 

@@ -4,12 +4,19 @@ Plot scenario comparison between different interconnect configurations.
 
 Reads scaled JSON files (from scale_report.py) and draws horizontal
 stacked bar charts: Prefill (TTFT) + Decode (TPOT × tokens).
+When --comm-json is provided, each phase is split into compute + comm.
 
 Usage:
     python plot_scenario_compare.py \
         --json icn.json pcie.json \
         --model "Qwen3.5-122B-A10B" \
         --tp-size 2 \
+        -o comparison.png
+
+    # With communication breakdown (one comm.json per JSON config):
+    python plot_scenario_compare.py \
+        --json icn.json pcie.json \
+        --comm-json icn_comm.json pcie_comm.json \
         -o comparison.png
 
     # Custom scenario decode tokens:
@@ -51,6 +58,20 @@ SCENARIO_INFO = {
 }
 
 
+def load_comm(path):
+    """Load comm.json → {decode_ms, prefill_ms}."""
+    if not path or path.lower() == "none":
+        return None
+    with open(path) as f:
+        c = json.load(f)
+    return {
+        "decode_ms": c.get("decode_total_per_step_ms", c.get("total_per_step_ms", 0)),
+        "prefill_ms": c.get("prefill_total_per_step_ms",
+                            c.get("decode_total_per_step_ms",
+                                  c.get("total_per_step_ms", 0))),
+    }
+
+
 def fmt_time(ms):
     s = ms / 1000
     if s < 1:
@@ -66,6 +87,9 @@ def main():
     ap = argparse.ArgumentParser(description="Plot scenario comparison (Prefill + Decode bars)")
     ap.add_argument("--json", nargs="+", required=True,
                     help="Scaled JSON files from scale_report.py (e.g. icn.json pcie.json)")
+    ap.add_argument("--comm-json", nargs="*", default=None,
+                    help="comm.json per JSON config (use 'none' to skip one). "
+                         "If one given, applies to all.")
     ap.add_argument("--decode-tokens", default=None,
                     help="Override decode tokens: mainstream=500,heavy_prefill=200,heavy_decode=10000")
     ap.add_argument("--model", default="", help="Model name for title")
@@ -91,6 +115,32 @@ def main():
         print("Need at least 1 JSON file", file=sys.stderr)
         sys.exit(1)
 
+    # Load comm data per config
+    n_configs = len(configs)
+    comm_list = [None] * n_configs
+    if args.comm_json:
+        if len(args.comm_json) == 1:
+            c = load_comm(args.comm_json[0])
+            comm_list = [c] * n_configs
+        elif len(args.comm_json) == n_configs:
+            comm_list = [load_comm(p) for p in args.comm_json]
+        else:
+            print("ERROR: --comm-json count must be 1 or match --json count",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    has_explicit_comm = any(c is not None for c in comm_list)
+
+    # Check if JSONs contain embedded comm info
+    has_json_comm = any(
+        sc.get("prefill_comm_ms") or sc.get("decode_comm_ms")
+        for cfg in configs for sc in cfg.get("scenarios", [])
+    ) or any(
+        cfg.get("tgt_decode_comm_ms", 0) > 0 or cfg.get("prefill_comm_fraction", 0) > 0
+        for cfg in configs
+    )
+    has_comm = has_explicit_comm or has_json_comm
+
     # Fixed order: mainstream first
     SCENARIO_ORDER = ["mainstream", "heavy_prefill", "heavy_decode"]
     found = set()
@@ -107,14 +157,13 @@ def main():
         sys.exit(1)
 
     n_scenarios = len(all_scenarios)
-    n_configs = len(configs)
 
-    # Colors
+    # Colors (with comm variants)
     config_colors = [
-        {"prefill": "#2166AC", "decode": "#67A9CF", "edge": "#2166AC"},  # blue
-        {"prefill": "#B2182B", "decode": "#EF8A62", "edge": "#B2182B"},  # red
-        {"prefill": "#1B7837", "decode": "#7FBF7B", "edge": "#1B7837"},  # green
-        {"prefill": "#762A83", "decode": "#C2A5CF", "edge": "#762A83"},  # purple
+        {"prefill": "#2166AC", "decode": "#67A9CF", "pf_comm": "#4393C3", "dec_comm": "#92C5DE", "edge": "#2166AC"},
+        {"prefill": "#B2182B", "decode": "#EF8A62", "pf_comm": "#D6604D", "dec_comm": "#F4A582", "edge": "#B2182B"},
+        {"prefill": "#1B7837", "decode": "#7FBF7B", "pf_comm": "#4DAC26", "dec_comm": "#A6D96A", "edge": "#1B7837"},
+        {"prefill": "#762A83", "decode": "#C2A5CF", "pf_comm": "#9970AB", "dec_comm": "#D4B9DA", "edge": "#762A83"},
     ]
 
     fig, axes = plt.subplots(n_scenarios, 1, figsize=(14, 3.5 * n_scenarios + 1))
@@ -141,13 +190,12 @@ def main():
         ax = axes[sc_idx]
         n_tok = decode_tokens.get(sc_name, 500)
 
-        # Scenario title
         info = SCENARIO_INFO.get(sc_name, {})
         sc_title = info.get("title", sc_name)
         ax.set_title(sc_title, fontsize=10, fontweight='bold', loc='left', color='#333')
 
         bar_height = 0.6
-        y_positions = list(range(n_configs - 1, -1, -1))  # top to bottom
+        y_positions = list(range(n_configs - 1, -1, -1))
         totals = []
 
         for ci, cfg in enumerate(configs):
@@ -165,28 +213,72 @@ def main():
             colors = config_colors[ci % len(config_colors)]
             y = y_positions[ci]
 
-            # Prefill bar
-            ax.barh(y, ttft / 1000, height=bar_height,
-                    color=colors["prefill"], edgecolor='white', linewidth=0.5,
-                    label='Prefill (TTFT)' if sc_idx == 0 and ci == 0 else "")
-            # Decode bar
-            ax.barh(y, decode_time / 1000, left=ttft / 1000, height=bar_height,
-                    color=colors["decode"], edgecolor='white', linewidth=0.5,
-                    label='Decode' if sc_idx == 0 and ci == 0 else "")
+            # Resolve comm: --comm-json overrides, else read from JSON scenario
+            comm = comm_list[ci]
+            if not comm and (sc_data.get("prefill_comm_ms") or sc_data.get("decode_comm_ms")):
+                comm = {
+                    "prefill_ms": sc_data.get("prefill_comm_ms", 0),
+                    "decode_ms": sc_data.get("decode_comm_ms", 0),
+                }
+            if not comm:
+                # Try top-level JSON fields (from scale_report.py)
+                tgt_dec_comm = cfg.get("tgt_decode_comm_ms", 0)
+                pf_frac = cfg.get("prefill_comm_fraction", 0)
+                if tgt_dec_comm > 0 or pf_frac > 0:
+                    comm = {
+                        "prefill_ms": ttft * pf_frac,
+                        "decode_ms": tgt_dec_comm,
+                    }
 
-            # Add hatching for "simulated"
-            ax.barh(y, total / 1000, height=bar_height,
-                    fill=False, edgecolor=colors["edge"], linewidth=1.5,
-                    hatch='///', alpha=0.3)
+            if comm:
+                # 4-segment bar: [Pf compute | Pf comm | Dec compute | Dec comm]
+                pf_comm = min(comm["prefill_ms"], ttft)
+                pf_compute = ttft - pf_comm
+                dec_comm_per_tok = min(comm["decode_ms"], tpot)
+                dec_compute_per_tok = tpot - dec_comm_per_tok
+                dec_comm_total = dec_comm_per_tok * n_tok
+                dec_compute_total = dec_compute_per_tok * n_tok
 
-            # Text labels inside bars
-            if ttft / 1000 > total / 1000 * 0.08:  # only if prefill bar wide enough
-                ax.text(ttft / 1000 / 2, y, f"Prefill\n{fmt_time(ttft)}",
-                        ha='center', va='center', fontsize=8, color='white', fontweight='bold')
-            if decode_time / 1000 > total / 1000 * 0.08:
-                ax.text(ttft / 1000 + decode_time / 1000 / 2, y,
-                        f"Decode\n{fmt_time(decode_time)}",
-                        ha='center', va='center', fontsize=8, color='white', fontweight='bold')
+                left = 0
+                ax.barh(y, pf_compute / 1000, left=left / 1000, height=bar_height,
+                        color=colors["prefill"], edgecolor='white', linewidth=0.5)
+                left += pf_compute
+                ax.barh(y, pf_comm / 1000, left=left / 1000, height=bar_height,
+                        color=colors["pf_comm"], edgecolor='white', linewidth=0.5,
+                        hatch='///', alpha=0.85)
+                left += pf_comm
+                ax.barh(y, dec_compute_total / 1000, left=left / 1000, height=bar_height,
+                        color=colors["decode"], edgecolor='white', linewidth=0.5)
+                left += dec_compute_total
+                ax.barh(y, dec_comm_total / 1000, left=left / 1000, height=bar_height,
+                        color=colors["dec_comm"], edgecolor='white', linewidth=0.5,
+                        hatch='///', alpha=0.85)
+                # Text labels with comm breakdown
+                if ttft / 1000 > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 / 2, y,
+                            f"Prefill {fmt_time(ttft)}\ncomm {fmt_time(pf_comm)}",
+                            ha='center', va='center', fontsize=7, color='white',
+                            fontweight='bold')
+                if decode_time / 1000 > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 + decode_time / 1000 / 2, y,
+                            f"Decode {fmt_time(decode_time)}\ncomm {fmt_time(dec_comm_total)}",
+                            ha='center', va='center', fontsize=7, color='white',
+                            fontweight='bold')
+            else:
+                # Original 2-segment bar
+                ax.barh(y, ttft / 1000, height=bar_height,
+                        color=colors["prefill"], edgecolor='white', linewidth=0.5)
+                ax.barh(y, decode_time / 1000, left=ttft / 1000, height=bar_height,
+                        color=colors["decode"], edgecolor='white', linewidth=0.5)
+                if ttft / 1000 > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 / 2, y, f"Prefill\n{fmt_time(ttft)}",
+                            ha='center', va='center', fontsize=8, color='white',
+                            fontweight='bold')
+                if decode_time / 1000 > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 + decode_time / 1000 / 2, y,
+                            f"Decode\n{fmt_time(decode_time)}",
+                            ha='center', va='center', fontsize=8, color='white',
+                            fontweight='bold')
 
             # Config label
             name = cfg.get("name", f"Config-{chr(65+ci)}")
@@ -221,7 +313,6 @@ def main():
                     label, ha='left', va='center', fontsize=9,
                     fontweight='bold', color=color)
 
-        # Dashed reference line at first config's total
         if ref_total:
             ax.axvline(x=ref_total / 1000, color='#999', linestyle='--',
                        linewidth=0.8, alpha=0.5)
@@ -233,13 +324,20 @@ def main():
         ax.spines['right'].set_visible(False)
         ax.spines['left'].set_visible(False)
 
-    # Legend (only on first subplot)
+    # Legend
     if n_scenarios > 0:
-        handles = [
-            mpatches.Patch(facecolor='#555', label='Prefill (TTFT)'),
-            mpatches.Patch(facecolor='#AAA', label='Decode'),
-            mpatches.Patch(facecolor='none', edgecolor='#555', hatch='///', label='Simulated'),
-        ]
+        if has_comm:
+            handles = [
+                mpatches.Patch(facecolor='#555', label='Prefill compute'),
+                mpatches.Patch(facecolor='#777', hatch='///', label='Prefill comm'),
+                mpatches.Patch(facecolor='#AAA', label='Decode compute'),
+                mpatches.Patch(facecolor='#CCC', hatch='///', label='Decode comm'),
+            ]
+        else:
+            handles = [
+                mpatches.Patch(facecolor='#555', label='Prefill (TTFT)'),
+                mpatches.Patch(facecolor='#AAA', label='Decode'),
+            ]
         axes[0].legend(handles=handles, loc='upper right', frameon=True,
                        fontsize=8, framealpha=0.9)
 
@@ -257,13 +355,24 @@ def main():
         for ci, cfg in enumerate(configs):
             sc_data = next((s for s in cfg.get("scenarios", []) if s["name"] == sc_name), None)
             if sc_data:
-                total = sc_data["ttft_ms"] + sc_data["tpot_ms"] * n_tok
-                row[cfg.get("name", f"config_{ci}")] = {
-                    "ttft_ms": sc_data["ttft_ms"],
-                    "tpot_ms": sc_data["tpot_ms"],
-                    "decode_ms": sc_data["tpot_ms"] * n_tok,
+                ttft = sc_data["ttft_ms"]
+                tpot = sc_data["tpot_ms"]
+                total = ttft + tpot * n_tok
+                entry = {
+                    "ttft_ms": ttft,
+                    "tpot_ms": tpot,
+                    "decode_ms": tpot * n_tok,
                     "total_ms": round(total, 2),
                 }
+                comm = comm_list[ci] if ci < len(comm_list) else None
+                if comm:
+                    pf_comm = min(comm["prefill_ms"], ttft)
+                    dec_comm = min(comm["decode_ms"], tpot)
+                    entry["prefill_comm_ms"] = round(pf_comm, 3)
+                    entry["decode_comm_per_tok_ms"] = round(dec_comm, 3)
+                    entry["decode_comm_total_ms"] = round(dec_comm * n_tok, 2)
+                    entry["total_comm_ms"] = round(pf_comm + dec_comm * n_tok, 2)
+                row[cfg.get("name", f"config_{ci}")] = entry
         summary.append(row)
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)

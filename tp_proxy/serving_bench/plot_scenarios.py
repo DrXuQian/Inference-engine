@@ -3,6 +3,7 @@
 Plot scenario results directly from benchmark logs (no scaling).
 
 Draws horizontal stacked bars: Prefill (TTFT) + Decode (TPOT × tokens).
+When --comm-json is provided, each phase is split into compute + comm.
 
 Usage:
     # Single config
@@ -11,10 +12,17 @@ Usage:
         --name "TP=2" \
         -o scenarios.png
 
-    # Compare multiple configs
+    # With communication breakdown
     python plot_scenarios.py \
-        --log-dir ./results_tp1/scenarios/ --name "TP=1" \
-        --log-dir ./results_tp2/scenarios/ --name "TP=2" \
+        --log-dir ./serving_results/scenarios/ \
+        --name "TP=2" \
+        --comm-json comm.json \
+        -o scenarios.png
+
+    # Compare multiple configs (each with its own comm.json)
+    python plot_scenarios.py \
+        --log-dir ./results_tp1/scenarios/ --name "TP=1" --comm-json none \
+        --log-dir ./results_tp2/scenarios/ --name "TP=2" --comm-json tp2_comm.json \
         -o scenarios_compare.png
 
     # Custom decode tokens
@@ -25,6 +33,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -47,11 +56,25 @@ SCENARIO_INFO = {
 }
 
 CONFIG_COLORS = [
-    {"prefill": "#2166AC", "decode": "#67A9CF", "edge": "#2166AC"},
-    {"prefill": "#B2182B", "decode": "#EF8A62", "edge": "#B2182B"},
-    {"prefill": "#1B7837", "decode": "#7FBF7B", "edge": "#1B7837"},
-    {"prefill": "#762A83", "decode": "#C2A5CF", "edge": "#762A83"},
+    {"prefill": "#2166AC", "decode": "#67A9CF", "pf_comm": "#4393C3", "dec_comm": "#92C5DE", "edge": "#2166AC"},
+    {"prefill": "#B2182B", "decode": "#EF8A62", "pf_comm": "#D6604D", "dec_comm": "#F4A582", "edge": "#B2182B"},
+    {"prefill": "#1B7837", "decode": "#7FBF7B", "pf_comm": "#4DAC26", "dec_comm": "#A6D96A", "edge": "#1B7837"},
+    {"prefill": "#762A83", "decode": "#C2A5CF", "pf_comm": "#9970AB", "dec_comm": "#D4B9DA", "edge": "#762A83"},
 ]
+
+
+def load_comm(path):
+    """Load comm.json → {decode_ms, prefill_ms}."""
+    if not path or path.lower() == "none":
+        return None
+    with open(path) as f:
+        c = json.load(f)
+    return {
+        "decode_ms": c.get("decode_total_per_step_ms", c.get("total_per_step_ms", 0)),
+        "prefill_ms": c.get("prefill_total_per_step_ms",
+                            c.get("decode_total_per_step_ms",
+                                  c.get("total_per_step_ms", 0))),
+    }
 
 
 def parse_log(path):
@@ -89,6 +112,9 @@ def main():
                     help="Scenario log directory (can repeat for comparison)")
     ap.add_argument("--name", action="append", required=True,
                     help="Label for each log-dir (same order)")
+    ap.add_argument("--comm-json", action="append", default=None,
+                    help="comm.json per config (use 'none' to skip). "
+                         "If given once, applies to all configs.")
     ap.add_argument("--decode-tokens", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("-o", "--output", default="scenarios.png")
@@ -97,6 +123,21 @@ def main():
     if len(args.log_dir) != len(args.name):
         print("ERROR: --log-dir and --name count must match", file=sys.stderr)
         sys.exit(1)
+
+    # Load comm data per config
+    comm_list = [None] * len(args.log_dir)
+    if args.comm_json:
+        if len(args.comm_json) == 1:
+            c = load_comm(args.comm_json[0])
+            comm_list = [c] * len(args.log_dir)
+        elif len(args.comm_json) == len(args.log_dir):
+            comm_list = [load_comm(p) for p in args.comm_json]
+        else:
+            print("ERROR: --comm-json count must be 1 or match --log-dir count",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    has_comm = any(c is not None for c in comm_list)
 
     decode_tokens = dict(DEFAULT_DECODE_TOKENS)
     if args.decode_tokens:
@@ -121,7 +162,6 @@ def main():
     SCENARIO_ORDER = ["mainstream", "heavy_prefill", "heavy_decode"]
     all_scenarios = [s for s in SCENARIO_ORDER
                      if any(s in cfg["scenarios"] for cfg in configs)]
-    # Append any extra scenarios not in the predefined order
     for cfg in configs:
         for sc in cfg["scenarios"]:
             if sc not in all_scenarios:
@@ -165,21 +205,70 @@ def main():
 
             colors = CONFIG_COLORS[ci % len(CONFIG_COLORS)]
             y = y_positions[ci]
+            comm = comm_list[ci]
 
-            ax.barh(y, ttft / 1000, height=bar_height,
-                    color=colors["prefill"], edgecolor='white', linewidth=0.5)
-            ax.barh(y, decode_time / 1000, left=ttft / 1000, height=bar_height,
-                    color=colors["decode"], edgecolor='white', linewidth=0.5)
-            ax.barh(y, total / 1000, height=bar_height,
-                    fill=False, edgecolor=colors["edge"], linewidth=1.5)
+            if comm:
+                # 4-segment bar: [Pf compute | Pf comm | Dec compute | Dec comm]
+                pf_comm = min(comm["prefill_ms"], ttft)
+                pf_compute = ttft - pf_comm
+                dec_comm_per_tok = min(comm["decode_ms"], tpot)
+                dec_compute_per_tok = tpot - dec_comm_per_tok
+                dec_comm_total = dec_comm_per_tok * n_tok
+                dec_compute_total = dec_compute_per_tok * n_tok
 
-            if ttft / 1000 > total / 1000 * 0.08:
-                ax.text(ttft / 1000 / 2, y, f"Prefill\n{fmt_time(ttft)}",
-                        ha='center', va='center', fontsize=8, color='white', fontweight='bold')
-            if decode_time / 1000 > total / 1000 * 0.08:
-                ax.text(ttft / 1000 + decode_time / 1000 / 2, y,
-                        f"Decode\n{fmt_time(decode_time)}",
-                        ha='center', va='center', fontsize=8, color='white', fontweight='bold')
+                left = 0
+                # Prefill compute
+                ax.barh(y, pf_compute / 1000, left=left / 1000, height=bar_height,
+                        color=colors["prefill"], edgecolor='white', linewidth=0.5)
+                left += pf_compute
+                # Prefill comm
+                ax.barh(y, pf_comm / 1000, left=left / 1000, height=bar_height,
+                        color=colors["pf_comm"], edgecolor='white', linewidth=0.5,
+                        hatch='///', alpha=0.85)
+                left += pf_comm
+                # Decode compute
+                ax.barh(y, dec_compute_total / 1000, left=left / 1000, height=bar_height,
+                        color=colors["decode"], edgecolor='white', linewidth=0.5)
+                left += dec_compute_total
+                # Decode comm
+                ax.barh(y, dec_comm_total / 1000, left=left / 1000, height=bar_height,
+                        color=colors["dec_comm"], edgecolor='white', linewidth=0.5,
+                        hatch='///', alpha=0.85)
+                # Outline
+                ax.barh(y, total / 1000, height=bar_height,
+                        fill=False, edgecolor=colors["edge"], linewidth=1.5)
+
+                # Text labels (show comm time explicitly)
+                pf_total_s = ttft / 1000
+                if pf_total_s > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 / 2, y,
+                            f"Prefill {fmt_time(ttft)}\ncomm {fmt_time(pf_comm)}",
+                            ha='center', va='center', fontsize=7, color='white',
+                            fontweight='bold')
+                dec_total_s = decode_time / 1000
+                if dec_total_s > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 + decode_time / 1000 / 2, y,
+                            f"Decode {fmt_time(decode_time)}\ncomm {fmt_time(dec_comm_total)}",
+                            ha='center', va='center', fontsize=7, color='white',
+                            fontweight='bold')
+            else:
+                # Original 2-segment bar
+                ax.barh(y, ttft / 1000, height=bar_height,
+                        color=colors["prefill"], edgecolor='white', linewidth=0.5)
+                ax.barh(y, decode_time / 1000, left=ttft / 1000, height=bar_height,
+                        color=colors["decode"], edgecolor='white', linewidth=0.5)
+                ax.barh(y, total / 1000, height=bar_height,
+                        fill=False, edgecolor=colors["edge"], linewidth=1.5)
+
+                if ttft / 1000 > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 / 2, y, f"Prefill\n{fmt_time(ttft)}",
+                            ha='center', va='center', fontsize=8, color='white',
+                            fontweight='bold')
+                if decode_time / 1000 > total / 1000 * 0.08:
+                    ax.text(ttft / 1000 + decode_time / 1000 / 2, y,
+                            f"Decode\n{fmt_time(decode_time)}",
+                            ha='center', va='center', fontsize=8, color='white',
+                            fontweight='bold')
 
             ax.text(-0.02, y, f"{cfg['name']}",
                     ha='right', va='center', fontsize=9,
@@ -218,10 +307,19 @@ def main():
         ax.spines['right'].set_visible(False)
         ax.spines['left'].set_visible(False)
 
-    handles = [
-        mpatches.Patch(facecolor='#555', label='Prefill (TTFT)'),
-        mpatches.Patch(facecolor='#AAA', label='Decode'),
-    ]
+    # Legend
+    if has_comm:
+        handles = [
+            mpatches.Patch(facecolor='#555', label='Prefill compute'),
+            mpatches.Patch(facecolor='#777', hatch='///', label='Prefill comm'),
+            mpatches.Patch(facecolor='#AAA', label='Decode compute'),
+            mpatches.Patch(facecolor='#CCC', hatch='///', label='Decode comm'),
+        ]
+    else:
+        handles = [
+            mpatches.Patch(facecolor='#555', label='Prefill (TTFT)'),
+            mpatches.Patch(facecolor='#AAA', label='Decode'),
+        ]
     axes[0].legend(handles=handles, loc='upper right', frameon=True, fontsize=8)
 
     plt.tight_layout(rect=[0.12, 0, 1, 0.95])
