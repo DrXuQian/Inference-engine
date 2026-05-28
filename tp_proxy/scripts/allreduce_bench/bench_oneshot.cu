@@ -1,5 +1,5 @@
 /*
- * Standalone benchmark for vLLM-style 1-stage (oneshot) all-reduce.
+ * Standalone benchmark for vLLM-style custom all-reduce.
  * Uses nccl-tests style: one thread per GPU, pthread_barrier sync,
  * per-GPU CUDA Graph, per-GPU timing (report max across GPUs).
  *
@@ -7,9 +7,10 @@
  *   nvcc -O3 -std=c++17 -arch=sm_80 bench_oneshot.cu -o bench_oneshot -lpthread
  *
  * Run:
- *   ./bench_oneshot [num_gpus] [warmup] [iters] [size_bytes]
+ *   ./bench_oneshot [num_gpus] [warmup] [iters] [size_bytes] [repeats] [direct_warmup] [algo]
  *   ./bench_oneshot 2 50 200
  *   ./bench_oneshot 4 100 500
+ *   ./bench_oneshot 4 0 3 2147483648 1 1 twoshot
  */
 
 #include <cuda.h>
@@ -36,6 +37,14 @@
 // ============================================================
 using FlagType = uint32_t;
 constexpr int kMaxBlocks = 36;
+constexpr size_t kAllReduceSmallThreshold = 512 * 1024;
+constexpr size_t kAllReduceLargeThreshold = 256 * 1024;
+
+enum class Algo {
+  Auto = 0,
+  OneShot = 1,
+  TwoShot = 2,
+};
 
 struct Signal {
   alignas(128) FlagType self_counter[kMaxBlocks][8];
@@ -120,6 +129,85 @@ __global__ void __launch_bounds__(512, 1) cross_device_reduce_1stage(
   multi_gpu_barrier<ngpus, false, true>(sg, self_sg, rank);
 }
 
+template <typename P>
+DINLINE P* get_tmp_buf(Signal* sg) {
+  return (P*)(((Signal*)sg) + 1);
+}
+
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(512, 1) cross_device_reduce_2stage(
+    RankData* _dp, RankSignals sg, Signal* self_sg, T* __restrict__ result, int rank, int size) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  using P = typename packed_t<T>::P;
+  using A = typename packed_t<T>::A;
+  int part = size / ngpus;
+  int start = rank * part;
+  int end = rank == ngpus - 1 ? size : start + part;
+  int largest_part = part + size % ngpus;
+  const P* ptrs[ngpus];
+  P* tmps[ngpus];
+  for (int i = 0; i < ngpus; i++) {
+    int target = (rank + i) % ngpus;
+    ptrs[i] = (const P*)_dp->ptrs[target];
+    tmps[i] = get_tmp_buf<P>(sg.signals[target]);
+  }
+  auto tmp_out = tmps[0];
+
+  multi_gpu_barrier<ngpus, true>(sg, self_sg, rank);
+  for (int idx = start + tid; idx < end; idx += stride) {
+    tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
+  }
+  multi_gpu_barrier<ngpus, false, true>(sg, self_sg, rank);
+
+  for (int idx = tid; idx < largest_part; idx += stride) {
+    for (int i = 0; i < ngpus; i++) {
+      int gather_from_rank = (rank + i) % ngpus;
+      if (gather_from_rank == ngpus - 1 || idx < part) {
+        int dst_idx = gather_from_rank * part + idx;
+        ((P*)result)[dst_idx] = tmps[i][idx];
+      }
+    }
+  }
+}
+
+const char* algo_name(Algo algo) {
+  switch (algo) {
+    case Algo::Auto: return "auto";
+    case Algo::OneShot: return "oneshot";
+    case Algo::TwoShot: return "twoshot";
+  }
+  return "unknown";
+}
+
+Algo parse_algo(const char* s) {
+  if (strcmp(s, "auto") == 0) return Algo::Auto;
+  if (strcmp(s, "1stage") == 0 || strcmp(s, "oneshot") == 0) return Algo::OneShot;
+  if (strcmp(s, "2stage") == 0 || strcmp(s, "twoshot") == 0) return Algo::TwoShot;
+  fprintf(stderr, "Invalid algo '%s'. Valid values: auto, oneshot, twoshot\n", s);
+  exit(1);
+}
+
+Algo resolve_algo(Algo requested, int ngpus, size_t bytes) {
+  if (requested != Algo::Auto) return requested;
+  if (ngpus == 2) return Algo::OneShot;
+  size_t threshold = ngpus <= 4 ? kAllReduceSmallThreshold : kAllReduceLargeThreshold;
+  return bytes < threshold ? Algo::OneShot : Algo::TwoShot;
+}
+
+template <int ngpus>
+void launch_reduce(Algo algo, RankData* rd, RankSignals sg, Signal* signal,
+                   half* data, int rank, int packed_size, int nblocks,
+                   cudaStream_t stream) {
+  if (algo == Algo::TwoShot) {
+    cross_device_reduce_2stage<half, ngpus><<<nblocks, 512, 0, stream>>>(
+        rd, sg, signal, data, rank, packed_size);
+  } else {
+    cross_device_reduce_1stage<half, ngpus><<<nblocks, 512, 0, stream>>>(
+        rd, sg, signal, data, rank, packed_size);
+  }
+}
+
 // ============================================================
 // Shared state across threads (nccl-tests style)
 // ============================================================
@@ -134,6 +222,8 @@ struct GPUState {
 
 struct BenchArgs {
   int rank, ngpus, warmup, iters;
+  int repeats, direct_warmup;
+  Algo requested_algo;
   size_t bytes;
   GPUState* states;
   RankSignals sg;
@@ -150,20 +240,18 @@ void* bench_thread(void* arg) {
   int packed_size = a->bytes / sizeof(half) / (16 / sizeof(half));
   int nblocks = std::min((packed_size + 511) / 512, kMaxBlocks);
   if (nblocks < 1) nblocks = 1;
+  Algo algo = resolve_algo(a->requested_algo, a->ngpus, a->bytes);
 
   cudaStream_t stream = a->states[rank].stream;
   Signal* signal = a->states[rank].signal;
   RankData* rd = a->states[rank].rank_data;
-  const int REPEATS = 20;
-
   CHECK_CUDA(cudaMemset(a->states[rank].data, 1, a->bytes));
   CHECK_CUDA(cudaMemset(signal, 0, sizeof(Signal)));
   pthread_barrier_wait(a->barrier);  // all GPUs ready
 
   // Warmup (direct launch, kernel internal barrier syncs GPUs)
-  for (int w = 0; w < 5; w++) {
-    cross_device_reduce_1stage<half, ngpus><<<nblocks, 512, 0, stream>>>(
-        rd, a->sg, signal, a->states[rank].data, rank, packed_size);
+  for (int w = 0; w < a->direct_warmup; w++) {
+    launch_reduce<ngpus>(algo, rd, a->sg, signal, a->states[rank].data, rank, packed_size, nblocks, stream);
   }
   CHECK_CUDA(cudaStreamSynchronize(stream));
   pthread_barrier_wait(a->barrier);
@@ -171,9 +259,8 @@ void* bench_thread(void* arg) {
   // Capture graph (20 repeats)
   cudaGraph_t graph;
   CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
-  for (int rep = 0; rep < REPEATS; rep++)
-    cross_device_reduce_1stage<half, ngpus><<<nblocks, 512, 0, stream>>>(
-        rd, a->sg, signal, a->states[rank].data, rank, packed_size);
+  for (int rep = 0; rep < a->repeats; rep++)
+    launch_reduce<ngpus>(algo, rd, a->sg, signal, a->states[rank].data, rank, packed_size, nblocks, stream);
   CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
   CHECK_CUDA(cudaGraphInstantiate(&a->states[rank].graph_exec, graph, nullptr, nullptr, 0));
   cudaGraphDestroy(graph);
@@ -198,14 +285,15 @@ void* bench_thread(void* arg) {
     CHECK_CUDA(cudaStreamSynchronize(stream));
     float ms;
     CHECK_CUDA(cudaEventElapsedTime(&ms, ev_start, ev_stop));
-    a->my_time_us[it] = ms * 1000.0f / REPEATS;
+    a->my_time_us[it] = ms * 1000.0f / a->repeats;
   }
 
   cudaGraphExecDestroy(a->states[rank].graph_exec);
   return nullptr;
 }
 
-void bench_size(GPUState* states, int ngpus, size_t bytes, int warmup, int iters) {
+void bench_size(GPUState* states, int ngpus, size_t bytes, int warmup, int iters,
+                int repeats, int direct_warmup, Algo requested_algo) {
   pthread_barrier_t barrier;
   pthread_barrier_init(&barrier, nullptr, ngpus);
 
@@ -215,7 +303,7 @@ void bench_size(GPUState* states, int ngpus, size_t bytes, int warmup, int iters
   BenchArgs args[8];
   pthread_t threads[8];
   for (int r = 0; r < ngpus; r++) {
-    args[r] = {r, ngpus, warmup, iters, bytes, states, sg, &barrier, {}};
+    args[r] = {r, ngpus, warmup, iters, repeats, direct_warmup, requested_algo, bytes, states, sg, &barrier, {}};
     if (ngpus == 2) pthread_create(&threads[r], nullptr, bench_thread<2>, &args[r]);
     else if (ngpus == 4) pthread_create(&threads[r], nullptr, bench_thread<4>, &args[r]);
     else if (ngpus == 8) pthread_create(&threads[r], nullptr, bench_thread<8>, &args[r]);
@@ -258,7 +346,7 @@ void setup_gpus(GPUState* states, int ngpus, size_t max_bytes) {
   for (int i = 0; i < ngpus; i++) {
     CHECK_CUDA(cudaSetDevice(i));
     CHECK_CUDA(cudaMalloc(&states[i].data, max_bytes));
-    CHECK_CUDA(cudaMalloc(&states[i].signal, sizeof(Signal)));
+    CHECK_CUDA(cudaMalloc(&states[i].signal, sizeof(Signal) + max_bytes));
     CHECK_CUDA(cudaMemset(states[i].signal, 0, sizeof(Signal)));
     CHECK_CUDA(cudaMalloc(&states[i].rank_data, sizeof(RankData)));
     CHECK_CUDA(cudaStreamCreate(&states[i].stream));
@@ -279,6 +367,9 @@ int main(int argc, char** argv) {
   int warmup = argc > 2 ? atoi(argv[2]) : 50;
   int iters = argc > 3 ? atoi(argv[3]) : 200;
   size_t single_size = argc > 4 ? strtoull(argv[4], nullptr, 0) : 0;
+  int repeats = argc > 5 ? atoi(argv[5]) : 20;
+  int direct_warmup = argc > 6 ? atoi(argv[6]) : 5;
+  Algo requested_algo = argc > 7 ? parse_algo(argv[7]) : Algo::OneShot;
 
   if (ngpus != 2 && ngpus != 4 && ngpus != 8) {
     fprintf(stderr, "Only 2, 4, 8 GPUs supported\n"); return 1;
@@ -292,12 +383,14 @@ int main(int argc, char** argv) {
   GPUState states[8];
   setup_gpus(states, ngpus, sizes[nsizes-1]);
 
-  printf("Oneshot All-Reduce Benchmark [nccl-tests style: pthread + CUDA Graph + per-GPU timing]\n");
-  printf("  GPUs: %d, Warmup: %d, Iters: %d, Repeats/graph: 20\n\n", ngpus, warmup, iters);
+  printf("Custom All-Reduce Benchmark [nccl-tests style: pthread + CUDA Graph + per-GPU timing]\n");
+  printf("  GPUs: %d, Algo: %s, Direct warmup: %d, Graph warmup: %d, Iters: %d, Repeats/graph: %d\n\n",
+         ngpus, algo_name(requested_algo), direct_warmup, warmup, iters, repeats);
   printf("%8s    %12s %12s %12s\n", "Size", "Median (µs)", "Mean (µs)", "P99 (µs)");
   printf("------------------------------------------------------\n");
 
-  for (int s = 0; s < nsizes; s++) bench_size(states, ngpus, sizes[s], warmup, iters);
+  for (int s = 0; s < nsizes; s++)
+    bench_size(states, ngpus, sizes[s], warmup, iters, repeats, direct_warmup, requested_algo);
 
   for (int i = 0; i < ngpus; i++) {
     CHECK_CUDA(cudaSetDevice(i));
