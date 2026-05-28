@@ -118,9 +118,8 @@ def measure_tail_from_trace(sqlite_path, lm_head_kernel):
             lm_head_ns = largest[1]
             sampling_ns = gap_total_ns - lm_head_ns
 
-    # Overhead
-    gap_wall_ns = gap_evts[-1][2] - gap_evts[0][0] if gap_evts else 0
-    step_wall_ns = encoder_wall_ns + gap_wall_ns
+    # Step wall = first graph kernel start → last gap kernel end
+    step_wall_ns = gap_evts[-1][2] - graph_evts[0][0] if gap_evts else encoder_wall_ns
     step_kernel_ns = encoder_ns + lm_head_ns + sampling_ns
     overhead_ns = max(step_wall_ns - step_kernel_ns, 0)
 
