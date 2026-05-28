@@ -215,20 +215,24 @@ def main():
 
             # Resolve comm: --comm-json overrides, else read from JSON scenario
             comm = comm_list[ci]
-            if not comm and (sc_data.get("prefill_comm_ms") or sc_data.get("decode_comm_ms")):
-                comm = {
-                    "prefill_ms": sc_data.get("prefill_comm_ms", 0),
-                    "decode_ms": sc_data.get("decode_comm_ms", 0),
-                }
+            comm_source = "comm-json" if comm else None
             if not comm:
-                # Try top-level JSON fields (from scale_report.py)
+                sc_pf = sc_data.get("prefill_comm_ms")
+                sc_dec = sc_data.get("decode_comm_ms")
+                if sc_pf or sc_dec:
+                    comm = {"prefill_ms": sc_pf or 0, "decode_ms": sc_dec or 0}
+                    comm_source = "scenario"
+            if not comm:
                 tgt_dec_comm = cfg.get("tgt_decode_comm_ms", 0)
                 pf_frac = cfg.get("prefill_comm_fraction", 0)
                 if tgt_dec_comm > 0 or pf_frac > 0:
-                    comm = {
-                        "prefill_ms": ttft * pf_frac,
-                        "decode_ms": tgt_dec_comm,
-                    }
+                    comm = {"prefill_ms": ttft * pf_frac, "decode_ms": tgt_dec_comm}
+                    comm_source = "top-level"
+
+            cfg_name = cfg.get("name", f"cfg{ci}")
+            print(f"  [{cfg_name}] {sc_name}: ttft={ttft:.1f} tpot={tpot:.2f} "
+                  f"comm_source={comm_source} "
+                  f"comm={comm}")
 
             if comm:
                 # 4-segment bar: [Pf compute | Pf comm | Dec compute | Dec comm]

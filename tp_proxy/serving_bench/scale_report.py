@@ -37,44 +37,49 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def scale_ttft(ttft_src, src_flops, tgt_flops,
-               src_link_bw=0, tgt_link_bw=0, prefill_comm_frac=0):
-    """Scale TTFT: compute scales with FLOPS, prefill comm scales with link BW.
-    ttft = compute + prefill_comm
-    compute_tgt = compute_src × (src_flops / tgt_flops)
-    comm_tgt = comm_src × (src_link_bw / tgt_link_bw)
+def calc_prefill_comm_ms(input_len, hidden_size, num_layers, link_bw_gbs):
+    """Prefill comm from first principles (throughput-bound).
+    Each layer has 2 AR ops. Message size = input_len × hidden_size × 2B (bf16).
+    Time = num_layers × 2 × msg_bytes / (link_bw × 1e9) × 1000 ms.
+    Returns 0 if link_bw not provided.
+    """
+    if link_bw_gbs <= 0 or hidden_size <= 0:
+        return 0
+    msg_bytes = input_len * hidden_size * 2  # bf16
+    per_ar_s = msg_bytes / (link_bw_gbs * 1e9)
+    return num_layers * 2 * per_ar_s * 1000  # ms
 
-    Returns (ttft_tgt, comm_tgt).
+
+def calc_decode_comm_ms(num_layers, ar_latency_us):
+    """Decode comm from first principles (latency-bound).
+    Each layer has 2 AR ops. Time = num_layers × 2 × ar_latency_us / 1000.
+    """
+    if ar_latency_us <= 0:
+        return 0
+    return num_layers * 2 * ar_latency_us / 1000  # ms
+
+
+def scale_ttft(ttft_src, src_flops, tgt_flops,
+               src_prefill_comm_ms=0, tgt_prefill_comm_ms=0):
+    """Scale TTFT: subtract src comm, scale compute with FLOPS, add tgt comm.
+    Returns (ttft_tgt, tgt_prefill_comm_ms).
     """
     if tgt_flops <= 0 or src_flops <= 0:
-        return ttft_src, 0
-    compute = ttft_src * (1 - prefill_comm_frac)
-    comm_src = ttft_src * prefill_comm_frac
-    compute_tgt = compute * (src_flops / tgt_flops)
-    if prefill_comm_frac > 0 and src_link_bw > 0 and tgt_link_bw > 0:
-        comm_tgt = comm_src * (src_link_bw / tgt_link_bw)
-    else:
-        comm_tgt = comm_src
-    return compute_tgt + comm_tgt, comm_tgt
+        return ttft_src, tgt_prefill_comm_ms
+    compute_src = max(ttft_src - src_prefill_comm_ms, 0)
+    compute_tgt = compute_src * (src_flops / tgt_flops)
+    return compute_tgt + tgt_prefill_comm_ms, tgt_prefill_comm_ms
 
 
 def scale_tpot(tpot_src_ms, src_bw, tgt_bw,
-               src_ar_lat_us, tgt_ar_lat_us, n_ar_per_step):
-    """Scale TPOT (ms).
-    src/tgt_ar_lat_us: single all-reduce latency (us)
-    n_ar_per_step: number of AR calls per decode step (= num_layers × 2)
-
-    tpot = ddr_time + n_ar × ar_latency
-    ddr_time scales with DDR BW, ar_latency replaced by target value.
-
-    Returns (tpot_tgt, comm_tgt_ms).
+               src_decode_comm_ms=0, tgt_decode_comm_ms=0):
+    """Scale TPOT: subtract src comm, scale DDR time with BW, add tgt comm.
+    Returns (tpot_tgt, tgt_decode_comm_ms).
     """
     if src_bw <= 0 or tgt_bw <= 0:
-        return tpot_src_ms, 0
-    src_comm_ms = src_ar_lat_us * n_ar_per_step / 1000
-    tgt_comm_ms = tgt_ar_lat_us * n_ar_per_step / 1000
-    ddr_time = max(tpot_src_ms - src_comm_ms, 0)
-    return ddr_time * (src_bw / tgt_bw) + tgt_comm_ms, tgt_comm_ms
+        return tpot_src_ms, tgt_decode_comm_ms
+    ddr_time = max(tpot_src_ms - src_decode_comm_ms, 0)
+    return ddr_time * (src_bw / tgt_bw) + tgt_decode_comm_ms, tgt_decode_comm_ms
 
 
 def parse_log(path):
@@ -116,14 +121,28 @@ COLORS = ['#378ADD', '#D85A30', '#2CA02C', '#9467BD', '#8C564B', '#E377C2']
 MARKERS = ['-o', '--^', '-s', '--D', '-v', '--P']
 
 
+DEFAULT_SCENARIO_INPUT_LENS = {
+    "mainstream": 13400,
+    "heavy_prefill": 79700,
+    "heavy_decode": 600,
+}
+
+
 def do_scale(args):
     """Scale and save results to JSON."""
-    pf_comm_frac = args.prefill_comm_fraction
-    if args.tp_size > 1 and pf_comm_frac == 0 and args.src_link_bw > 0:
-        pf_comm_frac = 0.05  # rough default for TP>1
+    nl = args.num_layers
+    hs = args.hidden_size
 
-    n_ar = args.num_layers * 2
-    tgt_decode_comm_ms = args.tgt_link_latency * n_ar / 1000  # per decode step
+    # Compute comm from first principles
+    src_dec_comm = calc_decode_comm_ms(nl, args.src_link_latency)
+    tgt_dec_comm = calc_decode_comm_ms(nl, args.tgt_link_latency)
+
+    # Parse scenario input lengths
+    sc_input_lens = dict(DEFAULT_SCENARIO_INPUT_LENS)
+    if args.scenario_input_lens:
+        for pair in args.scenario_input_lens.split(","):
+            k, v = pair.split("=")
+            sc_input_lens[k.strip()] = int(v.strip())
 
     result = {
         "name": args.name,
@@ -133,27 +152,27 @@ def do_scale(args):
         "tgt_flops": args.tgt_flops, "tgt_bw": args.tgt_bw,
         "tgt_link_latency_us": args.tgt_link_latency,
         "tgt_link_bw": args.tgt_link_bw,
-        "prefill_comm_fraction": pf_comm_frac,
         "tp_size": args.tp_size,
-        "num_layers": args.num_layers,
-        "tgt_decode_comm_ms": round(tgt_decode_comm_ms, 4),
+        "num_layers": nl,
+        "hidden_size": hs,
     }
 
     print(f"Name: {args.name}")
     print(f"Source: {args.src_flops} TFLOPS, {args.src_bw} GB/s, "
-          f"link_lat={args.src_link_latency}us, link_bw={args.src_link_bw} GB/s")
+          f"AR_lat={args.src_link_latency}us, link_bw={args.src_link_bw} GB/s")
     print(f"Target: {args.tgt_flops} TFLOPS, {args.tgt_bw} GB/s, "
-          f"link_lat={args.tgt_link_latency}us, link_bw={args.tgt_link_bw} GB/s")
-    print(f"TTFT scale: compute x{args.src_flops / args.tgt_flops:.2f}, "
-          f"prefill_comm_frac={pf_comm_frac:.2f}")
-    print(f"TPOT DDR scale: x{args.src_bw / args.tgt_bw:.2f}")
+          f"AR_lat={args.tgt_link_latency}us, link_bw={args.tgt_link_bw} GB/s")
+    print(f"Decode comm: src={fmt_ms(src_dec_comm)}/step  tgt={fmt_ms(tgt_dec_comm)}/step "
+          f"({nl}L × 2AR × {args.tgt_link_latency}us)")
+    if hs > 0:
+        print(f"Prefill comm: {nl}L × 2AR × (input_len × {hs} × 2B) / link_bw")
     print()
 
     # Input sweep
     if args.input_csv:
         print("=== Input Sweep ===")
-        print(f"{'input':>8} {'tgt_ttft':>10} {'tgt_tpot':>10} {'tgt_tps':>8}")
-        print("-" * 40)
+        print(f"{'input':>8} {'tgt_ttft':>10} {'tgt_tpot':>10} {'tgt_tps':>8}  {'pf_comm':>10} {'dec_comm':>10}")
+        print("-" * 70)
 
         sweep = []
         with open(args.input_csv) as f:
@@ -164,16 +183,22 @@ def do_scale(args):
                 tpot = float(row["tpot_median_ms"]) if row.get("tpot_median_ms") else None
                 if ttft is None or tpot is None:
                     continue
-                t_ttft, pf_cm = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
-                t_tpot, dec_cm = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                            args.src_link_latency, args.tgt_link_latency, n_ar)
+                src_pf_comm = calc_prefill_comm_ms(il, hs, nl, args.src_link_bw)
+                tgt_pf_comm = calc_prefill_comm_ms(il, hs, nl, args.tgt_link_bw)
+                t_ttft, _ = scale_ttft(ttft, args.src_flops, args.tgt_flops,
+                                       src_pf_comm, tgt_pf_comm)
+                t_tpot, _ = scale_tpot(tpot, args.src_bw, args.tgt_bw,
+                                       src_dec_comm, tgt_dec_comm)
                 t_tps = 1000 / t_tpot if t_tpot > 0 else 0
-                print(f"{il:>8} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10} {t_tps:>7.1f}")
+                print(f"{il:>8} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10} {t_tps:>7.1f}  "
+                      f"{fmt_ms(tgt_pf_comm):>10} {fmt_ms(tgt_dec_comm):>10}")
                 sweep.append({
                     "input_len": il,
                     "ttft_ms": round(t_ttft, 2),
                     "tpot_ms": round(t_tpot, 3),
                     "tps": round(t_tps, 1),
+                    "prefill_comm_ms": round(tgt_pf_comm, 3),
+                    "decode_comm_ms": round(tgt_dec_comm, 4),
                 })
         result["input_sweep"] = sweep
         print()
@@ -181,8 +206,8 @@ def do_scale(args):
     # Scenarios
     if args.scenario_dir:
         print("=== Scenarios ===")
-        print(f"{'scenario':>20} {'tgt_ttft':>10} {'tgt_tpot':>10}")
-        print("-" * 45)
+        print(f"{'scenario':>20} {'input':>8} {'tgt_ttft':>10} {'tgt_tpot':>10}  {'pf_comm':>10} {'dec_comm':>10}")
+        print("-" * 80)
 
         scenarios = []
         for log_name in sorted(os.listdir(args.scenario_dir)):
@@ -192,17 +217,21 @@ def do_scale(args):
             if ttft is None or tpot is None:
                 continue
             name = log_name.replace(".log", "")
-            t_ttft, pf_comm_ms = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
-            t_tpot, dec_comm_ms = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                             args.src_link_latency, args.tgt_link_latency,
-                                             n_ar)
-            print(f"{name:>20} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}  pf_comm={fmt_ms(pf_comm_ms)}  dec_comm={fmt_ms(dec_comm_ms)}")
+            input_len = sc_input_lens.get(name, 0)
+            src_pf_comm = calc_prefill_comm_ms(input_len, hs, nl, args.src_link_bw)
+            tgt_pf_comm = calc_prefill_comm_ms(input_len, hs, nl, args.tgt_link_bw)
+            t_ttft, _ = scale_ttft(ttft, args.src_flops, args.tgt_flops,
+                                   src_pf_comm, tgt_pf_comm)
+            t_tpot, _ = scale_tpot(tpot, args.src_bw, args.tgt_bw,
+                                   src_dec_comm, tgt_dec_comm)
+            print(f"{name:>20} {input_len:>8} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}  "
+                  f"{fmt_ms(tgt_pf_comm):>10} {fmt_ms(tgt_dec_comm):>10}")
             scenarios.append({
                 "name": name,
                 "ttft_ms": round(t_ttft, 2),
                 "tpot_ms": round(t_tpot, 3),
-                "prefill_comm_ms": round(pf_comm_ms, 3),
-                "decode_comm_ms": round(dec_comm_ms, 4),
+                "prefill_comm_ms": round(tgt_pf_comm, 3),
+                "decode_comm_ms": round(tgt_dec_comm, 4),
             })
         result["scenarios"] = scenarios
 
@@ -308,14 +337,16 @@ def main():
     ap.add_argument("--tgt-link-latency", type=float, default=0,
                     help="Target decode link latency us (e.g. PCIe AR ~26us)")
     ap.add_argument("--tgt-link-bw", type=float, default=0,
-                    help="Target inter-chip bandwidth GB/s (for prefill comm scaling)")
-    ap.add_argument("--prefill-comm-fraction", type=float, default=0.0,
-                    help="Fraction of TTFT spent on prefill communication (0-1)")
+                    help="Target inter-chip bandwidth GB/s (for prefill comm, throughput-bound)")
     ap.add_argument("--input-csv", default=None)
     ap.add_argument("--scenario-dir", default=None)
+    ap.add_argument("--scenario-input-lens", default=None,
+                    help="Override input lens: mainstream=13400,heavy_prefill=79700,heavy_decode=600")
     ap.add_argument("--tp-size", type=int, default=1)
     ap.add_argument("--num-layers", type=int, default=40,
-                    help="Model num_hidden_layers (for AR count = layers×2)")
+                    help="Model num_hidden_layers (AR count = layers×2)")
+    ap.add_argument("--hidden-size", type=int, default=0,
+                    help="Model hidden_size (for prefill AR msg = input_len×hidden×2B)")
     ap.add_argument("--name", default="Target",
                     help="Label for this configuration (e.g. 'ICN', 'PCIe')")
 
