@@ -394,18 +394,21 @@ def main():
             compensated.append(r); continue
 
         il = r.get("input_len", 0)
-        raw_ttft = r.get("ttft_median_ms", tail.get("ttft_ms", 0))
-        raw_tpot = r.get("tpot_median_ms", tail.get("tpot_ms", 0))
         output_tokens = r.get("output_tokens", output_len)
 
         if use_trace_encoder:
-            # Precise: encoder from trace, overhead not scaled
-            comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + overhead_ms + decode_comm
-            # TTFT: prefill kernel time from trace, scale encoder portion
-            trace_ttft = tail.get("ttft_ms", raw_ttft)
-            prefill_encoder = max(trace_ttft - lm_head_ms - sampling_ms - overhead_ms, 0)
-            comp_ttft = prefill_encoder * layer_scale + lm_head_final + sampling_ms + overhead_ms + prefill_comm
+            # All from trace — ignore bench.json values
+            raw_tpot = tail.get("tpot_ms", 0)
+            raw_ttft = tail.get("ttft_ms", 0)
+
+            # comp_TPOT = encoder × scale + lm_head/tp + sampling + comm
+            comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + decode_comm
+            # comp_TTFT = prefill_encoder × scale + lm_head/tp + sampling + comm
+            prefill_encoder = max(raw_ttft - lm_head_ms - sampling_ms, 0)
+            comp_ttft = prefill_encoder * layer_scale + lm_head_final + sampling_ms + prefill_comm
         else:
+            raw_ttft = r.get("ttft_median_ms", 0)
+            raw_tpot = r.get("tpot_median_ms", 0)
             tail_subtract = lm_head_ms + sampling_ms
             tail_add = lm_head_final + sampling_ms
             decode_encoder = max(raw_tpot - tail_subtract, 0)
