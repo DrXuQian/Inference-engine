@@ -43,9 +43,11 @@ def scale_ttft(ttft_src, src_flops, tgt_flops,
     ttft = compute + prefill_comm
     compute_tgt = compute_src × (src_flops / tgt_flops)
     comm_tgt = comm_src × (src_link_bw / tgt_link_bw)
+
+    Returns (ttft_tgt, comm_tgt).
     """
     if tgt_flops <= 0 or src_flops <= 0:
-        return ttft_src
+        return ttft_src, 0
     compute = ttft_src * (1 - prefill_comm_frac)
     comm_src = ttft_src * prefill_comm_frac
     compute_tgt = compute * (src_flops / tgt_flops)
@@ -53,7 +55,7 @@ def scale_ttft(ttft_src, src_flops, tgt_flops,
         comm_tgt = comm_src * (src_link_bw / tgt_link_bw)
     else:
         comm_tgt = comm_src
-    return compute_tgt + comm_tgt
+    return compute_tgt + comm_tgt, comm_tgt
 
 
 def scale_tpot(tpot_src_ms, src_bw, tgt_bw,
@@ -64,13 +66,15 @@ def scale_tpot(tpot_src_ms, src_bw, tgt_bw,
 
     tpot = ddr_time + n_ar × ar_latency
     ddr_time scales with DDR BW, ar_latency replaced by target value.
+
+    Returns (tpot_tgt, comm_tgt_ms).
     """
     if src_bw <= 0 or tgt_bw <= 0:
-        return tpot_src_ms
+        return tpot_src_ms, 0
     src_comm_ms = src_ar_lat_us * n_ar_per_step / 1000
     tgt_comm_ms = tgt_ar_lat_us * n_ar_per_step / 1000
     ddr_time = max(tpot_src_ms - src_comm_ms, 0)
-    return ddr_time * (src_bw / tgt_bw) + tgt_comm_ms
+    return ddr_time * (src_bw / tgt_bw) + tgt_comm_ms, tgt_comm_ms
 
 
 def parse_log(path):
@@ -160,10 +164,9 @@ def do_scale(args):
                 tpot = float(row["tpot_median_ms"]) if row.get("tpot_median_ms") else None
                 if ttft is None or tpot is None:
                     continue
-                t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
-                n_ar = args.num_layers * 2
-                t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                    args.src_link_latency, args.tgt_link_latency, n_ar)
+                t_ttft, pf_cm = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
+                t_tpot, dec_cm = scale_tpot(tpot, args.src_bw, args.tgt_bw,
+                                            args.src_link_latency, args.tgt_link_latency, n_ar)
                 t_tps = 1000 / t_tpot if t_tpot > 0 else 0
                 print(f"{il:>8} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10} {t_tps:>7.1f}")
                 sweep.append({
@@ -189,18 +192,17 @@ def do_scale(args):
             if ttft is None or tpot is None:
                 continue
             name = log_name.replace(".log", "")
-            t_ttft = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
-            t_tpot = scale_tpot(tpot, args.src_bw, args.tgt_bw,
-                                args.src_link_latency, args.tgt_link_latency,
-                                n_ar)
-            pf_comm_ms = t_ttft * pf_comm_frac if pf_comm_frac > 0 else 0
-            print(f"{name:>20} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}")
+            t_ttft, pf_comm_ms = scale_ttft(ttft, args.src_flops, args.tgt_flops, args.src_link_bw, args.tgt_link_bw, pf_comm_frac)
+            t_tpot, dec_comm_ms = scale_tpot(tpot, args.src_bw, args.tgt_bw,
+                                             args.src_link_latency, args.tgt_link_latency,
+                                             n_ar)
+            print(f"{name:>20} {fmt_ms(t_ttft):>10} {fmt_ms(t_tpot):>10}  pf_comm={fmt_ms(pf_comm_ms)}  dec_comm={fmt_ms(dec_comm_ms)}")
             scenarios.append({
                 "name": name,
                 "ttft_ms": round(t_ttft, 2),
                 "tpot_ms": round(t_tpot, 3),
                 "prefill_comm_ms": round(pf_comm_ms, 3),
-                "decode_comm_ms": round(tgt_decode_comm_ms, 4),
+                "decode_comm_ms": round(dec_comm_ms, 4),
             })
         result["scenarios"] = scenarios
 
