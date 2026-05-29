@@ -8,8 +8,7 @@ GPU_MEM=${GPU_MEM:-16}
 OUT=./results/04b_agent_hit_122B
 mkdir -p "$OUT"
 
-echo "=== Agent cache hit: Qwen3.5-122B-A10B, TP=1&2 ==="
-echo "Input=20480, Output=3072"
+echo "=== Split/Prune: Agent cache hit: Qwen3.5-122B-A10B, TP=1&2 ==="
 
 for TP in 1 2; do
     echo ""
@@ -21,16 +20,7 @@ for TP in 1 2; do
         --model-dir "$MODEL" --tp-size $TP \
         --gpu-memory-gb "$GPU_MEM" --max-seq-len 26624 \
         --output-dir "$TP_DIR/model"
-
-    PRUNED=$(bash "$SCRIPT_DIR/get_model_path.sh" "$TP_DIR/model")
-    [ -z "$PRUNED" ] && PRUNED=$(ls -d "$TP_DIR/model/split/rank_0" 2>/dev/null | head -1)
-    [ -z "$PRUNED" ] && PRUNED="$MODEL"
-
-    python3 "$SCRIPT_DIR/auto_bench.py" \
-        --model-dir "$PRUNED" --input-lens 20480 --output-len 3072 \
-        --num-prompts 5 --gpu-mem 0.9 \
-        --output-json "$TP_DIR/bench.json"
 done
 
 echo ""
-echo "Done: $OUT/tp1/bench.json, $OUT/tp2/bench.json"
+echo "Done: $OUT/tp1/model, $OUT/tp2/model"

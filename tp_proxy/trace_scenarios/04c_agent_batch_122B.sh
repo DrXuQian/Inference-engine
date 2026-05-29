@@ -12,8 +12,13 @@ for TP in 1 2; do
     echo "--- TP=$TP ---"
     TP_DIR="$OUT/tp${TP}"
 
-    PRUNED=$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE_04/tp${TP}/model")
-    [ -z "$PRUNED" ] && echo "  Model not found" && continue
+    PRUNED=${MODEL:-$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE_04/tp${TP}/model" 2>/dev/null || echo "")}
+    if [ -z "$PRUNED" ]; then
+        echo "ERROR: MODEL not set and no split model found for TP=$TP. Either:"
+        echo "  1. Set MODEL=/path/to/model env var"
+        echo "  2. Run bench_scenarios/04_agent_122B.sh first to split model"
+        exit 1
+    fi
 
     for B in $BATCH_LIST; do
         echo ""
