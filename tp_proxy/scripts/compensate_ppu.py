@@ -59,6 +59,95 @@ def load_meta(model_dir: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Prefill from NVTX marker
+# ---------------------------------------------------------------------------
+
+def extract_prefill_from_nvtx(sqlite_path: str, kernel_evts: list) -> dict | None:
+    """Extract prefill time from NVTX/HGTX 'prefill' marker.
+
+    Finds the 'prefill' marker range, then sums kernel durations
+    that fall within that time range.
+
+    Returns {kernel_ms, wall_ms, n_kernels} or None.
+    """
+    conn = sqlite3.connect(sqlite_path)
+    c = conn.cursor()
+
+    # Try HGTX_EVENTS (PPU) or NVTX (nsys)
+    c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = [r[0] for r in c.fetchall()]
+
+    nvtx_table = None
+    for t in tables:
+        if 'HGTX' in t.upper() and 'EVENT' in t.upper():
+            nvtx_table = t; break
+    if not nvtx_table:
+        for t in tables:
+            if 'NVTX' in t.upper() and ('PUSH' in t.upper() or 'EVENT' in t.upper()):
+                nvtx_table = t; break
+    if not nvtx_table:
+        conn.close()
+        return None
+
+    # Find 'prefill' marker — look for text containing 'prefill'
+    try:
+        c.execute(f'SELECT * FROM "{nvtx_table}" LIMIT 1')
+        cols = [desc[0] for desc in c.description]
+    except Exception:
+        conn.close()
+        return None
+
+    # Determine column names (varies by platform)
+    start_col = next((c for c in cols if c.lower() in ('start', 'timestamp', 'starttime')), None)
+    end_col = next((c for c in cols if c.lower() in ('end', 'endtime', 'endtimestamp')), None)
+    text_col = next((c for c in cols if c.lower() in ('text', 'message', 'name', 'value')), None)
+
+    if not start_col or not text_col:
+        conn.close()
+        return None
+
+    if end_col:
+        c.execute(f'SELECT "{start_col}", "{end_col}", "{text_col}" FROM "{nvtx_table}" '
+                  f'WHERE "{text_col}" LIKE "%prefill%"')
+    else:
+        # Some formats store duration instead of end
+        dur_col = next((c for c in cols if c.lower() in ('duration', 'dur')), None)
+        if dur_col:
+            c.execute(f'SELECT "{start_col}", "{start_col}" + "{dur_col}", "{text_col}" '
+                      f'FROM "{nvtx_table}" WHERE "{text_col}" LIKE "%prefill%"')
+        else:
+            conn.close()
+            return None
+
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return None
+
+    # Use the LAST prefill marker (skip warmup ones if any)
+    pf_start, pf_end, pf_text = rows[-1]
+    if pf_end <= pf_start:
+        return None
+
+    # Count kernels within the prefill time range
+    kernel_dur_ns = 0
+    n_kernels = 0
+    for evt_start, evt_dur, evt_end, evt_name, evt_gid in kernel_evts:
+        if evt_start >= pf_start and evt_end <= pf_end:
+            kernel_dur_ns += evt_dur
+            n_kernels += 1
+
+    wall_ns = pf_end - pf_start
+
+    return {
+        "kernel_ms": kernel_dur_ns / 1e6,
+        "wall_ms": wall_ns / 1e6,
+        "n_kernels": n_kernels,
+    }
+
+
+# ---------------------------------------------------------------------------
 # a) Tail from trace (lm_head + sampling per step)
 # ---------------------------------------------------------------------------
 
@@ -165,43 +254,39 @@ def measure_tail_from_trace(sqlite_path: str,
     sampling_ms = max(tail_ms - lm_head_ms, 0)
     tpot_ms = s["step_wall"] / 1e6
 
-    # Prefill: find the LAST gap segment before the consistent decode region.
-    # This is the prefill of the last inference round (after warmup).
-    # Only count non-graph KERNEL time (not wall clock, to exclude scheduler overhead).
-    #
-    # Strategy: walk backward from the first selected decode step to find
-    # the gap segment immediately before it = last prefill.
-    first_selected_graph_start = selected[0]["step_wall"]  # not useful, need actual time
-    # Find the segment index of the first selected step's graph
-    # The selected steps come from filtered steps, which come from (graph, gap) pairs
-    # Find the last large gap before the decode region starts
-    # Decode region = many consecutive (graph, gap) pairs with mode kernel count
-    # Prefill = the gap segment right before the first such pair
-
-    # Find index of first mode-count graph segment
-    first_mode_seg_idx = None
-    for si, (stype, sevts) in enumerate(segs):
-        if stype == "graph" and len(sevts) == mode:
-            first_mode_seg_idx = si
-            break
-
-    if first_mode_seg_idx and first_mode_seg_idx > 0:
-        # The gap before this graph = last prefill
-        # Sum kernel durations in that gap (not wall clock)
-        prev_seg = segs[first_mode_seg_idx - 1]
-        if prev_seg[0] == "gap":
-            prefill_kernel_ns = sum(d for _, d, _, _, _ in prev_seg[1])
-            prefill_wall_ns = prev_seg[1][-1][2] - prev_seg[1][0][0]
-            ttft_ms = prefill_kernel_ns / 1e6  # kernel time only
-            print(f"\n  Prefill: last gap before decode ({len(prev_seg[1])} kernels)")
-            print(f"    kernel time: {prefill_kernel_ns/1e6:.2f} ms")
-            print(f"    wall time:   {prefill_wall_ns/1e6:.2f} ms")
-        else:
-            ttft_ms = 0
-            print(f"\n  WARNING: no gap before first decode graph")
+    # Prefill: extract from NVTX "prefill" marker if available,
+    # otherwise fall back to gap-before-first-decode heuristic.
+    ttft_ms = 0
+    ttft_wall_ms = 0
+    prefill_from_nvtx = extract_prefill_from_nvtx(sqlite_path, evts)
+    if prefill_from_nvtx:
+        ttft_ms = prefill_from_nvtx["kernel_ms"]
+        ttft_wall_ms = prefill_from_nvtx["wall_ms"]
+        print(f"\n  Prefill (from NVTX 'prefill' marker, {prefill_from_nvtx['n_kernels']} kernels):")
+        print(f"    kernel time: {ttft_ms:.2f} ms")
+        print(f"    wall time:   {ttft_wall_ms:.2f} ms")
     else:
-        ttft_ms = 0
-        print(f"\n  WARNING: no mode-count graph found for prefill")
+        # Fallback: find the last gap before first mode-count graph
+        first_mode_seg_idx = None
+        for si, (stype, sevts) in enumerate(segs):
+            if stype == "graph" and len(sevts) == mode:
+                first_mode_seg_idx = si
+                break
+
+        if first_mode_seg_idx and first_mode_seg_idx > 0:
+            prev_seg = segs[first_mode_seg_idx - 1]
+            if prev_seg[0] == "gap":
+                prefill_kernel_ns = sum(d for _, d, _, _, _ in prev_seg[1])
+                prefill_wall_ns = prev_seg[1][-1][2] - prev_seg[1][0][0]
+                ttft_ms = prefill_kernel_ns / 1e6
+                ttft_wall_ms = prefill_wall_ns / 1e6
+                print(f"\n  Prefill (fallback: gap before decode, {len(prev_seg[1])} kernels):")
+                print(f"    kernel time: {ttft_ms:.2f} ms")
+                print(f"    wall time:   {ttft_wall_ms:.2f} ms")
+            else:
+                print(f"\n  WARNING: no gap before first decode graph")
+        else:
+            print(f"\n  WARNING: no mode-count graph found for prefill")
 
     print(f"\n  encoder (graph wall): {encoder_ms:.4f} ms")
     print(f"  tail (to next graph): {tail_ms:.4f} ms")
@@ -216,7 +301,9 @@ def measure_tail_from_trace(sqlite_path: str,
         "lm_head_ms": round(lm_head_ms, 4),
         "sampling_ms": round(sampling_ms, 4),
         "tpot_ms": round(tpot_ms, 4),
-        "ttft_ms": round(ttft_ms, 2),
+        "ttft_kernel_ms": round(ttft_ms, 2),
+        "ttft_wall_ms": round(ttft_wall_ms, 2),
+        "ttft_ms": round(ttft_ms, 2),  # default to kernel time
         "overhead_ms": 0,
         "tail_per_step_ms": round(tail_ms, 4),
     }
