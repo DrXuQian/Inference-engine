@@ -49,14 +49,16 @@ def apply():
         if hasattr(orig, '_nvtx_patched'):
             return True
 
+        import nvtx as _nvtx
+
         def patched_v1(self, scheduler_output, **kwargs):
             num_tokens = scheduler_output.total_num_scheduled_tokens
             num_reqs = len(scheduler_output.num_scheduled_tokens)
             max_toks = max(scheduler_output.num_scheduled_tokens.values()) if num_reqs else 0
             phase = "prefill" if max_toks > 1 else "decode"
-            torch.cuda.nvtx.range_push(f"{phase} bs={num_reqs} tok={num_tokens}")
+            rng = _nvtx.start_range(f"{phase} bs={num_reqs} tok={num_tokens}")
             result = orig(self, scheduler_output, **kwargs)
-            torch.cuda.nvtx.range_pop()
+            _nvtx.end_range(rng)
             return result
 
         patched_v1._nvtx_patched = True
@@ -77,6 +79,8 @@ def apply():
             if hasattr(orig, '_nvtx_patched'):
                 return True
 
+            import nvtx as _nvtx
+
             def patched_v0(self, *args, **kwargs):
                 model_input = args[0] if args else kwargs.get('model_input')
                 bs = 0
@@ -84,9 +88,9 @@ def apply():
                     bs = model_input.input_tokens.shape[0]
                 elif hasattr(model_input, 'seq_lens'):
                     bs = len(model_input.seq_lens)
-                torch.cuda.nvtx.range_push(f"bs={bs}")
+                rng = _nvtx.start_range(f"bs={bs}")
                 result = orig(self, *args, **kwargs)
-                torch.cuda.nvtx.range_pop()
+                _nvtx.end_range(rng)
                 return result
 
             patched_v0._nvtx_patched = True
