@@ -68,18 +68,29 @@ def main():
         nvtx.end_range(rng)
     print(f"Warmup done (batch={batch_size})")
 
-    # Bench rounds
+    # Prefill-only round: max_tokens=1, measures pure prefill
+    sp_prefill = SamplingParams(max_tokens=1, temperature=0)
+    prefill_prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
+                       for _ in range(batch_size)]
+    if has_nvtx:
+        rng = nvtx.start_range("prefill", color="blue")
+    llm.generate(prefill_prompts, sampling_params=sp_prefill)
+    if has_nvtx:
+        nvtx.end_range(rng)
+    print(f"Prefill round done (batch={batch_size}, max_tokens=1)")
+
+    # Decode rounds: full generation
     n_rounds = max(num_prompts // batch_size, 3)
     for r in range(n_rounds):
         if has_nvtx:
-            rng = nvtx.start_range(f"round_{r}", color="green")
+            rng = nvtx.start_range(f"decode_{r}", color="green")
         prompts = [{"prompt_token_ids": np.random.randint(0, 10000, size=input_len).tolist()}
                    for _ in range(batch_size)]
         outputs = llm.generate(prompts, sampling_params=sp)
         if has_nvtx:
             nvtx.end_range(rng)
         toks = [len(o.outputs[0].token_ids) for o in outputs]
-        print(f"Round {r}: batch={len(outputs)}, tokens={toks}")
+        print(f"Decode round {r}: batch={len(outputs)}, tokens={toks}")
 
     del llm
     print("Done")
