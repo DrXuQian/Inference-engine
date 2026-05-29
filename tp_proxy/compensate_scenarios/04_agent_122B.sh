@@ -7,14 +7,19 @@ BASE=./results/04_agent_122B
 for TP in 1 2; do
     echo "--- TP=$TP ---"
     DIR="$BASE/tp${TP}"
-    MODEL=$(bash "$SCRIPT_DIR/get_model_path.sh" "$DIR/model")
-    [ -z "$MODEL" ] && echo "Model not found for TP=$TP" && continue
+    MODEL_TP=${MODEL:-$(bash "$SCRIPT_DIR/get_model_path.sh" "$DIR/model" 2>/dev/null || echo "")}
+    if [ -z "$MODEL_TP" ]; then
+        echo "ERROR: Model not found for TP=$TP, skipping"
+        continue
+    fi
+
+    COMM="$DIR/comm.json"; [ -f "$COMM" ] && COMM_ARG="--comm-json $COMM" || COMM_ARG=""
 
     python3 "$SCRIPT_DIR/compensate_ppu.py" \
-        --bench-results "$DIR/bench.json" \
-        --model-dir "$MODEL" \
+        --model-dir "$MODEL_TP" \
         --asys-sqlite "$DIR/trace/trace.sqlite" \
-        --comm-json "$DIR/comm.json" \
+        --output-len 3072 \
+        $COMM_ARG \
         --output-json "$DIR/compensated.json"
     echo ""
 done

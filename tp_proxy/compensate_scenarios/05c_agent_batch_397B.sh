@@ -15,16 +15,16 @@ for TP in 2; do
     DIR="$OUT/tp${TP}"
     [ ! -d "$DIR" ] && echo "  Not found" && continue
 
-    MODEL=$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE_04/tp${TP}/model")
-    [ -z "$MODEL" ] && MODEL=$(bash "$SCRIPT_DIR/get_model_path.sh" "$DIR/model")
-    [ -z "$MODEL" ] && echo "  Model not found" && continue
+    MODEL_TP=${MODEL:-$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE_04/tp${TP}/model" 2>/dev/null || echo "")}
+    [ -z "$MODEL_TP" ] && MODEL_TP=$(bash "$SCRIPT_DIR/get_model_path.sh" "$DIR/model" 2>/dev/null || echo "")
+    if [ -z "$MODEL_TP" ]; then
+        echo "  ERROR: Model not found for TP=$TP, skipping"
+        continue
+    fi
 
-    COMM="$BASE_04/tp${TP}/comm.json"
+    COMM="$BASE_04/tp${TP}/comm.json"; [ -f "$COMM" ] && COMM_ARG="--comm-json $COMM" || COMM_ARG=""
 
     for B in $BATCH_LIST; do
-        BENCH="$DIR/bench_batch${B}.json"
-        [ ! -f "$BENCH" ] && echo "  batch=$B: no bench result" && continue
-
         # Use per-batch trace if available, fallback to batch=1 trace
         TRACE="$DIR/trace_batch${B}/trace.sqlite"
         [ ! -f "$TRACE" ] && TRACE="$BASE_04/tp${TP}/trace/trace.sqlite"
@@ -39,7 +39,6 @@ for TP in 2; do
         echo "  batch=$B (lm_head_kernel=$LM_HEAD)"
         COMP_ARGS=""
         [ -f "$TRACE" ] && COMP_ARGS="$COMP_ARGS --asys-sqlite $TRACE"
-        [ -f "$COMM" ] && COMP_ARGS="$COMP_ARGS --comm-json $COMM"
         # batch>=2: use batch=1 trace for sampling time
         B1_TRACE="$BASE_04/tp${TP}/trace/trace.sqlite"
         if [ $B -ge 2 ] && [ -f "$B1_TRACE" ]; then
@@ -47,11 +46,12 @@ for TP in 2; do
         fi
 
         python3 "$SCRIPT_DIR/compensate_ppu.py" \
-            --bench-results "$BENCH" \
-            --model-dir "$MODEL" \
+            --model-dir "$MODEL_TP" \
             --batch-size $B \
             --lm-head-kernel "$LM_HEAD" \
+            --output-len 3072 \
             $COMP_ARGS \
+            $COMM_ARG \
             --output-json "$DIR/compensated_batch${B}.json"
         echo ""
     done
