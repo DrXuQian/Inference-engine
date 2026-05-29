@@ -24,6 +24,7 @@
  *   auto    - vLLM threshold choice, with 4-GPU PCIe allowed here.
  *   oneshot - vLLM cross_device_reduce_1stage.
  *   twoshot - vLLM cross_device_reduce_2stage.
+ *   push    - safe experimental push path: input -> peer scratch -> output.
  */
 
 #include <algorithm>
@@ -49,6 +50,7 @@
 constexpr int kMaxBlocks = 36;
 constexpr size_t kVllmSmallThreshold = 512 * 1024;
 constexpr size_t kVllmLargeThreshold = 256 * 1024;
+constexpr size_t kPushMaxBytes = 8 * 1024 * 1024;
 
 using FlagType = uint32_t;
 
@@ -56,16 +58,19 @@ enum class Algo {
   Auto = 0,
   OneShot = 1,
   TwoShot = 2,
+  Push = 3,
 };
 
 struct Signal {
   alignas(128) FlagType start[kMaxBlocks][8];
   alignas(128) FlagType end[kMaxBlocks][8];
   alignas(128) FlagType _flag[kMaxBlocks];
+  alignas(128) FlagType push_epoch[kMaxBlocks];
 };
 
 struct __align__(16) RankData {
   const void* ptrs[8];
+  void* push_buffers[8];
 };
 
 struct __align__(16) RankSignals {
@@ -219,6 +224,85 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
   return downcast<P>(tmp);
 }
 
+template <typename T>
+DINLINE bool is_pos_zero(T v) {
+  return false;
+}
+
+template <>
+DINLINE bool is_pos_zero(half v) {
+  return *reinterpret_cast<uint16_t*>(&v) == 0x0000u;
+}
+
+template <>
+DINLINE bool is_pos_zero(float v) {
+  return *reinterpret_cast<uint32_t*>(&v) == 0x00000000u;
+}
+
+template <typename T>
+DINLINE void clear_pos_zero(T& v) {}
+
+template <>
+DINLINE void clear_pos_zero(half& v) {
+  uint16_t* bits = reinterpret_cast<uint16_t*>(&v);
+  if (*bits == 0x0000u) *bits = 0x8000u;
+}
+
+template <>
+DINLINE void clear_pos_zero(float& v) {
+  uint32_t* bits = reinterpret_cast<uint32_t*>(&v);
+  if (*bits == 0x00000000u) *bits = 0x80000000u;
+}
+
+template <typename P>
+DINLINE void clear_pos_zero_packed(P& v) {
+#pragma unroll
+  for (int i = 0; i < P::size; i++) clear_pos_zero(v.data[i]);
+}
+
+template <typename P>
+DINLINE bool has_pos_zero_packed(const P& v) {
+  bool found = false;
+#pragma unroll
+  for (int i = 0; i < P::size; i++) found |= is_pos_zero(v.data[i]);
+  return found;
+}
+
+template <typename P>
+DINLINE P make_pos_zero_packed() {
+  P v;
+#pragma unroll
+  for (int i = 0; i < P::size; i++) v.data[i] = typename P::type{};
+  return v;
+}
+
+template <typename P>
+DINLINE void ld_global_volatile_16B(P& x, const P* addr) {
+  static_assert(alignof(P) == 16 && sizeof(P) == 16);
+  uint4 val;
+  asm volatile("ld.volatile.global.v4.b32 {%0, %1, %2, %3}, [%4];"
+               : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
+               : "l"(addr));
+  x = *reinterpret_cast<P*>(&val);
+}
+
+template <typename P>
+DINLINE void st_global_volatile_16B(const P& x, P* addr) {
+  static_assert(alignof(P) == 16 && sizeof(P) == 16);
+  const uint4 val = *reinterpret_cast<const uint4*>(&x);
+  asm volatile("st.volatile.global.v4.b32 [%4], {%0, %1, %2, %3};" ::
+                   "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w), "l"(addr));
+}
+
+template <typename P, int ngpus>
+DINLINE P reduce_storage(P (&storage)[ngpus]) {
+  using A = typename packed_t<typename P::type>::A;
+  A tmp = upcast(storage[0]);
+#pragma unroll
+  for (int i = 1; i < ngpus; i++) packed_assign_add(tmp, upcast(storage[i]));
+  return downcast<P>(tmp);
+}
+
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1) cross_device_reduce_1stage(
     RankData* _dp, RankSignals sg, Signal* self_sg, T* __restrict__ result,
@@ -281,6 +365,64 @@ __global__ void __launch_bounds__(512, 1) cross_device_reduce_2stage(
   }
 }
 
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(512, 1) cross_device_reduce_push_safe(
+    RankData* _dp, RankSignals sg, Signal* self_sg,
+    const T* __restrict__ input, T* __restrict__ output, int rank, int size,
+    size_t buffer_bytes) {
+  using P = typename packed_t<T>::P;
+  auto dp = *_dp;
+  // Synchronize at the beginning of every graph node so a fast rank cannot
+  // reuse a scratch epoch before slower ranks have cleared it in the previous
+  // node. This keeps graph repeats safe without adding a completion barrier to
+  // the measured push path.
+  barrier_at_start<ngpus>(sg, self_sg, rank);
+  uint32_t epoch = self_sg->push_epoch[blockIdx.x] & 1u;
+  size_t epoch_offset = epoch * ngpus * buffer_bytes;
+
+  P* push_bufs[ngpus];
+  P* poll_bufs[ngpus];
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    push_bufs[i] = reinterpret_cast<P*>(
+        reinterpret_cast<char*>(dp.push_buffers[i]) + epoch_offset +
+        rank * buffer_bytes);
+    poll_bufs[i] = reinterpret_cast<P*>(
+        reinterpret_cast<char*>(dp.push_buffers[rank]) + epoch_offset +
+        i * buffer_bytes);
+  }
+
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
+       idx += gridDim.x * blockDim.x) {
+    P vec = reinterpret_cast<const P*>(input)[idx];
+    clear_pos_zero_packed(vec);
+#pragma unroll
+    for (int i = 0; i < ngpus; i++) st_global_volatile_16B(vec, push_bufs[i] + idx);
+  }
+
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
+       idx += gridDim.x * blockDim.x) {
+    P storage[ngpus];
+    while (true) {
+      bool has_pos_zero = false;
+#pragma unroll
+      for (int i = 0; i < ngpus; i++) {
+        ld_global_volatile_16B(storage[i], poll_bufs[i] + idx);
+        has_pos_zero |= has_pos_zero_packed(storage[i]);
+      }
+      if (!has_pos_zero) break;
+    }
+    reinterpret_cast<P*>(output)[idx] = reduce_storage<P, ngpus>(storage);
+
+    P zeros = make_pos_zero_packed<P>();
+#pragma unroll
+    for (int i = 0; i < ngpus; i++) st_global_volatile_16B(zeros, poll_bufs[i] + idx);
+  }
+
+  __syncthreads();
+  if (threadIdx.x == 0) self_sg->push_epoch[blockIdx.x] = (epoch + 1u) & 1u;
+}
+
 __global__ void fill_half_kernel(half* data, int nelems, float value) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
@@ -293,6 +435,7 @@ const char* algo_name(Algo algo) {
     case Algo::Auto: return "auto";
     case Algo::OneShot: return "oneshot";
     case Algo::TwoShot: return "twoshot";
+    case Algo::Push: return "push";
   }
   return "unknown";
 }
@@ -301,7 +444,8 @@ Algo parse_algo(const char* s) {
   if (strcmp(s, "auto") == 0) return Algo::Auto;
   if (strcmp(s, "1stage") == 0 || strcmp(s, "oneshot") == 0) return Algo::OneShot;
   if (strcmp(s, "2stage") == 0 || strcmp(s, "twoshot") == 0) return Algo::TwoShot;
-  fprintf(stderr, "Invalid algo '%s'. Valid values: auto, oneshot, twoshot\n", s);
+  if (strcmp(s, "push") == 0 || strcmp(s, "pushshot") == 0) return Algo::Push;
+  fprintf(stderr, "Invalid algo '%s'. Valid values: auto, oneshot, twoshot, push\n", s);
   exit(1);
 }
 
@@ -317,11 +461,15 @@ Algo resolve_algo(Algo requested, int ngpus, size_t bytes) {
 
 template <int ngpus>
 void launch_reduce(Algo algo, RankData* rd, RankSignals sg, Signal* signal,
-                   half* output, int rank, int packed_size, int nblocks,
-                   cudaStream_t stream) {
+                   const half* input, half* output, int rank, int packed_size,
+                   int nblocks, size_t buffer_bytes, cudaStream_t stream) {
   if (algo == Algo::TwoShot) {
     cross_device_reduce_2stage<half, ngpus>
         <<<nblocks, 512, 0, stream>>>(rd, sg, signal, output, rank, packed_size);
+  } else if (algo == Algo::Push) {
+    cross_device_reduce_push_safe<half, ngpus>
+        <<<nblocks, 512, 0, stream>>>(rd, sg, signal, input, output, rank,
+                                      packed_size, buffer_bytes);
   } else {
     cross_device_reduce_1stage<half, ngpus>
         <<<nblocks, 512, 0, stream>>>(rd, sg, signal, output, rank, packed_size);
@@ -331,6 +479,7 @@ void launch_reduce(Algo algo, RankData* rd, RankSignals sg, Signal* signal,
 struct GPUState {
   half* input;
   half* output;
+  void* push_buffer;
   Signal* signal;
   RankData* rank_data;
   cudaStream_t stream;
@@ -379,8 +528,14 @@ void* bench_thread(void* arg) {
     CHECK_CUDA(cudaMemsetAsync(signal, 0, sizeof(Signal) + a->bytes, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
     pthread_barrier_wait(a->barrier);
-    launch_reduce<ngpus>(algo, rd, a->sg, signal, output, rank, packed_size,
-                         nblocks, stream);
+    if (algo == Algo::Push) {
+      CHECK_CUDA(cudaMemsetAsync(a->states[rank].push_buffer, 0,
+                                 2 * a->ngpus * a->bytes, stream));
+      CHECK_CUDA(cudaStreamSynchronize(stream));
+      pthread_barrier_wait(a->barrier);
+    }
+    launch_reduce<ngpus>(algo, rd, a->sg, signal, input, output, rank,
+                         packed_size, nblocks, a->bytes, stream);
     CHECK_CUDA(cudaStreamSynchronize(stream));
     pthread_barrier_wait(a->barrier);
 
@@ -402,14 +557,24 @@ void* bench_thread(void* arg) {
     pthread_barrier_wait(a->barrier);
   }
 
-  CHECK_CUDA(cudaMemset(input, 1, a->bytes));
+  if (a->verify) {
+    int fill_blocks = std::min((nelems + 255) / 256, 1024);
+    fill_half_kernel<<<fill_blocks, 256, 0, stream>>>(input, nelems,
+                                                       float(rank + 1));
+  } else {
+    CHECK_CUDA(cudaMemset(input, 1, a->bytes));
+  }
   CHECK_CUDA(cudaMemset(output, 0, a->bytes));
   CHECK_CUDA(cudaMemset(signal, 0, sizeof(Signal) + a->bytes));
+  if (algo == Algo::Push) {
+    CHECK_CUDA(cudaMemset(a->states[rank].push_buffer, 0,
+                          2 * a->ngpus * a->bytes));
+  }
   pthread_barrier_wait(a->barrier);
 
   for (int w = 0; w < a->direct_warmup; w++) {
-    launch_reduce<ngpus>(algo, rd, a->sg, signal, output, rank, packed_size,
-                         nblocks, stream);
+    launch_reduce<ngpus>(algo, rd, a->sg, signal, input, output, rank,
+                         packed_size, nblocks, a->bytes, stream);
   }
   CHECK_CUDA(cudaStreamSynchronize(stream));
   pthread_barrier_wait(a->barrier);
@@ -417,8 +582,8 @@ void* bench_thread(void* arg) {
   cudaGraph_t graph;
   CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
   for (int rep = 0; rep < a->repeats; rep++) {
-    launch_reduce<ngpus>(algo, rd, a->sg, signal, output, rank, packed_size,
-                         nblocks, stream);
+    launch_reduce<ngpus>(algo, rd, a->sg, signal, input, output, rank,
+                         packed_size, nblocks, a->bytes, stream);
   }
   CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
   CHECK_CUDA(cudaGraphInstantiate(&a->states[rank].graph_exec, graph, nullptr,
@@ -442,6 +607,27 @@ void* bench_thread(void* arg) {
     CHECK_CUDA(cudaEventElapsedTime(&ms, a->states[rank].start,
                                     a->states[rank].stop));
     a->times[it] = ms * 1000.0f / a->repeats;
+  }
+
+  if (a->verify) {
+    pthread_barrier_wait(a->barrier);
+    half host[16];
+    size_t check_elems = std::min<size_t>(16, nelems);
+    CHECK_CUDA(cudaMemcpy(host, output, check_elems * sizeof(half),
+                          cudaMemcpyDeviceToHost));
+    float expected = float(a->ngpus * (a->ngpus + 1) / 2);
+    for (size_t i = 0; i < check_elems; i++) {
+      float got = __half2float(host[i]);
+      if (got != expected) {
+        fprintf(stderr,
+                "Graph verify failed: rank=%d elem=%zu got=%g expected=%g "
+                "algo=%s bytes=%zu repeats=%d\n",
+                rank, i, got, expected, algo_name(algo), a->bytes,
+                a->repeats);
+        exit(2);
+      }
+    }
+    pthread_barrier_wait(a->barrier);
   }
   return nullptr;
 }
@@ -514,7 +700,8 @@ void bench_size(GPUState* states, int ngpus, size_t bytes, int warmup, int iters
          algo_name(resolved), median, mean, p99);
 }
 
-void setup_gpus(GPUState* states, int ngpus, size_t max_bytes) {
+void setup_gpus(GPUState* states, int ngpus, size_t max_bytes,
+                bool need_push) {
   for (int i = 0; i < ngpus; i++) {
     CHECK_CUDA(cudaSetDevice(i));
     for (int j = 0; j < ngpus; j++) {
@@ -537,6 +724,10 @@ void setup_gpus(GPUState* states, int ngpus, size_t max_bytes) {
     CHECK_CUDA(cudaSetDevice(i));
     CHECK_CUDA(cudaMalloc(&states[i].input, max_bytes));
     CHECK_CUDA(cudaMalloc(&states[i].output, max_bytes));
+    if (need_push) {
+      CHECK_CUDA(cudaMalloc(&states[i].push_buffer, 2 * ngpus * max_bytes));
+      CHECK_CUDA(cudaMemset(states[i].push_buffer, 0, 2 * ngpus * max_bytes));
+    }
     CHECK_CUDA(cudaMalloc(&states[i].signal, sizeof(Signal) + max_bytes));
     CHECK_CUDA(cudaMalloc(&states[i].rank_data, sizeof(RankData)));
     CHECK_CUDA(cudaMemset(states[i].signal, 0, sizeof(Signal) + max_bytes));
@@ -547,7 +738,10 @@ void setup_gpus(GPUState* states, int ngpus, size_t max_bytes) {
 
   for (int i = 0; i < ngpus; i++) {
     RankData rd = {};
-    for (int j = 0; j < ngpus; j++) rd.ptrs[j] = states[j].input;
+    for (int j = 0; j < ngpus; j++) {
+      rd.ptrs[j] = states[j].input;
+      rd.push_buffers[j] = states[j].push_buffer;
+    }
     CHECK_CUDA(cudaSetDevice(i));
     CHECK_CUDA(cudaMemcpy(states[i].rank_data, &rd, sizeof(RankData),
                           cudaMemcpyHostToDevice));
@@ -560,6 +754,7 @@ void cleanup_gpus(GPUState* states, int ngpus) {
     if (states[i].graph_exec) CHECK_CUDA(cudaGraphExecDestroy(states[i].graph_exec));
     CHECK_CUDA(cudaFree(states[i].input));
     CHECK_CUDA(cudaFree(states[i].output));
+    if (states[i].push_buffer) CHECK_CUDA(cudaFree(states[i].push_buffer));
     CHECK_CUDA(cudaFree(states[i].signal));
     CHECK_CUDA(cudaFree(states[i].rank_data));
     CHECK_CUDA(cudaStreamDestroy(states[i].stream));
@@ -602,10 +797,15 @@ int main(int argc, char** argv) {
               sizes[s]);
       return 1;
     }
+    if (requested_algo == Algo::Push && sizes[s] > kPushMaxBytes) {
+      fprintf(stderr, "push supports up to %zu bytes in this benchmark, got %zu\n",
+              kPushMaxBytes, sizes[s]);
+      return 1;
+    }
   }
 
   GPUState states[8] = {};
-  setup_gpus(states, ngpus, sizes[nsizes - 1]);
+  setup_gpus(states, ngpus, sizes[nsizes - 1], requested_algo == Algo::Push);
 
   printf("vLLM Custom All-Reduce Standalone [out-of-place + CUDA Graph]\n");
   printf("  GPUs: %d, Requested Algo: %s, Direct warmup: %d, Graph warmup: %d, "
