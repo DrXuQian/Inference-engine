@@ -10,9 +10,12 @@ custom all-reduce, a local safe push experiment, standalone Ring LL, and NCCL.
 | `bench_vllm_allreduce.cu` | vLLM oneshot/twoshot extraction plus local `push` mode |
 | `allreduce_latency_breakdown.md` | unified latency data and protocol analysis |
 | `ringll_vs_oneshot.md` | focused explanation of why Ring LL can lose to oneshot |
+| `nccl_ringll_internal_breakdown.md` | instrumented NCCL Ring LL phase counters |
 | `vllm_custom_allreduce_extraction.md` | details of the vLLM standalone extraction |
 | `standalone_ringll.cu` | standalone NCCL Ring LL protocol extraction |
 | `bench_breakdown.cu` | primitive barrier/read/write breakdown benchmark |
+| `patches/nccl-2.27.5-ringll-prof.patch` | NCCL instrumentation patch used for the internal breakdown |
+| `patches/nccl-tests-ll-prof.patch` | nccl-tests hook for dumping the instrumentation counters |
 
 ## Build Push/Oneshot/Twoshot Benchmark
 

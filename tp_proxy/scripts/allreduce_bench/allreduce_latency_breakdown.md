@@ -54,6 +54,11 @@ cross-NUMA `SYS` traffic.
 | `standalone_ringll` | NCCL Ring LL logic extracted into one kernel | in-kernel ring LL | ring protocol phase attribution |
 | `bench_breakdown` | local primitive microbench | individual barrier/read/write tests | qualitative primitive attribution |
 
+The NCCL-internal Ring LL counter run is documented in
+`nccl_ringll_internal_breakdown.md`. It uses a locally rebuilt NCCL with
+`clock64()` counters and should be used for phase attribution only, not
+production absolute latency.
+
 The old local `bench_oneshot` and `bench_push_breakdown` were removed. They were
 hand-written experiments and should not be used as the current source of truth.
 
@@ -66,7 +71,7 @@ Nsight Systems kernel medians, using one CUDA Graph with `repeats=100`:
 | vLLM oneshot | 4.000 us | 16.479 us | 4.1x | out-of-place pull, all ranks peer-read inputs |
 | vLLM twoshot | 5.984 us | 12.704 us | 2.1x | reduce-scatter + allgather |
 | Safe push | 4.448 us | 11.104 us | 2.5x | posted writes into peer scratch, local polling |
-| Standalone Ring LL | 4.608 us | 10.016 us | 2.2x | separate standalone nsys median, no NCCL framework |
+| Standalone Ring LL | 4.608 us | 10.016 us | 2.2x | separate standalone nsys median, no NCCL runtime |
 
 CUDA Graph event medians from `bench_vllm_allreduce`, also `repeats=100`:
 
@@ -109,7 +114,7 @@ Latency shape:
 | start/end barriers | fixed synchronization floor | grows with more ranks and cross-NUMA skew |
 | peer reads | one peer input | three peer inputs, including `SYS` paths |
 | local reduce/write | small for 6 KB | still small |
-| framework overhead | removed in standalone | removed in standalone |
+| runtime overhead | removed in standalone | removed in standalone |
 
 The 4-GPU penalty is not arithmetic. It is synchronization plus remote-read
 fan-in over cross-NUMA PCIe paths.
@@ -280,14 +285,30 @@ visible, but the peer access pattern has started to matter.
 ## NCCL vs Standalone Ring LL
 
 Standalone Ring LL is a protocol extraction. It does not include full NCCL
-runtime overhead. Historical 1 KB measurements showed:
+runtime and generic implementation overhead. Historical 1 KB measurements
+showed:
 
 | Kernel | 2 GPU | 4 GPU | Notes |
 |---|---:|---:|---|
 | Standalone Ring LL | 4.4 us | 8.3 us | extracted kernel/protocol |
 | NCCL Ring LL | ~6.5 us | 17.2 us | full NCCL path |
 
-The extra NCCL cost comes from runtime machinery around the primitive:
+An instrumented NCCL Ring LL run is recorded in
+`nccl_ringll_internal_breakdown.md`. The out-of-place counter summary was:
+
+| Size | GPUs | readLL % | waitSend % | storeLL % | barrier % | other % |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 KB | 2 | 6.13 | 1.02 | 0.45 | 1.38 | 91.02 |
+| 1 KB | 4 | 3.98 | 1.27 | 0.11 | 1.76 | 92.89 |
+| 6 KB | 2 | 33.81 | 0.82 | 2.38 | 1.18 | 61.80 |
+| 6 KB | 4 | 20.35 | 1.12 | 0.59 | 1.54 | 76.41 |
+
+These are aggregate thread-cycle percentages from an instrumented NCCL build.
+They are not production wall-clock timings. The large `other` bucket contains
+generic loop/control work, local load/reduce work, uninstrumented pieces, and
+instrumentation overhead.
+
+The extra NCCL cost likely comes from runtime machinery around the primitive:
 
 ```text
 channel and work management
@@ -300,7 +321,7 @@ So "Ring LL is slow" has two layers:
 
 ```text
 protocol layer: serialized readLL waits
-framework layer: NCCL machinery around the primitive
+implementation layer: NCCL generic/control work around the primitive
 ```
 
 ## Practical Conclusions
@@ -313,7 +334,7 @@ For this machine:
 | 4 GPU, 6 KB | safe push is fastest among the current vLLM/push standalone paths |
 | 4 GPU, larger messages | be cautious with all-to-all push-like traffic on this topology |
 | Ring LL | predictable but serialized; dominated by `readLL spin` |
-| NCCL Ring LL | includes both ring serialization and NCCL framework overhead |
+| NCCL Ring LL | includes ring serialization plus NCCL generic/control overhead |
 
 The key distinction:
 
@@ -322,6 +343,6 @@ vLLM oneshot: parallel peer-read fan-in + global barriers, out-of-place safe
 vLLM twoshot: two-stage partitioned exchange, better than oneshot at 4-GPU 6 KB
 Safe push: posted writes + local polling, graph-repeat safe in this benchmark
 Ring LL: serialized neighbor handoff, readLL spin dominates
-NCCL: robust general implementation, but adds framework overhead beyond the
+NCCL: robust general implementation, but adds generic/control work beyond the
       raw Ring LL primitive
 ```

@@ -11,7 +11,7 @@ For small messages, the difference is mostly protocol latency, not arithmetic:
 ```text
 oneshot: one global sync, then every rank reads all peers in parallel
 Ring LL: data/flags advance through the ring one neighbor hop at a time
-NCCL Ring LL: Ring LL protocol plus NCCL framework/generalization overhead
+NCCL Ring LL: Ring LL protocol plus NCCL generic/control work around the primitive
 ```
 
 So custom oneshot wins when the message is small enough that parallel peer reads
@@ -42,7 +42,7 @@ variant at every size. The robust conclusion is:
 ```text
 TP=2: standalone Ring LL and oneshot are close
 4 GPU tiny message: oneshot often wins because ring serialization grows
-full NCCL Ring LL: much slower than standalone due to framework overhead
+full NCCL Ring LL: slower than standalone due to generic/control overhead too
 ```
 
 ## TP=2 Case
@@ -192,7 +192,22 @@ Standalone Ring LL 4 GPU: 8.3 us
 NCCL Ring LL 4 GPU:       17.2 us
 ```
 
-The extra NCCL cost comes from:
+We now also have an instrumented NCCL Ring LL counter run in
+`nccl_ringll_internal_breakdown.md`. For the instrumented path, the largest
+named LL primitive at 6 KB is `readLL`, while `waitSend` is not a bottleneck:
+
+| Size | GPUs | readLL % | waitSend % | storeLL % | barrier % | other % |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 KB | 2 | 6.13 | 1.02 | 0.45 | 1.38 | 91.02 |
+| 1 KB | 4 | 3.98 | 1.27 | 0.11 | 1.76 | 92.89 |
+| 6 KB | 2 | 33.81 | 0.82 | 2.38 | 1.18 | 61.80 |
+| 6 KB | 4 | 20.35 | 1.12 | 0.59 | 1.54 | 76.41 |
+
+These are aggregate thread-cycle percentages from an instrumented NCCL build,
+not production wall time. The large `other` bucket includes generic loop/control
+work, local load/reduce work, uninstrumented pieces, and instrumentation cost.
+
+So the extra NCCL cost likely comes from:
 
 ```text
 channel/work management
@@ -206,7 +221,7 @@ So there are two separate reasons for slowness:
 
 ```text
 Ring protocol reason: readLL waits are serialized
-NCCL runtime reason: production framework overhead around the primitive
+NCCL implementation reason: generic/control work around the primitive
 ```
 
 ## Practical Takeaway
@@ -219,4 +234,5 @@ grow with rank count. Oneshot can win because it converts the operation into one
 sync plus parallel peer reads.
 
 For full NCCL Ring LL, expect additional overhead over standalone Ring LL. That
-gap is NCCL framework/generalization cost, not just the LL protocol itself.
+gap is NCCL generic/control cost plus uninstrumented primitive work, not just
+the LL protocol itself.
