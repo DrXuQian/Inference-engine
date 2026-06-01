@@ -2,7 +2,7 @@
 """
 Extract GEMM kernels from trace and simulate FP8/FP4 speedup.
 
-Reads nsys/asys sqlite trace, classifies kernels as GEMM vs non-GEMM,
+Reads nsys/asys sqlite trace, classifies kernels as GEMM vs non-Compute,
 then computes projected time if GEMMs were run at FP8 (2x) or FP4 (4x).
 
 Usage:
@@ -17,8 +17,9 @@ import sqlite3
 import sys
 
 
-# GEMM kernel name patterns
-GEMM_PATTERNS = [
+# Compute kernel name patterns (GEMM + FlashAttention)
+COMPUTE_PATTERNS = [
+    # GEMM / matmul
     r"gemm", r"gemv", r"cutlass", r"cublas", r"cublasLt",
     r"sm\d+_xmma", r"volta_.*gemm", r"ampere_.*gemm", r"hopper_.*gemm",
     r"matmul", r"dot_kernel", r"batch_matmul",
@@ -26,8 +27,12 @@ GEMM_PATTERNS = [
     r"marlin", r"gptq",
     # Triton matmul
     r"triton.*matmul", r"tt_dot",
+    # FlashAttention / SDPA (fused QK^T + softmax + AV)
+    r"flash_fwd", r"flash_bwd", r"fmha", r"efficient_attention",
+    r"scaled_dot_product", r"sdpa",
 ]
-GEMM_RE = re.compile("|".join(GEMM_PATTERNS), re.IGNORECASE)
+# Keep GEMM_RE name for backward compat (now includes FA)
+GEMM_RE = re.compile("|".join(COMPUTE_PATTERNS), re.IGNORECASE)
 
 
 def find_kernel_table(cursor):
@@ -164,17 +169,17 @@ def analyze(sqlite_path, nvtx_filter=None, fp8_speedup=2.0, fp4_speedup=4.0, top
     print(f"{'='*70}")
     print(f"  Total kernel time: {total_time/1e6:.2f} ms")
     print(f"  Wall time:         {wall_ns/1e6:.2f} ms")
-    print(f"  GEMM kernels:      {len(gemm_kernels):>6d} ({gemm_time/1e6:.2f} ms, {gemm_time/total_time*100:.1f}%)")
+    print(f"  Compute (GEMM+FA):      {len(gemm_kernels):>6d} ({gemm_time/1e6:.2f} ms, {gemm_time/total_time*100:.1f}%)")
     print(f"  Other kernels:     {len(other_kernels):>6d} ({other_time/1e6:.2f} ms, {other_time/total_time*100:.1f}%)")
 
-    # Top GEMM kernels by total time
+    # Top compute kernels (GEMM+FA) by total time
     from collections import defaultdict
     gemm_by_name = defaultdict(lambda: [0, 0])
     for dur, name in gemm_kernels:
         gemm_by_name[name][0] += dur
         gemm_by_name[name][1] += 1
 
-    print(f"\n  Top {top_n} GEMM kernels:")
+    print(f"\n  Top {top_n} Compute (GEMM+FA):")
     print(f"  {'Kernel':<60s} {'Time(ms)':>10s} {'Count':>6s} {'%':>6s}")
     print(f"  {'-'*85}")
     sorted_gemm = sorted(gemm_by_name.items(), key=lambda x: -x[1][0])
@@ -182,13 +187,13 @@ def analyze(sqlite_path, nvtx_filter=None, fp8_speedup=2.0, fp4_speedup=4.0, top
         short = name[:58] + ".." if len(name) > 60 else name
         print(f"  {short:<60s} {t/1e6:>10.2f} {cnt:>6d} {t/total_time*100:>5.1f}%")
 
-    # Top non-GEMM
+    # Top non-Compute
     other_by_name = defaultdict(lambda: [0, 0])
     for dur, name in other_kernels:
         other_by_name[name][0] += dur
         other_by_name[name][1] += 1
 
-    print(f"\n  Top {top_n} non-GEMM kernels:")
+    print(f"\n  Top {top_n} non-Compute (GEMM+FA):")
     print(f"  {'Kernel':<60s} {'Time(ms)':>10s} {'Count':>6s} {'%':>6s}")
     print(f"  {'-'*85}")
     sorted_other = sorted(other_by_name.items(), key=lambda x: -x[1][0])
@@ -198,9 +203,9 @@ def analyze(sqlite_path, nvtx_filter=None, fp8_speedup=2.0, fp4_speedup=4.0, top
 
     # Projected times
     print(f"\n{'='*70}")
-    print(f"Projected Times (GEMM scaling, non-GEMM unchanged)")
+    print(f"Projected Times (Compute scaling, non-Compute unchanged)")
     print(f"{'='*70}")
-    print(f"  {'Precision':<12s} {'GEMM(ms)':>10s} {'Other(ms)':>10s} {'Total(ms)':>10s} {'Speedup':>8s}")
+    print(f"  {'Precision':<12s} {'Compute':>10s} {'Other(ms)':>10s} {'Total(ms)':>10s} {'Speedup':>8s}")
     print(f"  {'-'*55}")
 
     for label, speedup in [("FP16 (base)", 1.0), (f"FP8 ({fp8_speedup}x)", fp8_speedup),

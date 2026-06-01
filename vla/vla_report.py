@@ -216,14 +216,14 @@ def main():
     }
 
     # Component breakdown
-    print(f"\n{'Comp':<6s} {'GEMM':>7s} {'Other':>7s} {'Total':>8s} {'GEMM%':>5s} "
+    print(f"\n{'Comp':<6s} {'Compute':>7s} {'Other':>7s} {'Total':>8s} {'Comp%':>5s} "
           f"{'GFLOPs':>7s} {'TFLOPS':>6s} {'MFU':>5s} {'WeightMB':>8s} {'BW%':>5s}")
     print("-" * 80)
     components = {"VIT": vit, "LLM": llm, "DiT": dit}
     total_ms = 0
     for name, c in components.items():
         if c:
-            pct = c["gemm_ms"] / c["total_ms"] * 100 if c["total_ms"] > 0 else 0
+            pct = c["gemm_ms"] / c["total_ms"] * 100 if c["total_ms"] > 0 else 0  # gemm_ms includes FA now
             gflops = comp_flops[name] / 1e9
             tflops = comp_flops[name] / 1e12 / (c["total_ms"] / 1000) if c["total_ms"] > 0 else 0
             mfu = tflops / peak * 100 if peak > 0 else 0
