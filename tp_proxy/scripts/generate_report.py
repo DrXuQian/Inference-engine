@@ -311,9 +311,13 @@ def main():
                     help="Single GPU peak FP16 TFLOPS (e.g. A100=312, H100=990)")
     ap.add_argument("--peak-bw", type=float, default=0,
                     help="Single GPU peak memory bandwidth GB/s (e.g. A100=2039, H100=3350)")
+    ap.add_argument("--label", choices=["ai_station", "vla"], default=None,
+                    help="Filter scenarios: ai_station=01-06 only, vla=07 only")
     args = ap.parse_args()
     rd = args.results_dir
     fmt = args.format
+    show_ai = args.label != "vla"
+    show_vla = args.label != "ai_station"
 
     if fmt == "csv":
         print("场景,模型,TTFT(ms),TPOT(ms),TPS(tok/s),总延迟(ms)")
@@ -321,171 +325,177 @@ def main():
     # =========================================================================
     # 1. Code Completion (1.5K input, 50 output)
     # =========================================================================
-    d01 = load_json(os.path.join(rd, "01_code_completion_35B", "compensated.json"))
-    m01 = get_metrics(d01) if d01 else None
-    print_scenario(
-        "Code Completion (1.5K input, 50 output)",
-        [("Qwen3.5-35B-A3B-GPTQ-INT4", m01)],
-        fmt,
-    )
+    if show_ai:
+        d01 = load_json(os.path.join(rd, "01_code_completion_35B", "compensated.json"))
+        m01 = get_metrics(d01) if d01 else None
+        print_scenario(
+            "Code Completion (1.5K input, 50 output)",
+            [("Qwen3.5-35B-A3B-GPTQ-INT4", m01)],
+            fmt,
+        )
 
     # =========================================================================
     # 2. Chat Q&A (25K input, 1K output)
     # =========================================================================
-    d02 = load_json(os.path.join(rd, "02_chat_27B", "compensated.json"))
-    m02 = get_metrics(d02) if d02 else None
+    if show_ai:
+        d02 = load_json(os.path.join(rd, "02_chat_27B", "compensated.json"))
+        m02 = get_metrics(d02) if d02 else None
 
-    d03_tp1 = load_json(os.path.join(rd, "03_chat_122B", "tp1", "compensated.json"))
-    m03_tp1 = get_metrics(d03_tp1) if d03_tp1 else None
+        d03_tp1 = load_json(os.path.join(rd, "03_chat_122B", "tp1", "compensated.json"))
+        m03_tp1 = get_metrics(d03_tp1) if d03_tp1 else None
 
-    d03_tp2 = load_json(os.path.join(rd, "03_chat_122B", "tp2", "compensated.json"))
-    m03_tp2 = get_metrics(d03_tp2) if d03_tp2 else None
+        d03_tp2 = load_json(os.path.join(rd, "03_chat_122B", "tp2", "compensated.json"))
+        m03_tp2 = get_metrics(d03_tp2) if d03_tp2 else None
 
-    print_scenario(
-        "Chat Q&A (25K input, 1K output)",
-        [
-            ("Qwen3.5-27B", m02),
-            ("Qwen3.5-122B-A10B-GPTQ-INT4 TP=1", m03_tp1),
-            ("Qwen3.5-122B-A10B-GPTQ-INT4 TP=2", m03_tp2),
-        ],
-        fmt,
-    )
+        print_scenario(
+            "Chat Q&A (25K input, 1K output)",
+            [
+                ("Qwen3.5-27B", m02),
+                ("Qwen3.5-122B-A10B-GPTQ-INT4 TP=1", m03_tp1),
+                ("Qwen3.5-122B-A10B-GPTQ-INT4 TP=2", m03_tp2),
+            ],
+            fmt,
+        )
 
     # =========================================================================
     # 3. Agent Full Task (100K first + 9×20K hit)
     # =========================================================================
-    # First call (100K input, 3K output)
-    agent_first = {}
-    for scenario, tp_list in [("04_agent_122B", [1, 2]), (("05_agent_397B", [2]))]:
-        for tp in tp_list:
-            d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
-            agent_first[(scenario, tp)] = get_metrics(d) if d else None
+    if show_ai:
+        # First call (100K input, 3K output)
+        agent_first = {}
+        for scenario, tp_list in [("04_agent_122B", [1, 2]), (("05_agent_397B", [2]))]:
+            for tp in tp_list:
+                d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
+                agent_first[(scenario, tp)] = get_metrics(d) if d else None
 
-    # Hit calls (20K input, 3K output)
-    agent_hit = {}
-    for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), (("05b_agent_hit_397B", [2]))]:
-        for tp in tp_list:
-            d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
-            agent_hit[(scenario, tp)] = get_metrics(d) if d else None
+        # Hit calls (20K input, 3K output)
+        agent_hit = {}
+        for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), (("05b_agent_hit_397B", [2]))]:
+            for tp in tp_list:
+                d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
+                agent_hit[(scenario, tp)] = get_metrics(d) if d else None
 
-    # Map hit scenarios to first-call scenarios
-    hit_map = {
-        ("04b_agent_hit_122B", 1): ("04_agent_122B", 1),
-        ("04b_agent_hit_122B", 2): ("04_agent_122B", 2),
-        ("05b_agent_hit_397B", 2): ("05_agent_397B", 2),
-    }
+        # Map hit scenarios to first-call scenarios
+        hit_map = {
+            ("04b_agent_hit_122B", 1): ("04_agent_122B", 1),
+            ("04b_agent_hit_122B", 2): ("04_agent_122B", 2),
+            ("05b_agent_hit_397B", 2): ("05_agent_397B", 2),
+        }
 
-    # Model display names
-    model_names = {
-        ("04_agent_122B", 1): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=1",
-        ("04_agent_122B", 2): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=2",
-        ("05_agent_397B", 2): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=2",
-    }
+        # Model display names
+        model_names = {
+            ("04_agent_122B", 1): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=1",
+            ("04_agent_122B", 2): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=2",
+            ("05_agent_397B", 2): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=2",
+        }
 
-    # Compute full task total latency: first + 9 × hit
-    if fmt == "markdown":
-        print(f"\n### Agent Full Task (1M tokens = 100K first + 9×100K@80%hit)")
-        print(f"\n**全任务总延迟:**\n")
-        print(f"| 模型 | 第一次(100K) | 后续×9(20K) | 全任务总延迟 |")
-        print(f"|------|-------------|-------------|-------------|")
-    else:
-        print()
-
-    for first_key in [("04_agent_122B", 1), ("04_agent_122B", 2),
-                       ("05_agent_397B", 2)]:
-        hit_key = [hk for hk, fk in hit_map.items() if fk == first_key]
-        hit_key = hit_key[0] if hit_key else None
-
-        mf = agent_first.get(first_key)
-        mh = agent_hit.get(hit_key) if hit_key else None
-        name = model_names[first_key]
-
-        if mf and mh:
-            full_total = mf["total"] + 9 * mh["total"]
-            if fmt == "csv":
-                print(f"Agent全任务,{name},{mf['total']:.1f},{mh['total']:.1f},{full_total:.1f},")
-            else:
-                print(f"| {name} | {fmt_ms(mf['total'])} | {fmt_ms(mh['total'])} | {fmt_ms(full_total)} |")
+        # Compute full task total latency: first + 9 × hit
+        if fmt == "markdown":
+            print(f"\n### Agent Full Task (1M tokens = 100K first + 9×100K@80%hit)")
+            print(f"\n**全任务总延迟:**\n")
+            print(f"| 模型 | 第一次(100K) | 后续×9(20K) | 全任务总延迟 |")
+            print(f"|------|-------------|-------------|-------------|")
         else:
-            if fmt == "csv":
-                print(f"Agent全任务,{name},N/A,N/A,N/A,")
+            print()
+
+        for first_key in [("04_agent_122B", 1), ("04_agent_122B", 2),
+                           ("05_agent_397B", 2)]:
+            hit_key = [hk for hk, fk in hit_map.items() if fk == first_key]
+            hit_key = hit_key[0] if hit_key else None
+
+            mf = agent_first.get(first_key)
+            mh = agent_hit.get(hit_key) if hit_key else None
+            name = model_names[first_key]
+
+            if mf and mh:
+                full_total = mf["total"] + 9 * mh["total"]
+                if fmt == "csv":
+                    print(f"Agent全任务,{name},{mf['total']:.1f},{mh['total']:.1f},{full_total:.1f},")
+                else:
+                    print(f"| {name} | {fmt_ms(mf['total'])} | {fmt_ms(mh['total'])} | {fmt_ms(full_total)} |")
             else:
-                print(f"| {name} | N/A | N/A | N/A |")
+                if fmt == "csv":
+                    print(f"Agent全任务,{name},N/A,N/A,N/A,")
+                else:
+                    print(f"| {name} | N/A | N/A | N/A |")
 
-    # First call detail
-    print_scenario(
-        "Agent 第一次调用 (100K input, 3K output)",
-        [(model_names[k], agent_first[k]) for k in
-         [("04_agent_122B", 1), ("04_agent_122B", 2),
-          ("05_agent_397B", 2)]],
-        fmt,
-    )
+        # First call detail
+        print_scenario(
+            "Agent 第一次调用 (100K input, 3K output)",
+            [(model_names[k], agent_first[k]) for k in
+             [("04_agent_122B", 1), ("04_agent_122B", 2),
+              ("05_agent_397B", 2)]],
+            fmt,
+        )
 
-    # Hit call detail
-    hit_names = {
-        ("04b_agent_hit_122B", 1): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=1",
-        ("04b_agent_hit_122B", 2): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=2",
-        ("05b_agent_hit_397B", 2): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=2",
-    }
-    print_scenario(
-        "Agent 后续调用 (20K input@80%hit, 3K output)",
-        [(hit_names[k], agent_hit[k]) for k in
-         [("04b_agent_hit_122B", 1), ("04b_agent_hit_122B", 2),
-          ("05b_agent_hit_397B", 2)]],
-        fmt,
-    )
+        # Hit call detail
+        hit_names = {
+            ("04b_agent_hit_122B", 1): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=1",
+            ("04b_agent_hit_122B", 2): "Qwen3.5-122B-A10B-GPTQ-INT4 TP=2",
+            ("05b_agent_hit_397B", 2): "Qwen3.5-397B-A17B-GPTQ-INT4 TP=2",
+        }
+        print_scenario(
+            "Agent 后续调用 (20K input@80%hit, 3K output)",
+            [(hit_names[k], agent_hit[k]) for k in
+             [("04b_agent_hit_122B", 1), ("04b_agent_hit_122B", 2),
+              ("05b_agent_hit_397B", 2)]],
+            fmt,
+        )
 
     # =========================================================================
     # 4. Batch Sweep (04c/05c)
     # =========================================================================
-    batch_rows_122b = []
-    batch_rows_397b = []
-    for b in [1, 2, 4, 8]:
-        for tp, rows in [(1, batch_rows_122b), (2, batch_rows_122b)]:
-            d = load_json(os.path.join(rd, "04c_agent_batch_122B", f"tp{tp}",
+    if show_ai:
+        batch_rows_122b = []
+        batch_rows_397b = []
+        for b in [1, 2, 4, 8]:
+            for tp, rows in [(1, batch_rows_122b), (2, batch_rows_122b)]:
+                d = load_json(os.path.join(rd, "04c_agent_batch_122B", f"tp{tp}",
+                                           f"compensated_batch{b}.json"))
+                m = get_metrics(d) if d else None
+                rows.append((f"TP={tp} batch={b}", m))
+            d = load_json(os.path.join(rd, "05c_agent_batch_397B", "tp2",
                                        f"compensated_batch{b}.json"))
             m = get_metrics(d) if d else None
-            rows.append((f"TP={tp} batch={b}", m))
-        d = load_json(os.path.join(rd, "05c_agent_batch_397B", "tp2",
-                                   f"compensated_batch{b}.json"))
-        m = get_metrics(d) if d else None
-        batch_rows_397b.append((f"TP=2 batch={b}", m))
+            batch_rows_397b.append((f"TP=2 batch={b}", m))
 
-    if any(m for _, m in batch_rows_122b):
-        print_scenario(
-            "Agent Batch Sweep 122B (100K input, 3K output)",
-            batch_rows_122b, fmt)
-    if any(m for _, m in batch_rows_397b):
-        print_scenario(
-            "Agent Batch Sweep 397B (100K input, 3K output)",
-            batch_rows_397b, fmt)
+        if any(m for _, m in batch_rows_122b):
+            print_scenario(
+                "Agent Batch Sweep 122B (100K input, 3K output)",
+                batch_rows_122b, fmt)
+        if any(m for _, m in batch_rows_397b):
+            print_scenario(
+                "Agent Batch Sweep 397B (100K input, 3K output)",
+                batch_rows_397b, fmt)
 
     # =========================================================================
     # 5. RAG Repo Understanding (800K input, 3K output)
     # =========================================================================
-    d06 = load_json(os.path.join(rd, "06_rag_35B", "compensated.json"))
-    m06 = get_metrics(d06) if d06 else None
-    print_scenario(
-        "RAG Repo Understanding (800K input, 3K output)",
-        [("Qwen3.5-35B-A3B-GPTQ-INT4", m06)],
-        fmt,
-    )
+    if show_ai:
+        d06 = load_json(os.path.join(rd, "06_rag_35B", "compensated.json"))
+        m06 = get_metrics(d06) if d06 else None
+        print_scenario(
+            "RAG Repo Understanding (800K input, 3K output)",
+            [("Qwen3.5-35B-A3B-GPTQ-INT4", m06)],
+            fmt,
+        )
 
     # =========================================================================
     # 6. Qwen3-30B-A3B (1.5K input, 200/500 output)
     # =========================================================================
-    d07_200 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "compensated_200.json"))
-    m07_200 = get_metrics(d07_200) if d07_200 else None
-    d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "compensated_500.json"))
-    m07_500 = get_metrics(d07_500) if d07_500 else None
-    print_scenario(
-        "Qwen3-30B-A3B-GPTQ-INT4 (1.5K input)",
-        [
-            ("Output=200", m07_200),
-            ("Output=500", m07_500),
-        ],
-        fmt,
-    )
+    if show_vla:
+        d07_200 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "compensated_200.json"))
+        m07_200 = get_metrics(d07_200) if d07_200 else None
+        d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "compensated_500.json"))
+        m07_500 = get_metrics(d07_500) if d07_500 else None
+        print_scenario(
+            "Qwen3-30B-A3B-GPTQ-INT4 (1.5K input)",
+            [
+                ("Output=200", m07_200),
+                ("Output=500", m07_500),
+            ],
+            fmt,
+        )
 
     # =========================================================================
     # 5. Prefill MFU + Decode Bandwidth Utilization
@@ -514,6 +524,12 @@ def main():
                 (f"04c 122B TP=2 B={b}", "04c_agent_batch_122B", "tp2", 102400, 3072, 2, b))
             scenario_defs.append(
                 (f"05c 397B TP=2 B={b}", "05c_agent_batch_397B", "tp2", 102400, 3072, 2, b))
+
+        # Filter scenario_defs based on --label
+        if not show_vla:
+            scenario_defs = [s for s in scenario_defs if not s[1].startswith("07_")]
+        if not show_ai:
+            scenario_defs = [s for s in scenario_defs if s[1].startswith("07_")]
 
         if fmt == "markdown":
             print(f"\n### Prefill MFU & Decode Bandwidth Utilization")
