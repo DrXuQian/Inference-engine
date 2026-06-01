@@ -241,16 +241,20 @@ ttft_w = t.get('ttft_wall_ms', 0)
 print(f'    [trace] TTFT_kernel={ttft_k:.2f}ms  TTFT_wall={ttft_w:.2f}ms  TPOT={tpot:.4f}ms')
 
 # Decode BW utilization for Qwen3-30B-A3B-GPTQ-Int4
-# A3B = 3B active params per token, GPTQ-Int4 = 0.5B/param
-active_params = 3e9  # from model name A3B
-bytes_per_param = 0.5  # GPTQ-Int4
-weight_gb = active_params * bytes_per_param / 1e9  # 1.5 GB
+# MoE: 48L, moe_intermediate=768/expert, top-8/128, GPTQ-Int4
+H=2048; qd=32*128; kvd=4*128
+moe_ffn=768; top_k=8; layers=48
+attn = H*qd + H*kvd + H*kvd + qd*H  # 18.9M
+expert = 3 * H * moe_ffn              # 4.72M per expert
+active_per_layer = attn + top_k * expert  # 56.6M
+active_params = active_per_layer * layers  # ~2.72B
+weight_gb = active_params * 0.5 / 1e9  # INT4
 peak_bw = 680  # GB/s
-bw_floor_ms = weight_gb / peak_bw * 1000  # 2.2 ms
+bw_floor_ms = weight_gb / peak_bw * 1000
 
 if tpot > 0:
     bw_util = bw_floor_ms / tpot * 100
-    print(f'    [decode BW] active={active_params/1e9:.0f}B params × {bytes_per_param}B = {weight_gb:.2f}GB/step')
+    print(f'    [decode BW] active={active_params/1e9:.2f}B × INT4 = {weight_gb:.2f}GB/step')
     print(f'    [decode BW] BW_floor={bw_floor_ms:.2f}ms @ {peak_bw}GB/s  TPOT={tpot:.2f}ms  BW_util={bw_util:.0f}%')
 " 2>/dev/null || true
     fi
