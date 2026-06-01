@@ -240,7 +240,7 @@ ttft_w = t.get('ttft_wall_ms', 0)
 
 print(f'    [trace] TTFT_kernel={ttft_k:.2f}ms  TTFT_wall={ttft_w:.2f}ms  TPOT={tpot:.4f}ms')
 
-# Decode BW utilization for Qwen3-30B-A3B-GPTQ-Int4
+# Decode BW utilization for Qwen3-30B-A3B-GPTQ-Int4 (single GPU, TP=1)
 # MoE: 48L, moe_intermediate=768/expert, top-8/128, GPTQ-Int4
 H=2048; qd=32*128; kvd=4*128
 moe_ffn=768; top_k=8; layers=48

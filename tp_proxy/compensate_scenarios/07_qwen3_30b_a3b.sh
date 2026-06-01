@@ -44,13 +44,13 @@ ttft_w = t.get('ttft_wall_ms', 0)
 print(f'  TTFT: kernel={ttft_k:.2f}ms  wall={ttft_w:.2f}ms')
 print(f'  TPOT: {tpot:.4f}ms')
 
-# BW util: Qwen3-30B-A3B active=2.72B, INT4=0.5B/param
-H=2048; qd=32*128; kvd=4*128; moe_ffn=768; top_k=8; layers=48
+# BW util: Qwen3-30B-A3B active=2.72B, INT4=0.5B/param, TP=$TP
+H=2048; qd=32*128; kvd=4*128; moe_ffn=768; top_k=8; layers=48; tp=$TP
 active = (H*qd+H*kvd+H*kvd+qd*H + top_k*3*H*moe_ffn) * layers
-weight_gb = active * 0.5 / 1e9
+weight_gb = active * 0.5 / 1e9 / tp  # per-GPU weight read
 if tpot > 0:
     bw_floor = weight_gb / 680 * 1000
-    print(f'  Decode BW: {active/1e9:.2f}B active x INT4 = {weight_gb:.2f}GB')
+    print(f'  Decode BW: {active/1e9:.2f}B active / TP{tp} x INT4 = {weight_gb:.2f}GB/GPU')
     print(f'  BW floor={bw_floor:.2f}ms @ 680GB/s  BW_util={bw_floor/tpot*100:.0f}%')
 " 2>/dev/null || true
     done
