@@ -210,7 +210,7 @@ for OUTLEN in $OUTPUT_LENS; do
     echo ""
 done
 
-# Summary
+# Summary with decode BW utilization
 echo "============================================"
 echo "  Results: $OUT_DIR"
 echo ""
@@ -227,13 +227,33 @@ print(f'    [wall]  TTFT={d[\"ttft_median_ms\"]:.2f}ms  TPOT={d[\"tpot_median_ms
 " 2>/dev/null || true
     fi
 
-    # Kernel time (from trace)
+    # Kernel time (from trace) + decode BW utilization
     if [ -f "$RUN_DIR/trace_result.json" ]; then
         python3 -c "
-import json
+import json, sys
+
 d = json.load(open('$RUN_DIR/trace_result.json'))
 t = d.get('tail', {})
-print(f'    [trace] TTFT_kernel={t.get(\"ttft_kernel_ms\",\"?\"):.2f}ms  TTFT_wall={t.get(\"ttft_wall_ms\",\"?\"):.2f}ms  TPOT={t.get(\"tpot_ms\",\"?\"):.4f}ms')
+tpot = t.get('tpot_ms', 0)
+ttft_k = t.get('ttft_kernel_ms', 0)
+ttft_w = t.get('ttft_wall_ms', 0)
+
+print(f'    [trace] TTFT_kernel={ttft_k:.2f}ms  TTFT_wall={ttft_w:.2f}ms  TPOT={tpot:.4f}ms')
+
+# Decode BW utilization for Qwen3-30B-A3B-GPTQ-Int4
+# MoE: 48L, top-8/128 experts, GPTQ-Int4 = 0.5B/param
+H=2048; qd=32*128; kvd=4*128; ffn=6144; layers=48; top_k=8
+attn = H*qd + H*kvd + H*kvd + qd*H
+expert = 3 * H * ffn
+per_layer = attn + top_k * expert
+weight_gb = per_layer * layers * 0.5 / 1e9  # INT4
+peak_bw = 680  # GB/s
+bw_floor_ms = weight_gb / peak_bw * 1000
+
+if tpot > 0:
+    bw_util = bw_floor_ms / tpot * 100
+    print(f'    [decode BW] weight={weight_gb:.2f}GB/step (INT4, top-8 MoE)')
+    print(f'    [decode BW] BW_floor={bw_floor_ms:.2f}ms  TPOT={tpot:.2f}ms  BW_util={bw_util:.0f}%')
 " 2>/dev/null || true
     fi
 done
