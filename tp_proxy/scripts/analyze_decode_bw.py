@@ -45,6 +45,8 @@ def main():
     ap.add_argument("--moe-intermediate", type=int, default=768)
     ap.add_argument("--num-experts", type=int, default=128)
     ap.add_argument("--top-k", type=int, default=8)
+    ap.add_argument("--shared-intermediate", type=int, default=6144,
+                    help="Shared expert intermediate_size (0 if none)")
     ap.add_argument("--layers", type=int, default=48)
     args = ap.parse_args()
 
@@ -133,7 +135,7 @@ def main():
         dur = evt[1]
 
         if marlin_re.search(name):
-            cat = "marlin (INT4 attn GEMV)"
+            cat = "marlin (INT4 attn+shared)"
         elif moe_re.search(name):
             cat = "moe_wna16 (MoE expert)"
         elif fa_re.search(name):
@@ -156,20 +158,23 @@ def main():
     moe_ffn = args.moe_intermediate
     top_k = args.top_k
 
-    # Marlin: attention Q/K/V/O projections, INT4 packed (0.5B/param effective)
-    # Per layer: Q(H→qd) + K(H→kvd) + V(H→kvd) + O(qd→H) params
+    # Marlin: attention Q/K/V/O projections + shared expert, INT4 packed
     attn_params_per_layer = (H * qd + H * kvd + H * kvd + qd * H)
     attn_total_params = attn_params_per_layer * L / tp
-    marlin_bytes = attn_total_params * 0.5  # INT4
+    # Shared expert (dense FFN, always active): gate+up+down
+    shared_params = 0
+    if args.shared_intermediate > 0:
+        shared_params = 3 * H * args.shared_intermediate * L / tp
+    marlin_bytes = (attn_total_params + shared_params) * 0.5  # INT4
 
-    # MoE: top-k experts, each has gate+up+down, INT4
+    # MoE: top-k routed experts, each has gate+up+down, INT4
     expert_params = 3 * H * moe_ffn
     moe_params_per_layer = top_k * expert_params
     moe_total_params = moe_params_per_layer * L / tp
     moe_bytes = moe_total_params * 0.5  # INT4
 
     weight_bytes = {
-        "marlin (INT4 attn GEMV)": marlin_bytes,
+        "marlin (INT4 attn+shared)": marlin_bytes,
         "moe_wna16 (MoE expert)": moe_bytes,
     }
 
@@ -186,7 +191,7 @@ def main():
     print(f"{'Category':<30s} {'Time(ms)':>8s} {'%':>6s} {'Count':>6s} {'Weight':>8s} {'BW(GB/s)':>9s} {'BW%':>6s}")
     print("-" * 80)
 
-    for cat in ["marlin (INT4 attn GEMV)", "moe_wna16 (MoE expert)", "flash_attn", "other"]:
+    for cat in ["marlin (INT4 attn+shared)", "moe_wna16 (MoE expert)", "flash_attn", "other"]:
         if cat not in categories:
             continue
         info = categories[cat]
@@ -210,7 +215,7 @@ def main():
           f"{total_wb/1e9:.2f}GB {total_bw:>8.1f} {total_bw/args.peak_bw*100:>5.1f}%")
 
     # Top kernels per category
-    for cat in ["marlin (INT4 attn GEMV)", "moe_wna16 (MoE expert)", "flash_attn", "other"]:
+    for cat in ["marlin (INT4 attn+shared)", "moe_wna16 (MoE expert)", "flash_attn", "other"]:
         if cat not in categories:
             continue
         info = categories[cat]

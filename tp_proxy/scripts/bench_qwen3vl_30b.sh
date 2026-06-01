@@ -241,13 +241,13 @@ ttft_w = t.get('ttft_wall_ms', 0)
 print(f'    [trace] TTFT_kernel={ttft_k:.2f}ms  TTFT_wall={ttft_w:.2f}ms  TPOT={tpot:.4f}ms')
 
 # Decode BW utilization for Qwen3-30B-A3B-GPTQ-Int4 (single GPU, TP=1)
-# MoE: 48L, moe_intermediate=768/expert, top-8/128, GPTQ-Int4
+# attn + shared expert (6144) + MoE top-8 (768/expert)
 H=2048; qd=32*128; kvd=4*128
-moe_ffn=768; top_k=8; layers=48
-attn = H*qd + H*kvd + H*kvd + qd*H  # 18.9M
-expert = 3 * H * moe_ffn              # 4.72M per expert
-active_per_layer = attn + top_k * expert  # 56.6M
-active_params = active_per_layer * layers  # ~2.72B
+moe_ffn=768; shared_ffn=6144; top_k=8; layers=48
+attn = H*qd + H*kvd + H*kvd + qd*H
+shared = 3 * H * shared_ffn
+moe = top_k * 3 * H * moe_ffn
+active_params = (attn + shared + moe) * layers
 weight_gb = active_params * 0.5 / 1e9  # INT4
 peak_bw = 680  # GB/s
 bw_floor_ms = weight_gb / peak_bw * 1000
