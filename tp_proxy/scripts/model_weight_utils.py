@@ -272,17 +272,19 @@ def rescale_metrics(metrics: dict, info: dict,
 
 def rescale_int4(metrics: dict, info: dict,
                  src_flops: float = 0, tgt_flops: float = 0,
-                 tgt_bw: float = 0) -> dict:
+                 tgt_bw: float = 0,
+                 src_bw: float = 0) -> dict:
     """Rescale to INT4 on target platform.
 
-    TTFT: scale with FLOPS ratio (same as BF16, compute-bound)
-    TPOT: use INT4 weight bytes / tgt_bw as BW floor
+    TTFT: scale with FLOPS ratio (compute-bound, same as BF16)
+    TPOT: first rescale BW (source→target), then apply INT4 weight scale
 
     Args:
         metrics: dict with ttft, tpot (measured on source in BF16)
         info: from decode_weight_bytes() (has int4_gb, int4_scale)
         src_flops/tgt_flops: for TTFT scaling
-        tgt_bw: target BW for INT4 TPOT floor
+        src_bw: source platform BW GB/s (for BW rescale)
+        tgt_bw: target platform BW GB/s
     """
     if not metrics:
         return None
@@ -290,18 +292,19 @@ def rescale_int4(metrics: dict, info: dict,
     ttft = metrics["ttft"]
     output_tokens = metrics.get("output_tokens", 64)
 
-    # TTFT: same scaling as BF16 (compute-bound, not affected by weight precision)
+    # TTFT: compute-bound → scale with FLOPS ratio
     if src_flops > 0 and tgt_flops > 0:
         ttft = ttft * (src_flops / tgt_flops)
 
-    # TPOT: BF16 TPOT × int4_scale (weight ratio)
-    tpot_bf16 = metrics["tpot"]
-    tpot_int4 = tpot_bf16 * info["int4_scale"]
+    # TPOT: 1) rescale BW to target, 2) apply INT4 weight ratio
+    tpot = metrics["tpot"]
+    if src_bw > 0 and tgt_bw > 0:
+        tpot = tpot * (src_bw / tgt_bw)  # BW rescale first
+    tpot_int4 = tpot * info["int4_scale"]  # then INT4 weight reduction
 
-    # If target BW given, also compute BW floor
+    # Clamp to BW floor (can't be faster than memory bandwidth allows)
     if tgt_bw > 0:
         bw_floor = info["int4_gb"] / tgt_bw * 1000
-        # Use max(scaled_tpot, bw_floor) — can't be faster than BW limit
         tpot_int4 = max(tpot_int4, bw_floor)
 
     tps = 1000 / tpot_int4 if tpot_int4 > 0 else 0

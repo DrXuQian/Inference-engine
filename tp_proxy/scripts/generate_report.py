@@ -525,8 +525,8 @@ def main():
             )
 
         # INT4 projected (always rescale if args given, otherwise same platform)
-        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb) if m07_200 else None
-        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb) if m07_500 else None
+        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb, sb) if m07_200 else None
+        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb, sb) if m07_500 else None
         int4_label = f"INT4 → Target ({tf}T/{tb}GB/s)" if has_rescale else "INT4 projected"
         print_scenario(
             f"Qwen3-30B-A3B {int4_label} (1.5K input)",
