@@ -33,12 +33,12 @@ KNOWN_MODELS = {
         "num_key_value_heads": 4,
         "head_dim": 128,
         "num_hidden_layers": 48,
-        "intermediate_size": 6144,        # shared expert
-        "moe_intermediate_size": 768,     # per routed expert
+        "shared_expert_intermediate_size": 0,  # NO shared expert
+        "moe_intermediate_size": 768,          # per routed expert
         "num_experts": 128,
         "num_experts_per_tok": 8,
         "vocab_size": 151936,
-        "quant_bytes_per_param": 2,       # BF16
+        "quant_bytes_per_param": 2,            # BF16
     },
     "qwen3-30b-a3b-gptq-int4": {
         "hidden_size": 2048,
@@ -46,12 +46,12 @@ KNOWN_MODELS = {
         "num_key_value_heads": 4,
         "head_dim": 128,
         "num_hidden_layers": 48,
-        "intermediate_size": 6144,
+        "shared_expert_intermediate_size": 0,
         "moe_intermediate_size": 768,
         "num_experts": 128,
         "num_experts_per_tok": 8,
         "vocab_size": 151936,
-        "quant_bytes_per_param": 0.5,     # GPTQ-INT4
+        "quant_bytes_per_param": 0.5,          # GPTQ-INT4
     },
 }
 
@@ -77,6 +77,7 @@ def load_model_config(path_or_name: str) -> dict:
             "head_dim": tc.get("head_dim", tc["hidden_size"] // tc["num_attention_heads"]),
             "num_hidden_layers": tc["num_hidden_layers"],
             "intermediate_size": tc.get("intermediate_size", 0),
+            "shared_expert_intermediate_size": tc.get("shared_expert_intermediate_size", 0),
             "moe_intermediate_size": tc.get("moe_intermediate_size", 0),
             "num_experts": tc.get("num_local_experts", tc.get("num_experts", 0)),
             "num_experts_per_tok": tc.get("num_experts_per_tok", 0),
@@ -119,7 +120,7 @@ def decode_weight_bytes(path_or_name: str, tp: int = 1,
 
     is_moe = cfg.get("num_experts", 0) > 0
     moe_ffn = cfg.get("moe_intermediate_size", 0)
-    shared_ffn = cfg.get("intermediate_size", 0)
+    shared_ffn = cfg.get("shared_expert_intermediate_size", 0)  # 0 if no shared expert
     top_k = cfg.get("num_experts_per_tok", 0)
     n_experts = cfg.get("num_experts", 0)
 
@@ -134,13 +135,16 @@ def decode_weight_bytes(path_or_name: str, tp: int = 1,
                              + H * kv_per_rank         # V
                              + (qd // tp) * H)         # O
 
-    # Shared expert: gate + up + down, col/row split by TP
-    if shared_ffn > 0 and is_moe:
+    # Shared expert or dense FFN
+    if shared_ffn > 0:
+        # MoE shared expert
         shared_params_per_layer = 3 * H * (shared_ffn // tp)
-    elif shared_ffn > 0:
-        # Dense model FFN
-        shared_params_per_layer = 3 * H * (shared_ffn // tp)
+    elif not is_moe:
+        # Dense model: use intermediate_size as FFN
+        dense_ffn = cfg.get("intermediate_size", H * 4)
+        shared_params_per_layer = 3 * H * (dense_ffn // tp)
     else:
+        # MoE without shared expert
         shared_params_per_layer = 0
 
     # MoE routed experts: top-k active, each col/row split by TP
@@ -153,9 +157,8 @@ def decode_weight_bytes(path_or_name: str, tp: int = 1,
     # Per-layer total
     layer_params = attn_params_per_layer + shared_params_per_layer + moe_params_per_layer
 
-    # lm_head: vocab × hidden, replicated (each GPU reads full)
-    # In our TP proxy: compensate divides lm_head time by tp
-    lm_head_params = V * H  # replicated
+    # lm_head: vocab × hidden, TP-split (each GPU reads vocab/tp × hidden)
+    lm_head_params = V * H // tp
 
     # Router: hidden × num_experts per layer, replicated
     router_params = H * n_experts * L if is_moe else 0
@@ -220,6 +223,97 @@ def print_decode_bw(info: dict, comp_tpot_ms: float = 0, peak_bw: float = 680):
         int4_tpot = comp_tpot_ms * info['int4_scale']
         int4_floor = info['int4_gb'] / peak_bw * 1000
         print(f"    est_TPOT: {int4_tpot:.2f}ms  BW_floor: {int4_floor:.2f}ms")
+
+
+def rescale_metrics(metrics: dict, info: dict,
+                    src_flops: float = 0, tgt_flops: float = 0,
+                    src_bw: float = 0, tgt_bw: float = 0) -> dict:
+    """Rescale TTFT/TPOT from source platform to target platform.
+
+    TTFT (prefill, compute-bound): scales with FLOPS ratio
+    TPOT (decode, BW-bound): scales with weight_bytes / BW
+
+    Args:
+        metrics: dict with ttft, tpot, tps, total, output_tokens
+        info: from decode_weight_bytes() (for INT4 projection)
+        src_flops: source platform peak TFLOPS (0 = no scale)
+        tgt_flops: target platform peak TFLOPS
+        src_bw: source platform peak BW GB/s (0 = no scale)
+        tgt_bw: target platform peak BW GB/s
+
+    Returns: new metrics dict with rescaled values
+    """
+    if not metrics:
+        return None
+
+    ttft = metrics["ttft"]
+    tpot = metrics["tpot"]
+    output_tokens = metrics.get("output_tokens", 64)
+
+    # TTFT: compute-bound → scale with FLOPS ratio
+    if src_flops > 0 and tgt_flops > 0:
+        ttft = ttft * (src_flops / tgt_flops)
+
+    # TPOT: BW-bound → scale with BW ratio
+    if src_bw > 0 and tgt_bw > 0:
+        tpot = tpot * (src_bw / tgt_bw)
+
+    tps = 1000 / tpot if tpot > 0 else 0
+    total = ttft + (output_tokens - 1) * tpot
+
+    return {
+        "ttft": ttft,
+        "tpot": tpot,
+        "tps": tps,
+        "total": total,
+        "output_tokens": output_tokens,
+    }
+
+
+def rescale_int4(metrics: dict, info: dict,
+                 src_flops: float = 0, tgt_flops: float = 0,
+                 tgt_bw: float = 0) -> dict:
+    """Rescale to INT4 on target platform.
+
+    TTFT: scale with FLOPS ratio (same as BF16, compute-bound)
+    TPOT: use INT4 weight bytes / tgt_bw as BW floor
+
+    Args:
+        metrics: dict with ttft, tpot (measured on source in BF16)
+        info: from decode_weight_bytes() (has int4_gb, int4_scale)
+        src_flops/tgt_flops: for TTFT scaling
+        tgt_bw: target BW for INT4 TPOT floor
+    """
+    if not metrics:
+        return None
+
+    ttft = metrics["ttft"]
+    output_tokens = metrics.get("output_tokens", 64)
+
+    # TTFT: same scaling as BF16 (compute-bound, not affected by weight precision)
+    if src_flops > 0 and tgt_flops > 0:
+        ttft = ttft * (src_flops / tgt_flops)
+
+    # TPOT: BF16 TPOT × int4_scale (weight ratio)
+    tpot_bf16 = metrics["tpot"]
+    tpot_int4 = tpot_bf16 * info["int4_scale"]
+
+    # If target BW given, also compute BW floor
+    if tgt_bw > 0:
+        bw_floor = info["int4_gb"] / tgt_bw * 1000
+        # Use max(scaled_tpot, bw_floor) — can't be faster than BW limit
+        tpot_int4 = max(tpot_int4, bw_floor)
+
+    tps = 1000 / tpot_int4 if tpot_int4 > 0 else 0
+    total = ttft + (output_tokens - 1) * tpot_int4
+
+    return {
+        "ttft": ttft,
+        "tpot": tpot_int4,
+        "tps": tps,
+        "total": total,
+        "output_tokens": output_tokens,
+    }
 
 
 if __name__ == "__main__":
