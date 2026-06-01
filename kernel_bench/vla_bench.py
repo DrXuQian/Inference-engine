@@ -22,10 +22,17 @@ Usage:
     python vla_bench.py --component vit           # VIT only
     python vla_bench.py --component dit           # DiT only
     python vla_bench.py --dtype bf16 --no-compile # eager mode
+    python vla_bench.py --cuda-graph              # CUDA Graph replay
 
-    # Under profiler
-    nsys profile -t cuda -o vla_trace python vla_bench.py
-    asys profile -t hggc,acdnn,acblas,hgtx -o vla_trace python vla_bench.py
+    # Under profiler (use --cuda-graph-trace=node to expand graph kernels)
+    nsys profile -t cuda --cuda-graph-trace=node -o vla_trace \
+        python vla_bench.py --cuda-graph
+    asys profile -t hggc,acdnn,acblas,hgtx -o vla_trace \
+        python vla_bench.py --cuda-graph
+
+    # Analyze GEMM breakdown + FP8/FP4 projection
+    python trace_gemm_scale.py vla_trace.sqlite --nvtx-filter "VIT_0"
+    python trace_gemm_scale.py vla_trace.sqlite --nvtx-filter "DiT_1step_0"
 """
 
 import argparse
@@ -232,12 +239,33 @@ class ActionDiT(nn.Module):
 
 
 # ============================================================
+# CUDA Graph capture
+# ============================================================
+
+def capture_cuda_graph(fn, *example_args, warmup=3, stream=None):
+    """Capture a function call as a CUDA Graph for replay."""
+    s = stream or torch.cuda.Stream()
+    # Warmup on side stream
+    with torch.cuda.stream(s):
+        for _ in range(warmup):
+            fn()
+    torch.cuda.current_stream().wait_stream(s)
+
+    # Capture
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=s):
+        fn()
+    torch.cuda.current_stream().wait_stream(s)
+    return graph
+
+
+# ============================================================
 # Benchmark harness
 # ============================================================
 
-def bench_component(name, fn, warmup=10, iters=50):
-    """Benchmark a callable with NVTX markers."""
-    # Warmup
+def bench_component(name, fn, warmup=10, iters=50, use_cuda_graph=False):
+    """Benchmark a callable with NVTX markers and optional CUDA Graph."""
+    # Warmup (eager)
     if has_nvtx:
         rng = nvtx.start_range(f"{name}_warmup", color="red")
     with torch.no_grad():
@@ -247,6 +275,17 @@ def bench_component(name, fn, warmup=10, iters=50):
     if has_nvtx:
         nvtx.end_range(rng)
 
+    # Capture CUDA Graph if requested
+    graph = None
+    if use_cuda_graph:
+        try:
+            graph = capture_cuda_graph(fn)
+            print(f"  [{name}] CUDA Graph captured")
+        except Exception as e:
+            print(f"  [{name}] CUDA Graph capture failed ({e}), using eager")
+
+    run_fn = graph.replay if graph else fn
+
     # Benchmark
     times = []
     with torch.no_grad():
@@ -255,7 +294,7 @@ def bench_component(name, fn, warmup=10, iters=50):
                 rng = nvtx.start_range(f"{name}_{i}", color="green")
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            fn()
+            run_fn()
             torch.cuda.synchronize()
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000)
@@ -266,7 +305,8 @@ def bench_component(name, fn, warmup=10, iters=50):
     median = times[len(times) // 2]
     p10 = times[len(times) // 10] if len(times) >= 10 else times[0]
     p90 = times[len(times) * 9 // 10] if len(times) >= 10 else times[-1]
-    print(f"  [{name}] median={median:.2f}ms  p10={p10:.2f}ms  p90={p90:.2f}ms")
+    mode = "cudagraph" if graph else "eager"
+    print(f"  [{name}] ({mode}) median={median:.2f}ms  p10={p10:.2f}ms  p90={p90:.2f}ms")
     return median
 
 
@@ -278,6 +318,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--iters", type=int, default=50)
     ap.add_argument("--no-compile", action="store_true")
+    ap.add_argument("--cuda-graph", action="store_true",
+                    help="Capture forward as CUDA Graph for replay (eliminates launch overhead)")
     ap.add_argument("--device", default="cuda:0")
     # VIT
     ap.add_argument("--vit-hidden", type=int, default=1024)
@@ -305,6 +347,7 @@ def main():
     dtype = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[args.dtype]
     dev = args.device
     use_compile = not args.no_compile
+    use_cudagraph = args.cuda_graph
 
     n_vit_in = args.vit_cams * args.vit_tokens_per_cam * args.vit_patch_factor
     n_vit_out = args.vit_cams * args.vit_tokens_per_cam
@@ -350,7 +393,7 @@ def main():
                 print(f"  torch.compile: failed ({e})")
 
         results["vit_ms"] = bench_component("VIT", lambda: vit(x_vit, hist),
-                                            args.warmup, args.iters)
+                                            args.warmup, args.iters, use_cudagraph)
         del vit, x_vit, hist
         torch.cuda.empty_cache()
 
@@ -384,9 +427,9 @@ def main():
         # Single step
         results["dit_1step_ms"] = bench_component(
             "DiT_1step", lambda: dit(action_in, llm_kv),
-            args.warmup, args.iters)
+            args.warmup, args.iters, use_cudagraph)
 
-        # Full denoising (50 steps)
+        # Full denoising (50 steps) — no CUDA Graph (loop not capturable as single graph)
         def dit_full():
             x = action_in
             for _ in range(args.dit_denoise_steps):
@@ -395,7 +438,8 @@ def main():
 
         results["dit_full_ms"] = bench_component(
             f"DiT_{args.dit_denoise_steps}steps", dit_full,
-            max(args.warmup // 5, 3), max(args.iters // 5, 10))
+            max(args.warmup // 5, 3), max(args.iters // 5, 10),
+            use_cuda_graph=False)  # loop can't be captured as one graph
 
         del dit, llm_kv, action_in
         torch.cuda.empty_cache()
