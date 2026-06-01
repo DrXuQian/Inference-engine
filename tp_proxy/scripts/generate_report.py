@@ -311,6 +311,14 @@ def main():
                     help="Single GPU peak FP16 TFLOPS (e.g. A100=312, H100=990)")
     ap.add_argument("--peak-bw", type=float, default=0,
                     help="Single GPU peak memory bandwidth GB/s (e.g. A100=2039, H100=3350)")
+    ap.add_argument("--src-flops", type=float, default=0,
+                    help="Source platform peak TFLOPS (for rescaling prefill)")
+    ap.add_argument("--tgt-flops", type=float, default=0,
+                    help="Target platform peak TFLOPS")
+    ap.add_argument("--src-bw", type=float, default=0,
+                    help="Source platform peak BW GB/s (for rescaling decode)")
+    ap.add_argument("--tgt-bw", type=float, default=0,
+                    help="Target platform peak BW GB/s")
     ap.add_argument("--label", choices=["ai_station", "vla"], default=None,
                     help="Filter scenarios: ai_station=01-06 only, vla=07 only")
     args = ap.parse_args()
@@ -489,32 +497,28 @@ def main():
         d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_500.json"))
         m07_500 = get_metrics(d07_500) if d07_500 else None
 
-        # INT4 projected: same formula as compensate_scenarios/07
-        # Weight per GPU (TP=2): layers(INT4) + lm_head(BF16) + router(BF16)
-        # Qwen3-30B-A3B: H=2048, qd=4096, kvd=512, moe_ffn=768, shared_ffn=6144
-        _H=2048; _qd=32*128; _kvd=4*128; _moe=768; _shared=6144; _L=48; _tp=2; _V=151936
-        _attn = _H*_qd + _H*_kvd + _H*_kvd + _qd*_H
-        _shared_p = 3*_H*_shared
-        _moe_p = 8*3*_H*_moe
-        _layer_params = (_attn + _shared_p + _moe_p) * _L / _tp
-        _lm_params = _V * _H / _tp
-        _router_params = _H * 128 * _L
-        _bf16_gb = (_layer_params + _lm_params + _router_params) * 2 / 1e9
-        _int4_layer_gb = _layer_params * 0.5 / 1e9
-        _int4_other_gb = (_lm_params + _router_params) * 2 / 1e9
-        _int4_gb = _int4_layer_gb + _int4_other_gb
-        INT4_SCALE = _int4_gb / _bf16_gb
+        # Projections via model_weight_utils
+        from model_weight_utils import decode_weight_bytes, rescale_metrics, rescale_int4
 
-        def scale_int4(m):
-            if not m: return None
-            tpot_int4 = m["tpot"] * INT4_SCALE
-            tps_int4 = 1000 / tpot_int4 if tpot_int4 > 0 else 0
-            total_int4 = m["ttft"] + (m.get("output_tokens", 64) - 1) * tpot_int4
-            return {"ttft": m["ttft"], "tpot": tpot_int4, "tps": tps_int4,
-                    "total": total_int4, "output_tokens": m.get("output_tokens", 64)}
+        _info = decode_weight_bytes("qwen3-30b-a3b", tp=2)
 
-        m07_200_int4 = scale_int4(m07_200)
-        m07_500_int4 = scale_int4(m07_500)
+        # INT4 projected (same platform)
+        m07_200_int4 = rescale_int4(m07_200, _info) if m07_200 else None
+        m07_500_int4 = rescale_int4(m07_500, _info) if m07_500 else None
+
+        # Target platform rescaled (if --src/tgt-flops/bw given)
+        has_rescale = args.src_flops > 0 and args.tgt_flops > 0
+        if has_rescale:
+            m07_200_tgt = rescale_metrics(m07_200, _info,
+                args.src_flops, args.tgt_flops, args.src_bw, args.tgt_bw) if m07_200 else None
+            m07_500_tgt = rescale_metrics(m07_500, _info,
+                args.src_flops, args.tgt_flops, args.src_bw, args.tgt_bw) if m07_500 else None
+            # INT4 on target platform
+            _info_int4 = decode_weight_bytes("qwen3-30b-a3b-gptq-int4", tp=2)
+            m07_200_tgt_int4 = rescale_int4(m07_200, _info_int4,
+                args.src_flops, args.tgt_flops, args.tgt_bw) if m07_200 else None
+            m07_500_tgt_int4 = rescale_int4(m07_500, _info_int4,
+                args.src_flops, args.tgt_flops, args.tgt_bw) if m07_500 else None
 
         print_scenario(
             "Qwen3-30B-A3B BF16 measured (1.5K input)",
@@ -532,6 +536,24 @@ def main():
             ],
             fmt,
         )
+        if has_rescale:
+            tgt_label = f"→ Target ({args.tgt_flops}T/{args.tgt_bw}GB/s)"
+            print_scenario(
+                f"Qwen3-30B-A3B BF16 {tgt_label} (1.5K input)",
+                [
+                    ("Output=200", m07_200_tgt),
+                    ("Output=500", m07_500_tgt),
+                ],
+                fmt,
+            )
+            print_scenario(
+                f"Qwen3-30B-A3B INT4 {tgt_label} (1.5K input)",
+                [
+                    ("Output=200 (INT4)", m07_200_tgt_int4),
+                    ("Output=500 (INT4)", m07_500_tgt_int4),
+                ],
+                fmt,
+            )
 
     # =========================================================================
     # 5. Prefill MFU + Decode Bandwidth Utilization
