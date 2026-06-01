@@ -141,6 +141,10 @@ def main():
     ap.add_argument("--dit-steps", type=int, default=50)
     ap.add_argument("--show-all-combos", action="store_true",
                     help="Show all FP16/FP8/FP4 combinations")
+    ap.add_argument("--peak-tflops", type=float, default=450,
+                    help="Peak BF16 tensor TFLOPS for MFU calculation")
+    ap.add_argument("--peak-bw", type=float, default=2400,
+                    help="Peak memory bandwidth GB/s for BW utilization (default: 2.4TB/s)")
     ap.add_argument("--output-json", default=None)
     args = ap.parse_args()
 
@@ -173,22 +177,73 @@ def main():
     print("VLA Pipeline Summary")
     print("=" * 75)
 
+    # Estimate FLOPs per component (from architecture params)
+    # VIT: 24L×1024, per-cam 900 tokens self-attn, 900×3825 cross-attn
+    vit_flops = (
+        24 * (3*2*900*1024*1024 + 2*2*16*900*900*64 + 2*900*1024*1024 + 2*2*900*1024*4096)  # self-attn
+        + 6 * (2*900*1024*1024 + 2*2*3825*1024*1024 + 2*2*16*900*3825*64 + 2*900*1024*1024)  # cross-attn
+    ) * 6  # 6 cameras
+    # LLM: 36L×2560, 1550 tokens prefill
+    llm_flops = 36 * (3*2*1550*2560*2560 + 2*2*32*1550*1550*128 + 2*1550*2560*2560 + 2*2*1550*2560*9728)
+    # DiT: 18L×1024, 51 query × 1550 KV, ×50 steps
+    dit_1step_flops = 18 * (
+        3*2*51*1024*1024 + 2*2*8*51*51*128 + 2*51*1024*1024  # self-attn
+        + 2*51*1024*1024 + 2*2*1550*1024*1024 + 2*2*8*51*1550*128 + 2*51*1024*1024  # cross-attn
+        + 2*2*51*1024*4096  # FFN
+    ) + 2*1550*2560*1024  # kv_proj
+    dit_flops = dit_1step_flops * args.dit_steps
+
+    comp_flops = {"VIT": vit_flops, "LLM": llm_flops, "DiT": dit_flops}
+    peak = args.peak_tflops
+    peak_bw = args.peak_bw
+
+    # Weight params per component (for BW utilization: bytes read from memory)
+    # VIT: ~335M params, read once
+    vit_params = 24*(3*1024*1024 + 1024*1024 + 2*1024*4096) + \
+                 6*(3*1024*1024 + 1024*1024) + \
+                 1024*4*1024 + 1024*2560 + 1024*1024
+    # LLM: prefill is compute-bound, weight read once
+    # Qwen3-4B GQA: Q=2560→4096, K=2560→1024, V=2560→1024, O=4096→2560, FFN=2×2560×9728
+    llm_params = 36*(2560*4096 + 2*2560*1024 + 4096*2560 + 2*2560*9728)
+    # DiT: ~305M params, weight re-read every denoising step
+    dit_params = 18*(3*1024*1024 + 1024*1024 + 3*1024*1024 + 1024*1024 + 2*1024*4096) + \
+                 2560*1024 + 62*1024 + 1024*62  # kv_proj + proj_in + proj_out
+
+    comp_weight_bytes = {
+        "VIT": vit_params * 2,                         # bf16, read once
+        "LLM": llm_params * 2,                         # bf16, read once (prefill)
+        "DiT": dit_params * 2 * args.dit_steps,        # bf16, ×50 steps
+    }
+
     # Component breakdown
-    print(f"\n{'Component':<12s} {'GEMM(ms)':>10s} {'Other(ms)':>10s} {'Total(ms)':>10s} {'GEMM%':>7s}")
-    print("-" * 55)
+    print(f"\n{'Comp':<6s} {'GEMM':>7s} {'Other':>7s} {'Total':>8s} {'GEMM%':>5s} "
+          f"{'GFLOPs':>7s} {'TFLOPS':>6s} {'MFU':>5s} {'WeightMB':>8s} {'BW%':>5s}")
+    print("-" * 80)
     components = {"VIT": vit, "LLM": llm, "DiT": dit}
     total_ms = 0
     for name, c in components.items():
         if c:
             pct = c["gemm_ms"] / c["total_ms"] * 100 if c["total_ms"] > 0 else 0
-            print(f"{name:<12s} {c['gemm_ms']:>10.2f} {c['other_ms']:>10.2f} {c['total_ms']:>10.2f} {pct:>6.1f}%")
+            gflops = comp_flops[name] / 1e9
+            tflops = comp_flops[name] / 1e12 / (c["total_ms"] / 1000) if c["total_ms"] > 0 else 0
+            mfu = tflops / peak * 100 if peak > 0 else 0
+            wb = comp_weight_bytes[name]
+            bw_util = (wb / 1e9) / (c["total_ms"] / 1000) / peak_bw * 100 if c["total_ms"] > 0 and peak_bw > 0 else 0
+            print(f"{name:<6s} {c['gemm_ms']:>7.1f} {c['other_ms']:>7.1f} {c['total_ms']:>8.1f} {pct:>4.0f}% "
+                  f"{gflops:>7.0f} {tflops:>6.1f} {mfu:>4.1f}% {wb/1e6:>8.0f} {bw_util:>4.0f}%")
             total_ms += c["total_ms"]
         else:
-            print(f"{name:<12s} {'N/A':>10s} {'N/A':>10s} {'N/A':>10s}")
-    print("-" * 55)
-    print(f"{'TOTAL':<12s} {'':>10s} {'':>10s} {total_ms:>10.2f}")
+            print(f"{name:<6s} {'N/A':>7s} {'N/A':>7s} {'N/A':>8s}")
+    print("-" * 80)
+    total_flops = sum(comp_flops.values())
+    total_tflops = total_flops / 1e12 / (total_ms / 1000) if total_ms > 0 else 0
+    total_mfu = total_tflops / peak * 100 if peak > 0 else 0
+    print(f"{'TOTAL':<6s} {'':>7s} {'':>7s} {total_ms:>8.1f} {'':>5s} "
+          f"{total_flops/1e9:>7.0f} {total_tflops:>6.1f} {total_mfu:>4.1f}%")
     if total_ms > 0:
-        print(f"{'FPS':<12s} {'':>10s} {'':>10s} {1000/total_ms:>10.1f}")
+        print(f"{'FPS':<6s} {'':>7s} {'':>7s} {1000/total_ms:>8.1f}")
+
+    print(f"\n  (peak: {peak} TFLOPS, {peak_bw} GB/s)")
 
     # Selected precision
     print(f"\n{'='*75}")
