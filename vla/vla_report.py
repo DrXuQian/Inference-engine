@@ -67,6 +67,10 @@ def analyze_trace(sqlite_path, nvtx_filter=None):
         nvtx_table = find_nvtx_table(c)
         if nvtx_table:
             nvtx_start, nvtx_end = get_nvtx_range(c, nvtx_table, nvtx_filter)
+        if not nvtx_start:
+            print(f"  WARNING: NVTX '{nvtx_filter}' not found in trace, skipping")
+            conn.close()
+            return None
 
     query = f'''SELECT k."end" - k.start AS dur, s.value AS name
         FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id'''
@@ -141,10 +145,17 @@ def main():
     args = ap.parse_args()
 
     # Load components
+    print("Loading components from traces...")
     vit = load_component(args.vit_json, args.vit_trace, "VIT_0", "vit_ms", args.vit_ms)
+    if vit:
+        print(f"  VIT: {vit['total_ms']:.2f}ms (gemm={vit['gemm_ms']:.2f}, other={vit['other_ms']:.2f})")
     llm = load_component(None, args.llm_trace, "prefill", None, args.llm_ms)
+    if llm:
+        print(f"  LLM: {llm['total_ms']:.2f}ms (gemm={llm['gemm_ms']:.2f}, other={llm['other_ms']:.2f})")
     # DiT: use single step from trace, multiply by dit_steps for total
     dit_1step = load_component(args.dit_json, args.dit_trace, "DiT_1step_0", "dit_1step_ms", None)
+    if dit_1step:
+        print(f"  DiT 1step: {dit_1step['total_ms']:.2f}ms → ×{args.dit_steps} = {dit_1step['total_ms']*args.dit_steps:.2f}ms")
     if args.dit_ms is not None:
         dit = load_component(None, None, None, None, args.dit_ms)
     elif dit_1step:
