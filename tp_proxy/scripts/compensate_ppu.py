@@ -294,8 +294,8 @@ def measure_tail_from_trace(sqlite_path: str,
     # fa: FlashAttention (reads KV cache, not weight)
     # other: layernorm, softmax, elementwise (compute, not weight)
     import re as _re
-    gemm_re = _re.compile(r"gemm_ktype|cutlass|cublas|cublasLt|marlin|moe_wna16|moe.*gemm|xmma", _re.IGNORECASE)
-    lmhead_re = _re.compile(r"gemvt", _re.IGNORECASE)
+    gemm_re = _re.compile(r"deep_gemm|GemmKernel|gemm_ktype|cutlass|cublas|cublasLt|marlin|moe_wna16|moe.*gemm|xmma|batched_gemvt", _re.IGNORECASE)
+    lmhead_re = _re.compile(r"gemvt_op", _re.IGNORECASE)  # specific: not matching batched_gemvt
     fa_re = _re.compile(r"flash_fwd|flash_bwd|fmha|FlashAttn", _re.IGNORECASE)
 
     # Collect kernels from last consistent decode step (graph + gap)
