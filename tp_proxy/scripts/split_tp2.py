@@ -76,9 +76,9 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
         return "replicate", None
 
     # ---- MoE routed expert weights ----
-    # GPTQ: split per-expert as-is (vLLM loads GPTQ per-expert directly)
-    # BF16: will be fused into w1/w2/w3 in process_shard, then split fused tensor
-    # Classify here returns "moe_fuse" for BF16 experts → handled in process_shard
+    # Per-expert col/row split (both GPTQ and BF16). vLLM loads per-expert
+    # via weight_loader() and fuses internally. Config moe_intermediate_size
+    # is already divided by TP in modify_config().
     if ".experts." in n and ".shared_expert." not in n:
         is_gptq = any(n.endswith(sfx) for sfx in (".qweight", ".qzeros", ".scales", ".g_idx"))
         if is_gptq:
@@ -89,8 +89,11 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
             if is_row:
                 return ("gptq_gidx", None) if n.endswith(".g_idx") else ("gptq_row", None)
         else:
-            # BF16 per-expert → mark for fusing in process_shard
-            return "moe_fuse", None
+            # BF16 expert: col split gate/up, row split down
+            if ".gate_proj." in n or ".up_proj." in n:
+                return "col", 0
+            if ".down_proj." in n:
+                return "row", 1
 
     # ---- full attention (self_attn) ----
     if ".self_attn." in n:
@@ -138,9 +141,6 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
 
 def split_tensor(tensor: np.ndarray, strategy: str, rank: int) -> np.ndarray:
     """Return the shard of *tensor* belonging to *rank*."""
-    if strategy == "moe_fuse":
-        return tensor  # handled separately in process_shard
-
     if strategy == "replicate":
         return tensor  # no copy needed – safetensors.save_file reads it
 
@@ -209,67 +209,6 @@ def modify_config(config: dict) -> dict:
 # Shard processing
 # ---------------------------------------------------------------------------
 
-def fuse_and_split_moe_experts(originals: dict[str, np.ndarray], rank: int) -> dict[str, np.ndarray]:
-    """Fuse per-expert BF16 weights into w1/w2/w3, split by TP, return fused tensors.
-
-    Per-expert format:  layers.X.mlp.experts.N.{gate,up,down}_proj.weight
-    Fused format:       layers.X.mlp.experts.{w1,w2,w3}_weight
-
-    w1 = gate_proj (col split dim1), w2 = down_proj (row split dim2), w3 = up_proj (col split dim1)
-    """
-    import re as _re
-
-    # Collect per-expert tensors grouped by layer
-    # key pattern: model.layers.X.mlp.experts.N.{gate,up,down}_proj.weight
-    expert_pattern = _re.compile(r"(.*\.layers\.(\d+)\.mlp\.experts\.)(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
-
-    # Group by (prefix, layer_idx)
-    groups = {}  # (prefix, layer_idx) → {expert_id → {proj_name → tensor}}
-    moe_keys = set()
-    for key, tensor in originals.items():
-        m = expert_pattern.match(key)
-        if m:
-            prefix, layer_idx, expert_id, proj = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
-            gkey = (prefix, layer_idx)
-            if gkey not in groups:
-                groups[gkey] = {}
-            if expert_id not in groups[gkey]:
-                groups[gkey][expert_id] = {}
-            groups[gkey][expert_id][proj] = tensor
-            moe_keys.add(key)
-
-    if not groups:
-        return {}, moe_keys
-
-    fused = {}
-    for (prefix, layer_idx), experts_dict in groups.items():
-        n_experts = max(experts_dict.keys()) + 1
-        # Stack all experts: (num_experts, out_dim, in_dim)
-        for proj, fused_name in [("gate_proj", "w1_weight"), ("down_proj", "w2_weight"), ("up_proj", "w3_weight")]:
-            # Skip if this proj not in this shard (split across files)
-            if not all(proj in experts_dict.get(i, {}) for i in range(n_experts)):
-                continue
-            stack = [experts_dict[i][proj] for i in range(n_experts)]
-            fused_tensor = np.stack(stack, axis=0)  # (num_experts, dim0, dim1)
-
-            # TP split: w1/w3 (gate/up) split dim1 (col), w2 (down) split dim2 (row)
-            if proj in ("gate_proj", "up_proj"):
-                # col split: (N, ffn, hidden) → split ffn dim
-                if fused_tensor.shape[1] % TP_SIZE == 0:
-                    c = fused_tensor.shape[1] // TP_SIZE
-                    fused_tensor = fused_tensor[:, rank*c:(rank+1)*c, :].copy()
-            else:  # down_proj
-                # row split: (N, hidden, ffn) → split ffn dim
-                if fused_tensor.shape[2] % TP_SIZE == 0:
-                    c = fused_tensor.shape[2] // TP_SIZE
-                    fused_tensor = fused_tensor[:, :, rank*c:(rank+1)*c].copy()
-
-            fused_key = f"{prefix}{fused_name}"
-            fused[fused_key] = fused_tensor
-
-    return fused, moe_keys
-
-
 def process_shard(shard_path: str, rank_dirs: list[str]) -> int:
     """Read one safetensors shard, split every tensor, write both ranks."""
     shard_name = os.path.basename(shard_path)
@@ -280,27 +219,12 @@ def process_shard(shard_path: str, rank_dirs: list[str]) -> int:
         for key in f.keys():
             originals[key] = f.get_tensor(key)
 
-    # Check for BF16 MoE experts that need fusing
-    has_moe_fuse = any(get_split_strategy(k)[0] == "moe_fuse" for k in originals)
-
     # Split + save per rank
     for rank in range(TP_SIZE):
         rank_tensors: dict[str, np.ndarray] = {}
-
-        if has_moe_fuse:
-            # Fuse per-expert → w1/w2/w3, split fused
-            fused, moe_keys = fuse_and_split_moe_experts(originals, rank)
-            rank_tensors.update(fused)
-            # Process non-MoE tensors normally
-            for key, tensor in originals.items():
-                if key in moe_keys:
-                    continue  # already fused
-                strategy, _ = get_split_strategy(key)
-                rank_tensors[key] = split_tensor(tensor, strategy, rank)
-        else:
-            for key, tensor in originals.items():
-                strategy, _ = get_split_strategy(key)
-                rank_tensors[key] = split_tensor(tensor, strategy, rank)
+        for key, tensor in originals.items():
+            strategy, _ = get_split_strategy(key)
+            rank_tensors[key] = split_tensor(tensor, strategy, rank)
 
         out = os.path.join(rank_dirs[rank], shard_name)
         np_save_file(rank_tensors, out)
