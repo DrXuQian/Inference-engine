@@ -303,26 +303,34 @@ def rescale_int4(metrics: dict, info: dict,
                          "Re-run compensate to generate trace kernel breakdown.")
 
     ttft = metrics["ttft"]
+    tpot = metrics["tpot"]  # comp_tpot (already layer-scaled to full model)
     output_tokens = metrics.get("output_tokens", 64)
 
     # TTFT: compute-bound
     if src_flops > 0 and tgt_flops > 0:
         ttft = ttft * (src_flops / tgt_flops)
 
-    # TPOT: per-kernel-type scaling
-    bw_ratio = (src_bw / tgt_bw) if (src_bw > 0 and tgt_bw > 0) else 1.0
-    weight_scale = 0.25  # BF16(2B) → INT4(0.5B)
-
+    # Use kernel_breakdown RATIO (not absolute time, since it's from pruned model)
     marlin = kernel_breakdown.get("marlin_ms", 0)
     moe = kernel_breakdown.get("moe_ms", 0)
     fa = kernel_breakdown.get("fa_ms", 0)
     other = kernel_breakdown.get("other_ms", 0)
+    total_kernel = marlin + moe + fa + other
 
-    # Weight-bound kernels: scale by BW ratio × weight reduction
-    # Non-weight kernels: scale by BW ratio only (or 1.0 if no BW rescale)
-    tpot_int4 = ((marlin + moe) * bw_ratio * weight_scale
-                 + fa * bw_ratio
-                 + other * bw_ratio)
+    if total_kernel > 0:
+        weight_frac = (marlin + moe) / total_kernel  # fraction affected by INT4
+        non_weight_frac = (fa + other) / total_kernel
+    else:
+        weight_frac = 0.7  # fallback estimate
+        non_weight_frac = 0.3
+
+    # TPOT: apply ratio to comp_tpot (full model)
+    # weight kernels: BW ratio × INT4 reduction (0.25)
+    # non-weight kernels: BW ratio only
+    bw_ratio = (src_bw / tgt_bw) if (src_bw > 0 and tgt_bw > 0) else 1.0
+    weight_scale = 0.25  # BF16(2B) → INT4(0.5B)
+
+    tpot_int4 = tpot * bw_ratio * (weight_frac * weight_scale + non_weight_frac)
 
     # Clamp to BW floor
     if tgt_bw > 0:
