@@ -170,7 +170,6 @@ case "$COMPONENT" in
 
         if [ -n "$REPORT_ARGS" ]; then
             python3 "$VLA_DIR/vla_report.py" $REPORT_ARGS \
-                --show-all-combos \
                 --output-json "$OUT_DIR/report.json" \
                 2>&1 | tee "$OUT_DIR/report.txt"
         fi
