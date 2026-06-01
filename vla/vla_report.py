@@ -215,13 +215,17 @@ def main():
     vit_temporal = transformer_flops(675, 18, 6, 1024, 16, 64, 4096)
     vit_flops = vit_target + vit_current + vit_temporal
 
-    # ② LLM Prefill: 1550 tokens, 36L, Qwen3-VL (GQA: q=4096, kv=1024)
+    # ② LLM Prefill: 1550 tokens, 36L, Qwen3-VL-4B
+    # GQA: Q=32heads×128=4096, KV=8heads×128=1024
+    # FFN: SwiGLU = 3 projections (gate + up + down) × 2560×9728
     llm_flops = 36 * (
-        2 * 1550 * 2560 * 4096          # Q proj (2560→32×128=4096)
-        + 2 * 2 * 1550 * 2560 * 1024    # KV proj (2560→8×128=1024)
-        + 2 * 2 * 32 * 1550 * 1550 * 128  # QK^T + AV
-        + 2 * 1550 * 4096 * 2560        # out proj
-        + 2 * 2 * 1550 * 2560 * 9728    # FFN (SwiGLU)
+        2 * 1550 * 2560 * 4096          # Q proj (2560→4096)
+        + 2 * 1550 * 2560 * 1024        # K proj (2560→1024)
+        + 2 * 1550 * 2560 * 1024        # V proj (2560→1024)
+        + 2 * 32 * 1550 * 1550 * 128    # QK^T
+        + 2 * 32 * 1550 * 1550 * 128    # AV
+        + 2 * 1550 * 4096 * 2560        # out proj (4096→2560)
+        + 3 * 2 * 1550 * 2560 * 9728    # FFN SwiGLU (gate+up+down)
     )
 
     # ③ DiT: 51 tokens, 18L, cross-attn with LLM KV (1550 tokens), ×N steps
