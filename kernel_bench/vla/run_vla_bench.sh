@@ -23,8 +23,8 @@ COMPONENT="${3:-all}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${OUT_DIR}_${TIMESTAMP}"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TP_PROXY_DIR="$(cd "$SCRIPT_DIR/../tp_proxy" && pwd)"
+VLA_DIR="$(cd "$(dirname "$0")" && pwd)"
+TP_PROXY_DIR="$(cd "$VLA_DIR/../../tp_proxy" && pwd)"
 PLATFORM="${PLATFORM:-ppu}"
 
 # VLA architecture params
@@ -62,7 +62,7 @@ run_vit() {
     if [ "$PLATFORM" = "ppu" ]; then
         asys profile -o "$VIT_DIR/trace.report" -f true \
             -t hggc,acdnn,acblas,hgtx \
-            python3 "$SCRIPT_DIR/vla_bench.py" \
+            python3 "$VLA_DIR/vla_bench.py" \
                 --component vit --dtype bf16 \
                 --warmup 10 --iters 30 \
                 --output-json "$VIT_DIR/results.json" \
@@ -76,7 +76,7 @@ run_vit() {
     else
         nsys profile -t cuda --cuda-graph-trace=node \
             --force-overwrite=true -o "$VIT_DIR/trace" \
-            python3 "$SCRIPT_DIR/vla_bench.py" \
+            python3 "$VLA_DIR/vla_bench.py" \
                 --component vit --dtype bf16 \
                 --warmup 10 --iters 30 \
                 --output-json "$VIT_DIR/results.json" \
@@ -118,7 +118,7 @@ run_dit() {
     if [ "$PLATFORM" = "ppu" ]; then
         asys profile -o "$DIT_DIR/trace.report" -f true \
             -t hggc,acdnn,acblas,hgtx \
-            python3 "$SCRIPT_DIR/vla_bench.py" \
+            python3 "$VLA_DIR/vla_bench.py" \
                 --component dit --dtype bf16 \
                 --warmup 5 --iters 20 \
                 --output-json "$DIT_DIR/results.json" \
@@ -131,7 +131,7 @@ run_dit() {
     else
         nsys profile -t cuda --cuda-graph-trace=node \
             --force-overwrite=true -o "$DIT_DIR/trace" \
-            python3 "$SCRIPT_DIR/vla_bench.py" \
+            python3 "$VLA_DIR/vla_bench.py" \
                 --component dit --dtype bf16 \
                 --warmup 5 --iters 20 \
                 --output-json "$DIT_DIR/results.json" \
