@@ -98,16 +98,16 @@ def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1,
     N = cfg["num_hidden_layers"]
     S = seq_len
     n_heads = cfg["num_attention_heads"]
-    n_kv = cfg["num_key_value_heads"]
-    head_dim = cfg["head_dim"]
-    has_gate = cfg["attn_output_gate"]
+    n_kv = cfg.get("num_key_value_heads", n_heads)
+    head_dim = cfg.get("head_dim", H // n_heads)
+    has_gate = cfg.get("attn_output_gate", False)
     V = cfg["vocab_size"]
 
-    n_experts = cfg["num_experts"]
-    n_active = cfg["num_experts_per_tok"]
-    moe_inter = cfg["moe_intermediate_size"]
-    shared_inter = cfg["shared_expert_intermediate_size"]
-    dense_inter = cfg["intermediate_size"]
+    n_experts = cfg.get("num_experts", 0)
+    n_active = cfg.get("num_experts_per_tok", 0)
+    moe_inter = cfg.get("moe_intermediate_size", 0)
+    shared_inter = cfg.get("shared_expert_intermediate_size", 0)
+    dense_inter = cfg.get("intermediate_size", H * 4)
 
     n_full_layers, n_lin_layers = count_full_attn_layers(cfg)
 
@@ -169,17 +169,17 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1,
     N = cfg["num_hidden_layers"]
     V = cfg["vocab_size"]
     n_heads = cfg["num_attention_heads"]
-    n_kv = cfg["num_key_value_heads"]
-    head_dim = cfg["head_dim"]
-    has_gate = cfg["attn_output_gate"]
+    n_kv = cfg.get("num_key_value_heads", n_heads)
+    head_dim = cfg.get("head_dim", H // n_heads)
+    has_gate = cfg.get("attn_output_gate", False)
 
-    n_experts = cfg["num_experts"]
-    n_active = cfg["num_experts_per_tok"]
-    moe_inter = cfg["moe_intermediate_size"]
-    shared_inter = cfg["shared_expert_intermediate_size"]
-    dense_inter = cfg["intermediate_size"]
+    n_experts = cfg.get("num_experts", 0)
+    n_active = cfg.get("num_experts_per_tok", 0)
+    moe_inter = cfg.get("moe_intermediate_size", 0)
+    shared_inter = cfg.get("shared_expert_intermediate_size", 0)
+    dense_inter = cfg.get("intermediate_size", H * 4)
 
-    quant_bits = cfg["quant_bits"]
+    quant_bits = cfg.get("quant_bits", 16)
     bpp_q = quant_bits / 8 if quant_bits < 16 else 2  # quantized: int4 = 0.5 bytes
     bpp_f = 2  # bf16
 
@@ -624,16 +624,10 @@ def main():
                     model_dirs = _glob.glob(os.path.join(parent_base, "model", "rank_0_*L"))
             cfg = load_model_config(model_dirs[0]) if model_dirs else None
 
-            # Scenario 07: use known full model config from model_weight_utils
+            # Scenario 07: use known full model config (all fields included)
             if sc_dir == "07_qwen3_30b_a3b":
                 from model_weight_utils import load_model_config as _load_mwu
                 cfg = _load_mwu("qwen3-30b-a3b")
-                # Add fields expected by compute_prefill_flops / compute_decode_bytes
-                cfg.setdefault("attn_output_gate", False)
-                cfg.setdefault("num_experts", cfg.get("num_experts", 0))
-                cfg.setdefault("num_experts_per_tok", cfg.get("num_experts_per_tok", 0))
-                cfg.setdefault("layer_types", [])
-                cfg.setdefault("quant_bits", 16)
 
             # Pruned config has TP-split values and truncated layer_types.
             # Try to load the ORIGINAL model config from split_meta.json.

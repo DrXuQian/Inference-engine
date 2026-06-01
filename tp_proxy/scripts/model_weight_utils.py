@@ -33,11 +33,15 @@ KNOWN_MODELS = {
         "num_key_value_heads": 4,
         "head_dim": 128,
         "num_hidden_layers": 48,
+        "intermediate_size": 6144,             # dense FFN (unused in MoE layers)
         "shared_expert_intermediate_size": 0,  # NO shared expert
         "moe_intermediate_size": 768,          # per routed expert
         "num_experts": 128,
         "num_experts_per_tok": 8,
         "vocab_size": 151936,
+        "attn_output_gate": False,
+        "layer_types": [],
+        "quant_bits": 16,
         "quant_bytes_per_param": 2,            # BF16
     },
     "qwen3-30b-a3b-gptq-int4": {
@@ -46,11 +50,15 @@ KNOWN_MODELS = {
         "num_key_value_heads": 4,
         "head_dim": 128,
         "num_hidden_layers": 48,
+        "intermediate_size": 6144,
         "shared_expert_intermediate_size": 0,
         "moe_intermediate_size": 768,
         "num_experts": 128,
         "num_experts_per_tok": 8,
         "vocab_size": 151936,
+        "attn_output_gate": False,
+        "layer_types": [],
+        "quant_bits": 4,
         "quant_bytes_per_param": 0.5,          # GPTQ-INT4
     },
 }
