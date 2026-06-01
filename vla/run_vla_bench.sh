@@ -154,24 +154,32 @@ case "$COMPONENT" in
         run_llm
         run_dit
 
-        # Summary
+        # Auto-generate report
+        echo ""
+        echo "=== [4/3] Pipeline Report ==="
+        REPORT_ARGS=""
+        VIT_SQLITE="$OUT_DIR/vit/trace.sqlite"
+        LLM_SQLITE="$OUT_DIR/llm/trace.sqlite"
+        DIT_SQLITE="$OUT_DIR/dit/trace.sqlite"
+
+        [ -f "$VIT_SQLITE" ] && REPORT_ARGS="$REPORT_ARGS --vit-trace $VIT_SQLITE" || \
+            { [ -f "$OUT_DIR/vit/results.json" ] && REPORT_ARGS="$REPORT_ARGS --vit-json $OUT_DIR/vit/results.json"; }
+        [ -f "$LLM_SQLITE" ] && REPORT_ARGS="$REPORT_ARGS --llm-trace $LLM_SQLITE"
+        [ -f "$DIT_SQLITE" ] && REPORT_ARGS="$REPORT_ARGS --dit-trace $DIT_SQLITE" || \
+            { [ -f "$OUT_DIR/dit/results.json" ] && REPORT_ARGS="$REPORT_ARGS --dit-json $OUT_DIR/dit/results.json"; }
+
+        if [ -n "$REPORT_ARGS" ]; then
+            python3 "$VLA_DIR/vla_report.py" $REPORT_ARGS \
+                --show-all-combos \
+                --output-json "$OUT_DIR/report.json" \
+                2>&1 | tee "$OUT_DIR/report.txt"
+        fi
+
         echo ""
         echo "============================================"
         echo "  VLA Benchmark Complete"
         echo "  Output: $OUT_DIR"
-        echo ""
-        echo "  Results:"
-        [ -f "$OUT_DIR/vit/results.json" ] && \
-            echo "    VIT:  $(python3 -c "import json; d=json.load(open('$OUT_DIR/vit/results.json')); print(f'{d[\"component_results\"][\"vit_ms\"]:.2f} ms')" 2>/dev/null || echo 'see bench.log')"
-        [ -f "$OUT_DIR/llm/bench_trace.txt" ] && \
-            echo "    LLM:  see $OUT_DIR/llm/bench_trace.txt"
-        [ -f "$OUT_DIR/dit/results.json" ] && \
-            echo "    DiT:  $(python3 -c "import json; d=json.load(open('$OUT_DIR/dit/results.json')); print(f'{d[\"component_results\"][\"dit_full_ms\"]:.2f} ms ({d[\"component_results\"][\"dit_full_ms\"]/50:.2f} ms/step)')" 2>/dev/null || echo 'see bench.log')"
-        echo ""
-        echo "  Traces:"
-        echo "    VIT: $OUT_DIR/vit/trace.sqlite"
-        echo "    LLM: $OUT_DIR/llm/trace.sqlite"
-        echo "    DiT: $OUT_DIR/dit/trace.sqlite"
+        echo "  Report: $OUT_DIR/report.json"
         echo "============================================"
         ;;
     *)
