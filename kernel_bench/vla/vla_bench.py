@@ -105,14 +105,13 @@ class SpatioTemporalVIT(nn.Module):
     """
     def __init__(self, hidden=1024, heads=16, depth=24, cross_every=4,
                  patch_factor=4, n_cams=6, tokens_per_cam=225,
-                 out_dim=2560, ffn_mult=4, dtype=torch.bfloat16):
+                 out_dim=2560, ffn_dim=4096, dtype=torch.bfloat16):
         super().__init__()
         self.depth = depth
         self.cross_every = cross_every
         self.patch_factor = patch_factor
         self.n_cams = n_cams
         self.tokens_per_cam = tokens_per_cam
-        ffn_dim = hidden * ffn_mult
 
         # Patch embedding (RGB 480×480 → patches → tokens)
         # Simplified: assume input is already tokenized
@@ -211,9 +210,8 @@ class ActionDiT(nn.Module):
     """
     def __init__(self, hidden=1024, heads=8, layers=18,
                  action_dim=62, llm_hidden=2560,
-                 ffn_mult=4, dtype=torch.bfloat16):
+                 ffn_dim=4096, dtype=torch.bfloat16):
         super().__init__()
-        ffn_dim = hidden * ffn_mult
         self.proj_in = nn.Linear(action_dim, hidden, dtype=dtype)
         self.kv_proj = nn.Linear(llm_hidden, hidden, dtype=dtype)
 
@@ -332,10 +330,14 @@ def main():
     ap.add_argument("--vit-history-frames", type=int, default=17)
     ap.add_argument("--vit-history-cams", type=int, default=3)
     ap.add_argument("--vit-out-dim", type=int, default=2560)
+    ap.add_argument("--vit-ffn-dim", type=int, default=4096,
+                    help="VIT FFN intermediate size (Qwen3-VL: 4096)")
     # DiT
     ap.add_argument("--dit-hidden", type=int, default=1024)
     ap.add_argument("--dit-heads", type=int, default=8)
     ap.add_argument("--dit-layers", type=int, default=18)
+    ap.add_argument("--dit-ffn-dim", type=int, default=4096,
+                    help="DiT FFN intermediate size")
     ap.add_argument("--dit-action-dim", type=int, default=62)
     ap.add_argument("--dit-denoise-steps", type=int, default=50)
     ap.add_argument("--dit-llm-hidden", type=int, default=2560)
@@ -376,7 +378,7 @@ def main():
             depth=args.vit_depth, cross_every=args.vit_cross_every,
             patch_factor=args.vit_patch_factor, n_cams=args.vit_cams,
             tokens_per_cam=args.vit_tokens_per_cam, out_dim=args.vit_out_dim,
-            dtype=dtype,
+            ffn_dim=args.vit_ffn_dim, dtype=dtype,
         ).to(dev).eval()
 
         x_vit = torch.randn(1, n_vit_in, args.vit_hidden, dtype=dtype, device=dev)
@@ -408,7 +410,8 @@ def main():
         dit = ActionDiT(
             hidden=args.dit_hidden, heads=args.dit_heads,
             layers=args.dit_layers, action_dim=args.dit_action_dim,
-            llm_hidden=args.dit_llm_hidden, dtype=dtype,
+            llm_hidden=args.dit_llm_hidden, ffn_dim=args.dit_ffn_dim,
+            dtype=dtype,
         ).to(dev).eval()
 
         llm_kv = torch.randn(1, args.dit_llm_tokens, args.dit_llm_hidden, dtype=dtype, device=dev)
