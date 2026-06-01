@@ -94,9 +94,14 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
 
     # ---- full attention (self_attn) ----
     if ".self_attn." in n:
+        is_gptq = any(n.endswith(sfx) for sfx in (".qweight", ".qzeros", ".scales", ".g_idx"))
         if ".q_proj." in n or ".k_proj." in n or ".v_proj." in n:
+            if is_gptq:
+                return ("replicate", None) if n.endswith(".g_idx") else ("gptq_col", None)
             return "col", 0
         if ".o_proj." in n:
+            if is_gptq:
+                return ("gptq_gidx", None) if n.endswith(".g_idx") else ("gptq_row", None)
             return "row", 1
 
     # ---- linear / Mamba2 attention ----
@@ -110,11 +115,16 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
         if ".A_log" in n or ".dt_bias" in n:
             return "col_1d", 0
 
-    # ---- shared expert (bf16, not GPTQ) ----
+    # ---- shared expert ----
     if ".shared_expert." in n:
+        is_gptq = any(n.endswith(sfx) for sfx in (".qweight", ".qzeros", ".scales", ".g_idx"))
         if ".gate_proj." in n or ".up_proj." in n:
+            if is_gptq:
+                return ("replicate", None) if n.endswith(".g_idx") else ("gptq_col", None)
             return "col", 0
         if ".down_proj." in n:
+            if is_gptq:
+                return ("gptq_gidx", None) if n.endswith(".g_idx") else ("gptq_row", None)
             return "row", 1
 
     # ---- fallback ----
