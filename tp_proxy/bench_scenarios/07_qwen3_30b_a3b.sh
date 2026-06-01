@@ -1,14 +1,14 @@
 #!/bin/bash
-# Qwen3-30B-A3B GPTQ-Int4, TP=2
+# Qwen3-30B-A3B BF16, TP=2
 # Input: 1.5K tokens, max-seq-len: 2048
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
-MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3-30B-A3B-GPTQ-Int4}
+MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3-30B-A3B}
 GPU_MEM=${GPU_MEM:-16}
 OUT=./results/07_qwen3_30b_a3b
 mkdir -p "$OUT"
 
-echo "=== Split/Prune: Qwen3-30B-A3B-GPTQ-Int4, TP=2 ==="
+echo "=== Split/Prune: Qwen3-30B-A3B-BF16, TP=2 ==="
 
 for TP in 2; do
     echo ""

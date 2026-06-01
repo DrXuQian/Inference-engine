@@ -1,8 +1,8 @@
 #!/bin/bash
-# Qwen3-30B-A3B GPTQ-Int4, TP=1 (no comm) and TP=2
+# Qwen3-30B-A3B BF16, TP=1 (no comm) and TP=2
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
-MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3-30B-A3B-GPTQ-Int4}
+MODEL=${MODEL:-/sim/eec/shared/models/Qwen/Qwen3-30B-A3B}
 BASE=./results/07_qwen3_30b_a3b
 
 # TP=1: no communication
