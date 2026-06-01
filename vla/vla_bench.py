@@ -43,6 +43,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.functional as F
 
 try:
     import nvtx
@@ -58,11 +59,14 @@ except ImportError:
 # Extended with spatio-temporal cross-attention to historical frames.
 
 class VITBlock(nn.Module):
-    """Single VIT block: self-attention + FFN, pre-norm."""
+    """Single VIT block: self-attention + FFN, pre-norm. Uses FlashAttention via SDPA."""
     def __init__(self, hidden, heads, ffn_dim, dtype):
         super().__init__()
+        self.heads = heads
+        self.head_dim = hidden // heads
         self.norm1 = nn.LayerNorm(hidden, dtype=dtype)
-        self.attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+        self.qkv = nn.Linear(hidden, 3 * hidden, dtype=dtype)
+        self.out_proj = nn.Linear(hidden, hidden, dtype=dtype)
         self.norm2 = nn.LayerNorm(hidden, dtype=dtype)
         self.ffn = nn.Sequential(
             nn.Linear(hidden, ffn_dim, dtype=dtype),
@@ -71,25 +75,42 @@ class VITBlock(nn.Module):
         )
 
     def forward(self, x):
+        B, N, C = x.shape
         h = self.norm1(x)
-        h, _ = self.attn(h, h, h)
+        qkv = self.qkv(h).reshape(B, N, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)  # (B, heads, N, head_dim)
+        h = F.scaled_dot_product_attention(q, k, v)
+        h = h.transpose(1, 2).reshape(B, N, C)
+        h = self.out_proj(h)
         x = x + h
         x = x + self.ffn(self.norm2(x))
         return x
 
 
 class CrossAttentionBlock(nn.Module):
-    """Cross-attention with historical frames, pre-norm."""
+    """Cross-attention with historical frames, pre-norm. Uses FlashAttention via SDPA."""
     def __init__(self, hidden, heads, dtype):
         super().__init__()
+        self.heads = heads
+        self.head_dim = hidden // heads
         self.norm_q = nn.LayerNorm(hidden, dtype=dtype)
         self.norm_kv = nn.LayerNorm(hidden, dtype=dtype)
-        self.cross_attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+        self.q_proj = nn.Linear(hidden, hidden, dtype=dtype)
+        self.k_proj = nn.Linear(hidden, hidden, dtype=dtype)
+        self.v_proj = nn.Linear(hidden, hidden, dtype=dtype)
+        self.out_proj = nn.Linear(hidden, hidden, dtype=dtype)
 
     def forward(self, x, kv):
+        B, Nq, C = x.shape
+        Nkv = kv.shape[1]
         h = self.norm_q(x)
         kv_n = self.norm_kv(kv)
-        h, _ = self.cross_attn(h, kv_n, kv_n)
+        q = self.q_proj(h).reshape(B, Nq, self.heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(kv_n).reshape(B, Nkv, self.heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(kv_n).reshape(B, Nkv, self.heads, self.head_dim).transpose(1, 2)
+        h = F.scaled_dot_product_attention(q, k, v)
+        h = h.transpose(1, 2).reshape(B, Nq, C)
+        h = self.out_proj(h)
         return x + h
 
 
@@ -163,16 +184,22 @@ class SpatioTemporalVIT(nn.Module):
 # ============================================================
 
 class DiTBlock(nn.Module):
-    """DiT block: self-attention + cross-attention + FFN, pre-norm."""
+    """DiT block: self-attention + cross-attention + FFN, pre-norm. Uses FlashAttention via SDPA."""
     def __init__(self, hidden, heads, ffn_dim, dtype):
         super().__init__()
+        self.heads = heads
+        self.head_dim = hidden // heads
         # Self-attention
         self.norm1 = nn.LayerNorm(hidden, dtype=dtype)
-        self.self_attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+        self.sa_qkv = nn.Linear(hidden, 3 * hidden, dtype=dtype)
+        self.sa_out = nn.Linear(hidden, hidden, dtype=dtype)
         # Cross-attention with LLM KV
         self.norm2 = nn.LayerNorm(hidden, dtype=dtype)
         self.norm_kv = nn.LayerNorm(hidden, dtype=dtype)
-        self.cross_attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+        self.ca_q = nn.Linear(hidden, hidden, dtype=dtype)
+        self.ca_k = nn.Linear(hidden, hidden, dtype=dtype)
+        self.ca_v = nn.Linear(hidden, hidden, dtype=dtype)
+        self.ca_out = nn.Linear(hidden, hidden, dtype=dtype)
         # FFN
         self.norm3 = nn.LayerNorm(hidden, dtype=dtype)
         self.ffn = nn.Sequential(
@@ -182,15 +209,24 @@ class DiTBlock(nn.Module):
         )
 
     def forward(self, x, kv):
+        B, N, C = x.shape
+        Nkv = kv.shape[1]
         # Self-attention
         h = self.norm1(x)
-        h, _ = self.self_attn(h, h, h)
-        x = x + h
+        qkv = self.sa_qkv(h).reshape(B, N, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        h = F.scaled_dot_product_attention(q, k, v)
+        h = h.transpose(1, 2).reshape(B, N, C)
+        x = x + self.sa_out(h)
         # Cross-attention
         h = self.norm2(x)
         kv_n = self.norm_kv(kv)
-        h, _ = self.cross_attn(h, kv_n, kv_n)
-        x = x + h
+        q = self.ca_q(h).reshape(B, N, self.heads, self.head_dim).transpose(1, 2)
+        k = self.ca_k(kv_n).reshape(B, Nkv, self.heads, self.head_dim).transpose(1, 2)
+        v = self.ca_v(kv_n).reshape(B, Nkv, self.heads, self.head_dim).transpose(1, 2)
+        h = F.scaled_dot_product_attention(q, k, v)
+        h = h.transpose(1, 2).reshape(B, N, C)
+        x = x + self.ca_out(h)
         # FFN
         x = x + self.ffn(self.norm3(x))
         return x
