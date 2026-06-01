@@ -138,19 +138,21 @@ def split_tensor(tensor: np.ndarray, strategy: str, rank: int) -> np.ndarray:
         return tensor[rank * c : (rank + 1) * c].copy()
 
     if strategy == "row":
+        if tensor.ndim < 2:
+            return tensor  # 1D tensor, replicate
         if tensor.shape[1] % TP_SIZE != 0:
             return tensor  # replicate
         c = tensor.shape[1] // TP_SIZE
         return tensor[:, rank * c : (rank + 1) * c].copy()
 
     if strategy == "gptq_col":
-        if tensor.shape[1] % TP_SIZE != 0:
+        if tensor.ndim < 2 or tensor.shape[1] % TP_SIZE != 0:
             return tensor  # replicate
         c = tensor.shape[1] // TP_SIZE
         return tensor[:, rank * c : (rank + 1) * c].copy()
 
     if strategy == "gptq_row":
-        if tensor.shape[0] % TP_SIZE != 0:
+        if tensor.ndim < 2 or tensor.shape[0] % TP_SIZE != 0:
             return tensor  # replicate
         c = tensor.shape[0] // TP_SIZE
         return tensor[rank * c : (rank + 1) * c].copy()
