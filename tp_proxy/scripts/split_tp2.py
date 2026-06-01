@@ -273,9 +273,23 @@ def main():
             shutil.copy2(str(gc_src), os.path.join(rank_dirs[r], "generation_config.json"))
 
     # ---- load weight index ----
-    with open(model_dir / "model.safetensors.index.json") as f:
-        index = json.load(f)
-    shard_files = sorted(set(index["weight_map"].values()))
+    index_path = model_dir / "model.safetensors.index.json"
+    single_file = model_dir / "model.safetensors"
+    if index_path.exists():
+        with open(index_path) as f:
+            index = json.load(f)
+        shard_files = sorted(set(index["weight_map"].values()))
+    elif single_file.exists():
+        # Single-file model: build index from tensor names
+        with safe_open(str(single_file), framework="pt") as st:
+            tensor_names = st.keys()
+        weight_map = {name: "model.safetensors" for name in tensor_names}
+        index = {"metadata": {}, "weight_map": weight_map}
+        shard_files = ["model.safetensors"]
+        print(f"Single-file model: {len(tensor_names)} tensors")
+    else:
+        print(f"ERROR: neither {index_path} nor {single_file} found")
+        sys.exit(1)
 
     # ---- process shards ----
     total_tensors = 0
