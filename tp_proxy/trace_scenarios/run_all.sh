@@ -1,9 +1,21 @@
 #!/bin/bash
-# Run all trace scenarios sequentially
+# Run trace scenarios sequentially
+# Usage: bash run_all.sh [LABEL]
+#   LABEL=ai_station  -> run 01-06 only
+#   LABEL=vla         -> run 07 only
+#   (no label)        -> run all 01-07
 DIR="$(cd "$(dirname "$0")" && pwd)"
+LABEL="${1:-}"
 FAIL=0
 
-for script in "$DIR"/[0-9]*.sh; do
+case "$LABEL" in
+    ai_station) PATTERN="0[1-6]" ;;
+    vla)        PATTERN="07" ;;
+    *)          PATTERN="[0-9]" ;;
+esac
+
+for script in "$DIR"/${PATTERN}*.sh; do
+    [ -f "$script" ] || continue
     echo "========================================"
     echo "Running: $(basename $script)"
     echo "========================================"

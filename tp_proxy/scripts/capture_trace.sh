@@ -14,6 +14,7 @@ OUTPUT_LEN="${3:?}"
 OUT_DIR="${4:?}"
 NUM_PROMPTS="${5:-10}"
 BATCH_SIZE="${6:-1}"
+TP_SIZE="${TP_SIZE:-1}"
 MAX_MODEL_LEN=$((INPUT_LEN + OUTPUT_LEN + 64))
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -54,8 +55,10 @@ def main():
     num_prompts = int(sys.argv[4])
     batch_size = int(sys.argv[5])
     max_model_len = int(sys.argv[6])
+    tp_size = int(os.environ.get("TP_SIZE", "1"))
 
     llm = LLM(model=model, max_model_len=max_model_len,
+              tensor_parallel_size=tp_size,
               gpu_memory_utilization=0.9, trust_remote_code=True)
     sp = SamplingParams(max_tokens=output_len, temperature=0, ignore_eos=True)
 
