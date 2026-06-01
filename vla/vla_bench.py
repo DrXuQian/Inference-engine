@@ -116,16 +116,20 @@ class CrossAttentionBlock(nn.Module):
 
 class SpatioTemporalVIT(nn.Module):
     """
-    Spatio-temporal VIT with historical cross-attention.
+    Spatio-temporal VIT with per-camera self-attention + historical cross-attention.
 
-    Architecture:
-      - depth=24 self-attention blocks (hidden=1024, heads=16)
-      - Every cross_every=4 layers: cross-attention with history KV
+    Architecture (following Qwen3-VL):
+      - Self-attention is per-image (each camera independently, NOT across cameras)
+      - Every cross_every=4 layers: cross-attention with that camera's history
       - Input: n_cams × tokens_per_cam × patch_factor tokens at hidden dim
       - Output: n_cams × tokens_per_cam tokens projected to out_dim
+
+    Per-camera self-attn: 900 tokens (225 × 4 patches)
+    Per-camera cross-attn: 900 query × (17 frames × 225 tokens) = 900 × 3825 history
     """
     def __init__(self, hidden=1024, heads=16, depth=24, cross_every=4,
                  patch_factor=4, n_cams=6, tokens_per_cam=225,
+                 history_frames=17, history_cams_per_query=1,
                  out_dim=2560, ffn_dim=4096, dtype=torch.bfloat16):
         super().__init__()
         self.depth = depth
@@ -133,17 +137,18 @@ class SpatioTemporalVIT(nn.Module):
         self.patch_factor = patch_factor
         self.n_cams = n_cams
         self.tokens_per_cam = tokens_per_cam
+        self.tokens_per_image = tokens_per_cam * patch_factor  # 900
+        self.hist_tokens_per_cam = history_frames * tokens_per_cam  # 17×225=3825
 
-        # Patch embedding (RGB 480×480 → patches → tokens)
-        # Simplified: assume input is already tokenized
+        # Patch embedding
         self.patch_embed = nn.Linear(hidden, hidden, dtype=dtype)
 
-        # Self-attention blocks
+        # Self-attention blocks (shared across cameras)
         self.blocks = nn.ModuleList([
             VITBlock(hidden, heads, ffn_dim, dtype) for _ in range(depth)
         ])
 
-        # Cross-attention blocks (every cross_every layers)
+        # Cross-attention blocks (every cross_every layers, shared across cameras)
         n_cross = depth // cross_every
         self.cross_blocks = nn.ModuleList([
             CrossAttentionBlock(hidden, heads, dtype) for _ in range(n_cross)
@@ -157,26 +162,50 @@ class SpatioTemporalVIT(nn.Module):
     def forward(self, x, history_kv):
         """
         x: (B, n_cams * tokens_per_cam * patch_factor, hidden) = (B, 5400, 1024)
-        history_kv: (B, n_hist_tokens, hidden) = (B, 11475, 1024)
+        history_kv: (B, n_cams * hist_tokens_per_cam, hidden) = (B, 6*3825, 1024)
+           or (B, hist_cams * hist_tokens_per_cam, hidden) for subset of cams
         Returns: (B, n_cams * tokens_per_cam, out_dim) = (B, 1350, 2560)
         """
+        B = x.shape[0]
+        C = x.shape[2]
+        NC = self.n_cams
+        T = self.tokens_per_image  # 900 per camera
+        HT = self.hist_tokens_per_cam  # 3825 history per camera
+
         x = self.patch_embed(x)
+
+        # Reshape to per-camera: (B, NC, T, C) → treat NC as batch dim
+        x = x.view(B, NC, T, C)
+
+        # Reshape history to per-camera: (B, NC, HT, C)
+        # If history has different cam count, broadcast or slice
+        total_hist = history_kv.shape[1]
+        hist_cams = total_hist // HT
+        if hist_cams == NC:
+            hist = history_kv.view(B, NC, HT, C)
+        else:
+            # Broadcast: use all history for each camera
+            hist = history_kv.unsqueeze(1).expand(B, NC, -1, C)
+
+        # Merge B and NC for per-camera processing: (B*NC, T, C)
+        x = x.reshape(B * NC, T, C)
+        hist = hist.reshape(B * NC, -1, C)  # (B*NC, HT, C)
 
         cross_idx = 0
         for i in range(self.depth):
-            x = self.blocks[i](x)
+            x = self.blocks[i](x)  # per-camera self-attn: (B*NC, 900, 1024)
             if (i + 1) % self.cross_every == 0:
-                x = self.cross_blocks[cross_idx](x, history_kv)
+                x = self.cross_blocks[cross_idx](x, hist)  # per-camera cross-attn
                 cross_idx += 1
 
-        # Aggregate: (B, 5400, 1024) → (B, 1350, 4096) → (B, 1350, 1024)
-        B = x.shape[0]
-        n_out = self.n_cams * self.tokens_per_cam
-        x = x.view(B, n_out, self.patch_factor, -1)
-        x = x.reshape(B, n_out, -1)
+        # Reshape back: (B*NC, T, C) → (B, NC*tokens_per_cam, patch_factor, C)
+        x = x.view(B, NC, self.tokens_per_cam, self.patch_factor, C)
+        # Aggregate patches: (B, NC*225, 4*1024) → (B, NC*225, 1024)
+        n_out = NC * self.tokens_per_cam
+        x = x.reshape(B, n_out, self.patch_factor * C)
         x = self.aggregate(x)
         x = self.norm_out(x)
-        return self.proj_out(x)
+        return self.proj_out(x)  # (B, 1350, 2560)
 
 
 # ============================================================
@@ -364,7 +393,6 @@ def main():
     ap.add_argument("--vit-tokens-per-cam", type=int, default=225)
     ap.add_argument("--vit-patch-factor", type=int, default=4)
     ap.add_argument("--vit-history-frames", type=int, default=17)
-    ap.add_argument("--vit-history-cams", type=int, default=3)
     ap.add_argument("--vit-out-dim", type=int, default=2560)
     ap.add_argument("--vit-ffn-dim", type=int, default=4096,
                     help="VIT FFN intermediate size (Qwen3-VL: 4096)")
@@ -389,13 +417,18 @@ def main():
 
     n_vit_in = args.vit_cams * args.vit_tokens_per_cam * args.vit_patch_factor
     n_vit_out = args.vit_cams * args.vit_tokens_per_cam
-    n_hist = args.vit_history_frames * args.vit_history_cams * args.vit_tokens_per_cam
+    # History: per-camera history = history_frames × tokens_per_cam
+    # Total history tokens = n_cams × per-camera history (for per-camera cross-attn)
+    n_hist_per_cam = args.vit_history_frames * args.vit_tokens_per_cam
+    n_hist = args.vit_cams * n_hist_per_cam
     n_dit_tokens = args.dit_denoise_steps + 1
 
     print("=" * 60)
     print("VLA Benchmark (VIT + DiT)")
     print(f"  dtype={args.dtype}, device={dev}, compile={use_compile}")
-    print(f"  VIT: {n_vit_in} → {n_vit_out} tokens, {args.vit_depth}L×{args.vit_hidden}, history={n_hist}")
+    print(f"  VIT: {n_vit_in} → {n_vit_out} tokens, {args.vit_depth}L×{args.vit_hidden}")
+    print(f"       per-cam self-attn: {args.vit_tokens_per_cam * args.vit_patch_factor} tokens")
+    print(f"       per-cam cross-attn history: {n_hist_per_cam} tokens ({args.vit_history_frames} frames)")
     print(f"  DiT: {n_dit_tokens} tokens × {args.dit_denoise_steps} steps, {args.dit_layers}L×{args.dit_hidden}")
     print(f"  LLM: run separately via vLLM (Qwen3-4B, {args.dit_llm_tokens} tokens prefill)")
     print("=" * 60)
@@ -413,7 +446,9 @@ def main():
             hidden=args.vit_hidden, heads=args.vit_heads,
             depth=args.vit_depth, cross_every=args.vit_cross_every,
             patch_factor=args.vit_patch_factor, n_cams=args.vit_cams,
-            tokens_per_cam=args.vit_tokens_per_cam, out_dim=args.vit_out_dim,
+            tokens_per_cam=args.vit_tokens_per_cam,
+            history_frames=args.vit_history_frames,
+            out_dim=args.vit_out_dim,
             ffn_dim=args.vit_ffn_dim, dtype=dtype,
         ).to(dev).eval()
 
