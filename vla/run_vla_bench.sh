@@ -24,7 +24,7 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${OUT_DIR}_${TIMESTAMP}"
 
 VLA_DIR="$(cd "$(dirname "$0")" && pwd)"
-TP_PROXY_DIR="$(cd "$VLA_DIR/../../tp_proxy" && pwd)"
+TP_PROXY_DIR="$(cd "$VLA_DIR/../tp_proxy" && pwd)"
 PLATFORM="${PLATFORM:-ppu}"
 
 # VLA architecture params
