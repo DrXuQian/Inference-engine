@@ -141,10 +141,10 @@ def main():
     ap.add_argument("--dit-steps", type=int, default=50)
     ap.add_argument("--show-all-combos", action="store_true",
                     help="Show all FP16/FP8/FP4 combinations")
-    ap.add_argument("--peak-tflops", type=float, default=450,
+    ap.add_argument("--peak-tflops", type=float, default=500,
                     help="Peak BF16 tensor TFLOPS for MFU calculation")
-    ap.add_argument("--peak-bw", type=float, default=2400,
-                    help="Peak memory bandwidth GB/s for BW utilization (default: 2.4TB/s)")
+    ap.add_argument("--peak-bw", type=float, default=680,
+                    help="Peak memory bandwidth GB/s for BW utilization")
     ap.add_argument("--output-json", default=None)
     args = ap.parse_args()
 
