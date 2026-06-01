@@ -513,8 +513,8 @@ def main():
             ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 3072, 2, 1),
             ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 3072, 2, 1),
             ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1, 1),
-            ("07 30B-A3B TP2 out=200", "07_qwen3_30b_a3b", "tp2", 1536, 200, 2, 1),
-            ("07 30B-A3B TP2 out=500", "07_qwen3_30b_a3b", "tp2", 1536, 500, 2, 1),
+            ("07 30B-A3B TP2 out=200", "07_qwen3_30b_a3b", "tp2", 1536, 200, 2, 1, "compensated_200.json"),
+            ("07 30B-A3B TP2 out=500", "07_qwen3_30b_a3b", "tp2", 1536, 500, 2, 1, "compensated_500.json"),
         ]
         # Add batch scenarios (04c/05c)
         for b in [1, 2, 4, 8]:
@@ -549,14 +549,19 @@ def main():
                 sep += "---------------|---------|----------|"
             print(sep)
 
-        for name, sc_dir, sub, input_len, output_len, tp, batch in scenario_defs:
+        for entry in scenario_defs:
+            name, sc_dir, sub, input_len, output_len, tp, batch = entry[:7]
+            custom_file = entry[7] if len(entry) > 7 else None
+
             if sub:
                 base = os.path.join(rd, sc_dir, sub)
             else:
                 base = os.path.join(rd, sc_dir)
 
-            # For batch scenarios, compensated file is per-batch
-            if batch > 1:
+            # Compensated file path
+            if custom_file:
+                comp_file = os.path.join(base, custom_file)
+            elif batch > 1:
                 comp_file = os.path.join(base, f"compensated_batch{batch}.json")
             else:
                 comp_file = os.path.join(base, "compensated.json")
