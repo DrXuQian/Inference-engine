@@ -3,23 +3,23 @@
 #
 # Three independent components:
 #   1. VIT:  PyTorch spatio-temporal vision transformer (24L×1024)
-#   2. LLM:  vLLM prefill with Qwen3-4B (36L×2560, 1550 tokens)
+#   2. LLM:  vLLM prefill with Qwen3-VL-4B-Instruct (36L×2560, 1550 tokens)
 #   3. DiT:  PyTorch diffusion action transformer (18L×1024, 50 steps)
 #
 # Usage:
-#   bash run_vla_bench.sh /path/to/Qwen3-4B [output_dir]
-#   bash run_vla_bench.sh /sim/eec/shared/models/Qwen/Qwen3-4B ./results/vla
+#   bash run_vla_bench.sh [output_dir] [component]
+#   bash run_vla_bench.sh ./results/vla
 #
 # Run single component:
-#   bash run_vla_bench.sh /path/to/Qwen3-4B ./results/vla vit
-#   bash run_vla_bench.sh /path/to/Qwen3-4B ./results/vla llm
-#   bash run_vla_bench.sh /path/to/Qwen3-4B ./results/vla dit
+#   bash run_vla_bench.sh ./results/vla vit
+#   bash run_vla_bench.sh ./results/vla llm
+#   bash run_vla_bench.sh ./results/vla dit
 
 set -euo pipefail
 
-LLM_MODEL="${1:?Usage: $0 <qwen3-4b-model-dir> [output_dir] [component: vit|llm|dit|all]}"
-OUT_DIR="${2:-./results/vla_bench}"
-COMPONENT="${3:-all}"
+LLM_MODEL="${LLM_MODEL:-/sim/eec/shared/models/Qwen/Qwen3-VL-4B-Instruct}"
+OUT_DIR="${1:-./results/vla_bench}"
+COMPONENT="${2:-all}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${OUT_DIR}_${TIMESTAMP}"
 
