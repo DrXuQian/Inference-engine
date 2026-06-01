@@ -205,10 +205,10 @@ def main():
         )
         return per_layer * layers
 
-    # ①a VIT Target (Spatial): 3 cams × 225 tokens, 24L
-    vit_target = transformer_flops(3, 225, 24, 1024, 16, 64, 4096)
-    # ①b VIT Current (Spatial): 3 cams × 225 tokens, 24L
-    vit_current = transformer_flops(3, 225, 24, 1024, 16, 64, 4096)
+    # ①a VIT Target (Spatial): 3 cams × 900 tokens (225×4, pre-merge), 24L
+    vit_target = transformer_flops(3, 900, 24, 1024, 16, 64, 4096)
+    # ①b VIT Current (Spatial): 3 cams × 900 tokens, 24L
+    vit_current = transformer_flops(3, 900, 24, 1024, 16, 64, 4096)
     # ①b+ Temporal Attention: 675 positions × 18 timesteps, 6L (every 4 of 24)
     vit_temporal = cross_attn_flops(675, 1, 18, 6, 1024, 16, 64)
     # Actually temporal is self-attn across time per spatial position
@@ -242,8 +242,8 @@ def main():
     print(f"\nFLOPs Breakdown:")
     print(f"  {'Stage':<30s} {'Batch':>5s} {'Seq':>5s} {'Layers':>6s} {'Hidden':>6s} {'TFLOPs':>8s}")
     print(f"  {'-'*68}")
-    print(f"  {'①a VIT Target (Spatial)':<30s} {'3':>5s} {'225':>5s} {'24':>6s} {'1024':>6s} {vit_target/1e12:>8.3f}")
-    print(f"  {'①b VIT Current (Spatial)':<30s} {'3':>5s} {'225':>5s} {'24':>6s} {'1024':>6s} {vit_current/1e12:>8.3f}")
+    print(f"  {'①a VIT Target (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_target/1e12:>8.3f}")
+    print(f"  {'①b VIT Current (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_current/1e12:>8.3f}")
     print(f"  {'①b+ Temporal Attention':<30s} {'675':>5s} {'18':>5s} {'6':>6s} {'1024':>6s} {vit_temporal/1e12:>8.3f}")
     print(f"  {'② LLM Prefill':<30s} {'1':>5s} {'1550':>5s} {'36':>6s} {'2560':>6s} {llm_flops/1e12:>8.3f}")
     print(f"  {'③ DiT (×' + str(args.dit_steps) + ')':<30s} {'1':>5s} {'51':>5s} {'18':>6s} {'1024':>6s} {dit_flops/1e12:>8.3f}")

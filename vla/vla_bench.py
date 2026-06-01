@@ -169,10 +169,9 @@ class SpatioTemporalVIT(nn.Module):
     def forward(self, x, history):
         """
         x: (B, n_cams * tokens_per_cam * patch_factor, hidden) = (B, 5400, 1024)
-           900 patches per camera × 6 cameras (raw, pre-merge)
+           900 patches per camera × 6 cameras
         history: (B, cams_with_history * history_frames * tokens_per_cam, hidden)
            = (B, 3 * 17 * 225, hidden) = (B, 11475, 1024)
-           history is already merged (225 tokens per frame)
         Returns: (B, n_cams * tokens_per_cam, out_dim) = (B, 1350, 2560)
         """
         B = x.shape[0]
@@ -180,62 +179,56 @@ class SpatioTemporalVIT(nn.Module):
         NC = self.n_cams           # 6
         S = self.tokens_per_cam    # 225
         PF = self.patch_factor     # 4
-
-        # Patch merge: (B, NC*S*PF, C) → (B, NC, S, PF, C) → (B, NC, S, PF*C) → (B, NC*S, C)
-        x = x.view(B, NC, S, PF, C)
-        x = x.reshape(B, NC * S, PF * C)
-        x = self.patch_merge(x)    # (B, 1350, 1024)
-        x = x.view(B, NC, S, -1)   # (B, 6, 225, 1024)
+        S_full = S * PF            # 900 (full seq before merge)
         NC_hist = self.cams_with_history  # 3
         HF = self.history_frames   # 17
         NT = self.n_temporal_steps # 18
-        C = x.shape[-1]
 
-        # Per-camera: (B, NC, S, C) → (B*NC, S, C)
-        x = x.reshape(B * NC, S, C)
+        # Per-camera spatial: (B, NC*S_full, C) → (B*NC, 900, C)
+        x = x.view(B * NC, S_full, C)
 
-        # Prepare history for temporal attention
-        # history: (B, NC_hist * HF * S, C) → (B, NC_hist, HF, S, C)
+        # History for temporal attention: (B, NC_hist*HF*S, C) → (B, NC_hist, HF, S, C)
         hist = history.view(B, NC_hist, HF, S, C)
 
         temporal_idx = 0
         for i in range(self.depth):
-            # Spatial self-attention: each camera independently
-            x = self.blocks[i](x)  # (B*NC, 225, 1024)
+            # Spatial self-attention on 900 tokens per camera
+            x = self.blocks[i](x)  # (B*NC, 900, 1024)
 
             if (i + 1) % self.cross_every == 0:
-                # Temporal self-attention for current cameras (last NC_hist cameras)
-                # Reshape current cameras: (B*NC, S, C) → (B, NC, S, C)
-                x_all = x.view(B, NC, S, C)
+                # Temporal attention: pool 4 patches → 1 position, attend across time
+                # (B*NC, 900, C) → (B, NC, 225, 4, C) → pool → (B, NC, 225, C)
+                x_all = x.view(B, NC, S, PF, C)
+                x_pooled = x_all.mean(dim=3)  # (B, NC, 225, C)
 
-                # Extract current cameras with history (last 3)
-                x_curr = x_all[:, NC_hist:, :, :]  # (B, 3, 225, C)
+                # Current cameras with history (last NC_hist)
+                x_curr = x_pooled[:, NC_hist:, :, :]  # (B, 3, 225, C)
 
-                # Stack current frame with history: (B, 3, 18, 225, C)
-                curr_expanded = x_curr.unsqueeze(2)  # (B, 3, 1, 225, C)
-                temporal_seq = torch.cat([hist, curr_expanded], dim=2)  # (B, 3, 18, 225, C)
+                # Stack with history: (B, 3, 18, 225, C)
+                temporal_seq = torch.cat([hist, x_curr.unsqueeze(2)], dim=2)
 
-                # Reshape for temporal attention: (B * 3 * 225, 18, C)
-                temporal_seq = temporal_seq.permute(0, 1, 3, 2, 4)  # (B, 3, 225, 18, C)
-                temporal_seq = temporal_seq.reshape(B * NC_hist * S, NT, C)
+                # Reshape: (B*3*225, 18, C)
+                temporal_seq = temporal_seq.permute(0, 1, 3, 2, 4).reshape(B * NC_hist * S, NT, C)
 
                 # Temporal self-attention
                 temporal_seq = self.temporal_blocks[temporal_idx](temporal_seq)  # (B*675, 18, C)
 
-                # Extract current timestep (last one): (B*675, C)
-                x_temporal = temporal_seq[:, -1, :]  # (B*675, C)
-                x_temporal = x_temporal.view(B, NC_hist, S, C)
+                # Extract current timestep, broadcast back to 4 patches
+                x_temporal = temporal_seq[:, -1, :].view(B, NC_hist, S, 1, C)
+                x_temporal = x_temporal.expand(-1, -1, -1, PF, -1)  # (B, 3, 225, 4, C)
 
-                # Update current cameras in x_all
+                # Update current cameras (residual add)
                 x_all = x_all.clone()
-                x_all[:, NC_hist:, :, :] = x_temporal
+                x_all[:, NC_hist:] = x_all[:, NC_hist:] + x_temporal
 
-                # Reshape back: (B*NC, S, C)
-                x = x_all.reshape(B * NC, S, C)
+                # Back to (B*NC, 900, C)
+                x = x_all.reshape(B * NC, S_full, C)
                 temporal_idx += 1
 
-        # Reshape output: (B*NC, S, C) → (B, NC*S, C)
-        x = x.view(B, NC * S, C)
+        # Patch merge at the END: (B*NC, 900, C) → (B, NC*225, 4*C) → merge → (B, 1350, C)
+        x = x.view(B, NC, S, PF, C)
+        x = x.reshape(B, NC * S, PF * C)
+        x = self.patch_merge(x)  # (B, 1350, 1024)
         x = self.norm_out(x)
         return self.proj_out(x)  # (B, 1350, 2560)
 
