@@ -79,7 +79,7 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
     # Per-expert col/row split (both GPTQ and BF16). vLLM loads per-expert
     # via weight_loader() and fuses internally. Config moe_intermediate_size
     # is already divided by TP in modify_config().
-    if ".experts." in n and ".shared_expert." not in n:
+    if ".experts." in n:
         is_gptq = any(n.endswith(sfx) for sfx in (".qweight", ".qzeros", ".scales", ".g_idx"))
         if is_gptq:
             is_col = ".gate_proj." in n or ".up_proj." in n
