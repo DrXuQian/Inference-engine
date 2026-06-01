@@ -10,7 +10,7 @@ if [ ! -d "$MODEL" ]; then
     exit 1
 fi
 
-for TP in 1 2; do
+for TP in 2; do
     echo "--- TP=$TP ---"
     DIR="$BASE/tp${TP}"
 

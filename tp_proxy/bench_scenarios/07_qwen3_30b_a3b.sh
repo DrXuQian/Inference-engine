@@ -10,7 +10,7 @@ mkdir -p "$OUT"
 
 echo "=== Split/Prune: Qwen3-30B-A3B-GPTQ-Int4, TP=1&2 ==="
 
-for TP in 1 2; do
+for TP in 2; do
     echo ""
     echo "--- TP=$TP ---"
     TP_DIR="$OUT/tp${TP}"
