@@ -135,17 +135,21 @@ class SpatioTemporalVIT(nn.Module):
     Output: (B, n_cams × tokens_per_cam, out_dim) = (B, 1350, 2560)
     """
     def __init__(self, hidden=1024, heads=16, depth=24, cross_every=4,
-                 n_cams=6, tokens_per_cam=225,
+                 patch_factor=4, n_cams=6, tokens_per_cam=225,
                  history_frames=17,
                  out_dim=2560, ffn_dim=4096, dtype=torch.bfloat16):
         super().__init__()
         self.depth = depth
         self.cross_every = cross_every
+        self.patch_factor = patch_factor
         self.n_cams = n_cams
         self.tokens_per_cam = tokens_per_cam
         self.history_frames = history_frames
-        self.n_temporal_steps = history_frames + 1  # 18 (17 history + 1 current)
-        self.cams_with_history = n_cams // 2  # 3 current cameras have history
+        self.n_temporal_steps = history_frames + 1  # 18
+        self.cams_with_history = n_cams // 2  # 3
+
+        # Patch merge: 225×4 patches → 225 tokens (aggregate 4 patches per position)
+        self.patch_merge = nn.Linear(hidden * patch_factor, hidden, dtype=dtype)
 
         # Spatial self-attention blocks (shared, per-camera)
         self.blocks = nn.ModuleList([
@@ -164,20 +168,31 @@ class SpatioTemporalVIT(nn.Module):
 
     def forward(self, x, history):
         """
-        x: (B, n_cams * tokens_per_cam, hidden) = (B, 1350, 1024)
-           225 tokens per camera × 6 cameras
+        x: (B, n_cams * tokens_per_cam * patch_factor, hidden) = (B, 5400, 1024)
+           900 patches per camera × 6 cameras (raw, pre-merge)
         history: (B, cams_with_history * history_frames * tokens_per_cam, hidden)
            = (B, 3 * 17 * 225, hidden) = (B, 11475, 1024)
+           history is already merged (225 tokens per frame)
+        Returns: (B, n_cams * tokens_per_cam, out_dim) = (B, 1350, 2560)
         """
-        B, _, C = x.shape
+        B = x.shape[0]
+        C = x.shape[2]
         NC = self.n_cams           # 6
         S = self.tokens_per_cam    # 225
+        PF = self.patch_factor     # 4
+
+        # Patch merge: (B, NC*S*PF, C) → (B, NC, S, PF, C) → (B, NC, S, PF*C) → (B, NC*S, C)
+        x = x.view(B, NC, S, PF, C)
+        x = x.reshape(B, NC * S, PF * C)
+        x = self.patch_merge(x)    # (B, 1350, 1024)
+        x = x.view(B, NC, S, -1)   # (B, 6, 225, 1024)
         NC_hist = self.cams_with_history  # 3
         HF = self.history_frames   # 17
         NT = self.n_temporal_steps # 18
+        C = x.shape[-1]
 
-        # Split into per-camera: (B*NC, S, C)
-        x = x.view(B, NC, S, C).reshape(B * NC, S, C)
+        # Per-camera: (B, NC, S, C) → (B*NC, S, C)
+        x = x.reshape(B * NC, S, C)
 
         # Prepare history for temporal attention
         # history: (B, NC_hist * HF * S, C) → (B, NC_hist, HF, S, C)
@@ -431,8 +446,9 @@ def main():
     use_compile = not args.no_compile
     use_cudagraph = args.cuda_graph
 
-    # VIT: 225 tokens per cam (post patch-merge), NOT 225×4
-    n_vit_tokens = args.vit_cams * args.vit_tokens_per_cam  # 6×225=1350
+    patch_factor = 4
+    n_vit_input = args.vit_cams * args.vit_tokens_per_cam * patch_factor  # 6×225×4=5400
+    n_vit_tokens = args.vit_cams * args.vit_tokens_per_cam  # 6×225=1350 (after merge)
     n_cams_hist = args.vit_cams // 2  # 3 current cameras have history
     n_hist_per_cam = args.vit_history_frames * args.vit_tokens_per_cam  # 17×225
     n_hist = n_cams_hist * n_hist_per_cam  # 3×17×225=11475
@@ -441,7 +457,7 @@ def main():
     print("=" * 60)
     print("VLA Benchmark (VIT + DiT)")
     print(f"  dtype={args.dtype}, device={dev}, compile={use_compile}")
-    print(f"  VIT: {n_vit_tokens} tokens ({args.vit_cams}cam × {args.vit_tokens_per_cam}tok), {args.vit_depth}L×{args.vit_hidden}")
+    print(f"  VIT: {n_vit_input} input → {n_vit_tokens} merged tokens ({args.vit_cams}cam × {args.vit_tokens_per_cam}tok), {args.vit_depth}L×{args.vit_hidden}")
     print(f"       spatial: {args.vit_tokens_per_cam} tokens/cam, temporal: {args.vit_history_frames+1} steps × {n_cams_hist*args.vit_tokens_per_cam} positions")
     print(f"  DiT: {n_dit_tokens} tokens × {args.dit_denoise_steps} steps, {args.dit_layers}L×{args.dit_hidden}")
     print(f"  LLM: run separately via vLLM (Qwen3-4B, {args.dit_llm_tokens} tokens prefill)")
@@ -467,7 +483,7 @@ def main():
             ffn_dim=args.vit_ffn_dim, dtype=dtype,
         ).to(dev).eval()
 
-        x_vit = torch.randn(1, n_vit_tokens, args.vit_hidden, dtype=dtype, device=dev)
+        x_vit = torch.randn(1, n_vit_input, args.vit_hidden, dtype=dtype, device=dev)
         hist = torch.randn(1, n_hist, args.vit_hidden, dtype=dtype, device=dev)
 
         params = sum(p.numel() for p in vit.parameters()) / 1e6
