@@ -488,11 +488,34 @@ def main():
         m07_200 = get_metrics(d07_200) if d07_200 else None
         d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_500.json"))
         m07_500 = get_metrics(d07_500) if d07_500 else None
+
+        # INT4 projected: scale TPOT by weight ratio (BF16→INT4 for MoE+attn)
+        # Qwen3-30B-A3B TP=2: BF16=2.938GB/GPU → INT4=1.469GB/GPU (scale=0.50x)
+        INT4_SCALE = 0.50  # int4_weight_gb / bf16_weight_gb
+        def scale_int4(m):
+            if not m: return None
+            tpot_int4 = m["tpot"] * INT4_SCALE
+            tps_int4 = 1000 / tpot_int4 if tpot_int4 > 0 else 0
+            total_int4 = m["ttft"] + (m.get("output_tokens", 64) - 1) * tpot_int4
+            return {"ttft": m["ttft"], "tpot": tpot_int4, "tps": tps_int4,
+                    "total": total_int4, "output_tokens": m.get("output_tokens", 64)}
+
+        m07_200_int4 = scale_int4(m07_200)
+        m07_500_int4 = scale_int4(m07_500)
+
         print_scenario(
-            "Qwen3-30B-A3B-GPTQ-INT4 (1.5K input)",
+            "Qwen3-30B-A3B BF16 measured (1.5K input)",
             [
                 ("Output=200", m07_200),
                 ("Output=500", m07_500),
+            ],
+            fmt,
+        )
+        print_scenario(
+            "Qwen3-30B-A3B INT4 projected (1.5K input)",
+            [
+                ("Output=200 (INT4)", m07_200_int4),
+                ("Output=500 (INT4)", m07_500_int4),
             ],
             fmt,
         )
