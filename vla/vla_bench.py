@@ -202,23 +202,19 @@ class SpatioTemporalVIT(nn.Module):
             x = self.blocks[i](x)  # (B*NC, 900, 1024)
 
             if (i + 1) % self.cross_every == 0:
-                # Temporal attention on 900 tokens (per-patch, not pooled)
-                # x: (B*NC, 900, C) → (B, NC, 900, C)
-                x_all = x.view(B, NC, S_full, C)
+                # Temporal attention: each spatial position attends across 18 timesteps
+                # Pool 900→225 per cam, attend across time (seq=18), broadcast back
+                x_all = x.view(B, NC, S, PF, C)
+                x_pooled = x_all.mean(dim=3)  # (B, NC, 225, C)
 
-                # Current cameras with history (last NC_hist)
-                x_curr = x_all[:, NC_hist:, :, :]  # (B, 3, 900, C)
+                # Current cameras (last NC_hist=3)
+                x_curr = x_pooled[:, NC_hist:, :, :]  # (B, 3, 225, C)
 
-                # History is at 225 resolution → expand to 900 for concat
-                # hist: (B, 3, 17, 225, C) → repeat each position 4× → (B, 3, 17, 900, C)
-                hist_expanded = hist.unsqueeze(4).expand(-1, -1, -1, -1, PF, -1)
-                hist_expanded = hist_expanded.reshape(B, NC_hist, HF, S_full, C)
+                # Stack with history: (B, 3, 18, 225, C)
+                temporal_seq = torch.cat([hist, x_curr.unsqueeze(2)], dim=2)
 
-                # Stack: (B, 3, 18, 900, C)
-                temporal_seq = torch.cat([hist_expanded, x_curr.unsqueeze(2)], dim=2)
-
-                # Reshape: (B*3*900, 18, C)
-                temporal_seq = temporal_seq.permute(0, 1, 3, 2, 4).reshape(B * NC_hist * S_full, NT, C)
+                # Reshape: (B*675, 18, C) — batch=675 positions, seq=18 timesteps
+                temporal_seq = temporal_seq.permute(0, 1, 3, 2, 4).reshape(B * NC_hist * S, NT, C)
 
                 # Temporal self-attention (no FFN)
                 BT, NT_seq, CT = temporal_seq.shape
@@ -230,8 +226,9 @@ class SpatioTemporalVIT(nn.Module):
                 h = h.transpose(1, 2).reshape(BT, NT_seq, CT)
                 temporal_seq = temporal_seq + self.temporal_outs[temporal_idx](h)
 
-                # Extract current timestep
-                x_temporal = temporal_seq[:, -1, :].view(B, NC_hist, S_full, C)
+                # Extract current timestep, broadcast back to 4 patches
+                x_temporal = temporal_seq[:, -1, :].view(B, NC_hist, S, 1, C)
+                x_temporal = x_temporal.expand(-1, -1, -1, PF, -1)
 
                 # Update current cameras (residual add)
                 x_all = x_all.clone()
