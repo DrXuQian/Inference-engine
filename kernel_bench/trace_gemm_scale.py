@@ -60,25 +60,33 @@ def get_nvtx_range(cursor, nvtx_table, nvtx_filter):
     cursor.execute(f'PRAGMA table_info("{nvtx_table}")')
     cols = [c[1] for c in cursor.fetchall()]
 
-    text_col = next((c for c in cols if c.lower() in ('text', 'message', 'name', 'value')), None)
     start_col = next((c for c in cols if c.lower() in ('start', 'timestamp', 'starttime')), None)
     end_col = next((c for c in cols if c.lower() in ('end', 'endtime', 'endtimestamp')), None)
+    text_col = next((c for c in cols if c.lower() in ('text', 'message', 'name', 'value')), None)
+    text_id_col = next((c for c in cols if c.lower() == 'textid'), None)
 
-    if not text_col or not start_col:
+    if not start_col:
+        return None, None
+
+    # Build query: text may be inline or via textId → StringIds
+    if text_id_col:
+        where = "s.value LIKE ?"
+        join = f'JOIN StringIds s ON n."{text_id_col}" = s.id'
+    elif text_col:
+        where = f'n."{text_col}" LIKE ?'
+        join = ""
+    else:
         return None, None
 
     if end_col:
-        cursor.execute(f'SELECT "{start_col}", "{end_col}" FROM "{nvtx_table}" '
-                       f'WHERE "{text_col}" LIKE ? ORDER BY "{start_col}" DESC LIMIT 1',
-                       (f"%{nvtx_filter}%",))
+        q = f'SELECT n."{start_col}", n."{end_col}" FROM "{nvtx_table}" n {join} WHERE {where} ORDER BY n."{start_col}" DESC LIMIT 1'
     else:
         dur_col = next((c for c in cols if c.lower() in ('duration', 'dur')), None)
         if not dur_col:
             return None, None
-        cursor.execute(f'SELECT "{start_col}", "{start_col}" + "{dur_col}" FROM "{nvtx_table}" '
-                       f'WHERE "{text_col}" LIKE ? ORDER BY "{start_col}" DESC LIMIT 1',
-                       (f"%{nvtx_filter}%",))
+        q = f'SELECT n."{start_col}", n."{start_col}" + n."{dur_col}" FROM "{nvtx_table}" n {join} WHERE {where} ORDER BY n."{start_col}" DESC LIMIT 1'
 
+    cursor.execute(q, (f"%{nvtx_filter}%",))
     row = cursor.fetchone()
     if row:
         return row[0], row[1]
