@@ -27,8 +27,8 @@ from safetensors.numpy import save_file as np_save_file
 
 def should_keep(name: str, num_layers: int) -> bool:
     """Return True if tensor should be kept for a model with num_layers."""
-    # Match model.language_model.layers.{N}.xxx
-    m = re.match(r"model\.language_model\.layers\.(\d+)\.", name)
+    # Match model.layers.{N}.xxx or model.language_model.layers.{N}.xxx
+    m = re.search(r"(?:model\.)?(?:language_model\.)?layers\.(\d+)\.", name)
     if m:
         return int(m.group(1)) < num_layers
 
