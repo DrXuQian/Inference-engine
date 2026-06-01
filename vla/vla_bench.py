@@ -116,94 +116,111 @@ class CrossAttentionBlock(nn.Module):
 
 class SpatioTemporalVIT(nn.Module):
     """
-    Spatio-temporal VIT with per-camera self-attention + historical cross-attention.
+    Spatio-temporal VIT: spatial self-attention + temporal self-attention.
 
-    Architecture (following Qwen3-VL):
-      - Self-attention is per-image (each camera independently, NOT across cameras)
-      - Every cross_every=4 layers: cross-attention with that camera's history
-      - Input: n_cams × tokens_per_cam × patch_factor tokens at hidden dim
-      - Output: n_cams × tokens_per_cam tokens projected to out_dim
+    Architecture:
+      ①a/①b Spatial: per-camera self-attention on 225 tokens (post patch-merge)
+        - 3 target cameras + 3 current cameras processed independently
+        - 24 layers, hidden=1024, heads=16
+      ①b+ Temporal: every cross_every=4 layers, temporal self-attention
+        - Each spatial position attends across (history_frames+1) timesteps
+        - batch = n_cams/2 × tokens_per_cam = 675 positions
+        - seq = history_frames + 1 = 18
+        - 6 temporal layers total
 
-    Per-camera self-attn: 900 tokens (225 × 4 patches)
-    Per-camera cross-attn: 900 query × (17 frames × 225 tokens) = 900 × 3825 history
+    Input: (B, n_cams × tokens_per_cam, hidden) = (B, 1350, 1024)
+      - 225 tokens per camera (already patch-merged, NOT 225×4)
+    History: (B, n_cams/2 × history_frames × tokens_per_cam, hidden)
+      - 17 frames × 225 tokens per camera × 3 cameras
+    Output: (B, n_cams × tokens_per_cam, out_dim) = (B, 1350, 2560)
     """
     def __init__(self, hidden=1024, heads=16, depth=24, cross_every=4,
-                 patch_factor=4, n_cams=6, tokens_per_cam=225,
-                 history_frames=17, history_cams_per_query=1,
+                 n_cams=6, tokens_per_cam=225,
+                 history_frames=17,
                  out_dim=2560, ffn_dim=4096, dtype=torch.bfloat16):
         super().__init__()
         self.depth = depth
         self.cross_every = cross_every
-        self.patch_factor = patch_factor
         self.n_cams = n_cams
         self.tokens_per_cam = tokens_per_cam
-        self.tokens_per_image = tokens_per_cam * patch_factor  # 900
-        self.hist_tokens_per_cam = history_frames * tokens_per_cam  # 17×225=3825
+        self.history_frames = history_frames
+        self.n_temporal_steps = history_frames + 1  # 18 (17 history + 1 current)
+        self.cams_with_history = n_cams // 2  # 3 current cameras have history
 
-        # Patch embedding
-        self.patch_embed = nn.Linear(hidden, hidden, dtype=dtype)
-
-        # Self-attention blocks (shared across cameras)
+        # Spatial self-attention blocks (shared, per-camera)
         self.blocks = nn.ModuleList([
             VITBlock(hidden, heads, ffn_dim, dtype) for _ in range(depth)
         ])
 
-        # Cross-attention blocks (every cross_every layers, shared across cameras)
-        n_cross = depth // cross_every
-        self.cross_blocks = nn.ModuleList([
-            CrossAttentionBlock(hidden, heads, dtype) for _ in range(n_cross)
+        # Temporal self-attention blocks (every cross_every layers)
+        n_temporal = depth // cross_every
+        self.temporal_blocks = nn.ModuleList([
+            VITBlock(hidden, heads, ffn_dim, dtype) for _ in range(n_temporal)
         ])
 
-        # Output: aggregate patches and project
-        self.aggregate = nn.Linear(hidden * patch_factor, hidden, dtype=dtype)
+        # Output projection
         self.norm_out = nn.LayerNorm(hidden, dtype=dtype)
         self.proj_out = nn.Linear(hidden, out_dim, dtype=dtype)
 
-    def forward(self, x, history_kv):
+    def forward(self, x, history):
         """
-        x: (B, n_cams * tokens_per_cam * patch_factor, hidden) = (B, 5400, 1024)
-        history_kv: (B, n_cams * hist_tokens_per_cam, hidden) = (B, 6*3825, 1024)
-           or (B, hist_cams * hist_tokens_per_cam, hidden) for subset of cams
-        Returns: (B, n_cams * tokens_per_cam, out_dim) = (B, 1350, 2560)
+        x: (B, n_cams * tokens_per_cam, hidden) = (B, 1350, 1024)
+           225 tokens per camera × 6 cameras
+        history: (B, cams_with_history * history_frames * tokens_per_cam, hidden)
+           = (B, 3 * 17 * 225, hidden) = (B, 11475, 1024)
         """
-        B = x.shape[0]
-        C = x.shape[2]
-        NC = self.n_cams
-        T = self.tokens_per_image  # 900 per camera
-        HT = self.hist_tokens_per_cam  # 3825 history per camera
+        B, _, C = x.shape
+        NC = self.n_cams           # 6
+        S = self.tokens_per_cam    # 225
+        NC_hist = self.cams_with_history  # 3
+        HF = self.history_frames   # 17
+        NT = self.n_temporal_steps # 18
 
-        x = self.patch_embed(x)
+        # Split into per-camera: (B*NC, S, C)
+        x = x.view(B, NC, S, C).reshape(B * NC, S, C)
 
-        # Reshape to per-camera: (B, NC, T, C) → treat NC as batch dim
-        x = x.view(B, NC, T, C)
+        # Prepare history for temporal attention
+        # history: (B, NC_hist * HF * S, C) → (B, NC_hist, HF, S, C)
+        hist = history.view(B, NC_hist, HF, S, C)
 
-        # Reshape history to per-camera: (B, NC, HT, C)
-        # If history has different cam count, broadcast or slice
-        total_hist = history_kv.shape[1]
-        hist_cams = total_hist // HT
-        if hist_cams == NC:
-            hist = history_kv.view(B, NC, HT, C)
-        else:
-            # Broadcast: use all history for each camera
-            hist = history_kv.unsqueeze(1).expand(B, NC, -1, C)
-
-        # Merge B and NC for per-camera processing: (B*NC, T, C)
-        x = x.reshape(B * NC, T, C)
-        hist = hist.reshape(B * NC, -1, C)  # (B*NC, HT, C)
-
-        cross_idx = 0
+        temporal_idx = 0
         for i in range(self.depth):
-            x = self.blocks[i](x)  # per-camera self-attn: (B*NC, 900, 1024)
-            if (i + 1) % self.cross_every == 0:
-                x = self.cross_blocks[cross_idx](x, hist)  # per-camera cross-attn
-                cross_idx += 1
+            # Spatial self-attention: each camera independently
+            x = self.blocks[i](x)  # (B*NC, 225, 1024)
 
-        # Reshape back: (B*NC, T, C) → (B, NC*tokens_per_cam, patch_factor, C)
-        x = x.view(B, NC, self.tokens_per_cam, self.patch_factor, C)
-        # Aggregate patches: (B, NC*225, 4*1024) → (B, NC*225, 1024)
-        n_out = NC * self.tokens_per_cam
-        x = x.reshape(B, n_out, self.patch_factor * C)
-        x = self.aggregate(x)
+            if (i + 1) % self.cross_every == 0:
+                # Temporal self-attention for current cameras (last NC_hist cameras)
+                # Reshape current cameras: (B*NC, S, C) → (B, NC, S, C)
+                x_all = x.view(B, NC, S, C)
+
+                # Extract current cameras with history (last 3)
+                x_curr = x_all[:, NC_hist:, :, :]  # (B, 3, 225, C)
+
+                # Stack current frame with history: (B, 3, 18, 225, C)
+                curr_expanded = x_curr.unsqueeze(2)  # (B, 3, 1, 225, C)
+                temporal_seq = torch.cat([hist, curr_expanded], dim=2)  # (B, 3, 18, 225, C)
+
+                # Reshape for temporal attention: (B * 3 * 225, 18, C)
+                temporal_seq = temporal_seq.permute(0, 1, 3, 2, 4)  # (B, 3, 225, 18, C)
+                temporal_seq = temporal_seq.reshape(B * NC_hist * S, NT, C)
+
+                # Temporal self-attention
+                temporal_seq = self.temporal_blocks[temporal_idx](temporal_seq)  # (B*675, 18, C)
+
+                # Extract current timestep (last one): (B*675, C)
+                x_temporal = temporal_seq[:, -1, :]  # (B*675, C)
+                x_temporal = x_temporal.view(B, NC_hist, S, C)
+
+                # Update current cameras in x_all
+                x_all = x_all.clone()
+                x_all[:, NC_hist:, :, :] = x_temporal
+
+                # Reshape back: (B*NC, S, C)
+                x = x_all.reshape(B * NC, S, C)
+                temporal_idx += 1
+
+        # Reshape output: (B*NC, S, C) → (B, NC*S, C)
+        x = x.view(B, NC * S, C)
         x = self.norm_out(x)
         return self.proj_out(x)  # (B, 1350, 2560)
 
@@ -391,7 +408,6 @@ def main():
     ap.add_argument("--vit-cross-every", type=int, default=4)
     ap.add_argument("--vit-cams", type=int, default=6)
     ap.add_argument("--vit-tokens-per-cam", type=int, default=225)
-    ap.add_argument("--vit-patch-factor", type=int, default=4)
     ap.add_argument("--vit-history-frames", type=int, default=17)
     ap.add_argument("--vit-out-dim", type=int, default=2560)
     ap.add_argument("--vit-ffn-dim", type=int, default=4096,
@@ -415,20 +431,18 @@ def main():
     use_compile = not args.no_compile
     use_cudagraph = args.cuda_graph
 
-    n_vit_in = args.vit_cams * args.vit_tokens_per_cam * args.vit_patch_factor
-    n_vit_out = args.vit_cams * args.vit_tokens_per_cam
-    # History: per-camera history = history_frames × tokens_per_cam
-    # Total history tokens = n_cams × per-camera history (for per-camera cross-attn)
-    n_hist_per_cam = args.vit_history_frames * args.vit_tokens_per_cam
-    n_hist = args.vit_cams * n_hist_per_cam
+    # VIT: 225 tokens per cam (post patch-merge), NOT 225×4
+    n_vit_tokens = args.vit_cams * args.vit_tokens_per_cam  # 6×225=1350
+    n_cams_hist = args.vit_cams // 2  # 3 current cameras have history
+    n_hist_per_cam = args.vit_history_frames * args.vit_tokens_per_cam  # 17×225
+    n_hist = n_cams_hist * n_hist_per_cam  # 3×17×225=11475
     n_dit_tokens = args.dit_denoise_steps + 1
 
     print("=" * 60)
     print("VLA Benchmark (VIT + DiT)")
     print(f"  dtype={args.dtype}, device={dev}, compile={use_compile}")
-    print(f"  VIT: {n_vit_in} → {n_vit_out} tokens, {args.vit_depth}L×{args.vit_hidden}")
-    print(f"       per-cam self-attn: {args.vit_tokens_per_cam * args.vit_patch_factor} tokens")
-    print(f"       per-cam cross-attn history: {n_hist_per_cam} tokens ({args.vit_history_frames} frames)")
+    print(f"  VIT: {n_vit_tokens} tokens ({args.vit_cams}cam × {args.vit_tokens_per_cam}tok), {args.vit_depth}L×{args.vit_hidden}")
+    print(f"       spatial: {args.vit_tokens_per_cam} tokens/cam, temporal: {args.vit_history_frames+1} steps × {n_cams_hist*args.vit_tokens_per_cam} positions")
     print(f"  DiT: {n_dit_tokens} tokens × {args.dit_denoise_steps} steps, {args.dit_layers}L×{args.dit_hidden}")
     print(f"  LLM: run separately via vLLM (Qwen3-4B, {args.dit_llm_tokens} tokens prefill)")
     print("=" * 60)
@@ -438,21 +452,22 @@ def main():
     # === VIT ===
     if args.component in ("vit", "all"):
         print(f"\n{'='*60}")
-        print(f"VIT: {args.vit_depth}L×{args.vit_hidden}, {n_vit_in}→{n_vit_out} tokens")
-        print(f"  cross-attn every {args.vit_cross_every} layers with {n_hist} history tokens")
+        print(f"VIT: {args.vit_depth}L×{args.vit_hidden}")
+        print(f"  spatial: {args.vit_cams}cam × {args.vit_tokens_per_cam}tok, {args.vit_depth}L")
+        print(f"  temporal: {n_cams_hist*args.vit_tokens_per_cam} positions × {args.vit_history_frames+1} steps, {args.vit_depth//args.vit_cross_every}L")
         print(f"{'='*60}")
 
         vit = SpatioTemporalVIT(
             hidden=args.vit_hidden, heads=args.vit_heads,
             depth=args.vit_depth, cross_every=args.vit_cross_every,
-            patch_factor=args.vit_patch_factor, n_cams=args.vit_cams,
+            n_cams=args.vit_cams,
             tokens_per_cam=args.vit_tokens_per_cam,
             history_frames=args.vit_history_frames,
             out_dim=args.vit_out_dim,
             ffn_dim=args.vit_ffn_dim, dtype=dtype,
         ).to(dev).eval()
 
-        x_vit = torch.randn(1, n_vit_in, args.vit_hidden, dtype=dtype, device=dev)
+        x_vit = torch.randn(1, n_vit_tokens, args.vit_hidden, dtype=dtype, device=dev)
         hist = torch.randn(1, n_hist, args.vit_hidden, dtype=dtype, device=dev)
 
         params = sum(p.numel() for p in vit.parameters()) / 1e6
