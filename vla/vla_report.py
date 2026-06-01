@@ -307,40 +307,57 @@ def main():
     # VIT: GEMM=FP8, FA=FP8 (entire VIT in FP8)
     # LLM: GEMM=FP4, FA=FP8
     # DiT: GEMM=FP16, FA=FP16 (all FP16)
-    RECOMMENDED = {
-        "VIT": {"gemm": "fp8",  "fa": "fp8",  "gemm_sp": 2.0, "fa_sp": 2.0},
-        "LLM": {"gemm": "fp4",  "fa": "fp8",  "gemm_sp": 4.0, "fa_sp": 2.0},
-        "DiT": {"gemm": "fp8",  "fa": "fp8",  "gemm_sp": 2.0, "fa_sp": 2.0},
-    }
+    # DreamZero-aligned precision: QKV=FP8, FFN/Out=NVFP4, FA=FP8, Other=FP16
+    # QKV ratio within GEMM (from architecture analysis):
+    QKV_RATIO = {"VIT": 0.25, "LLM": 0.16, "DiT": 0.87}
+    FP8_SP = 2.0   # QKV proj speedup
+    FP4_SP = 4.0   # FFN/Out proj speedup
+    FA_SP = 2.0    # FlashAttention FP8 speedup
 
-    print(f"\n{'='*75}")
-    print("Recommended Precision")
-    print("=" * 75)
-    print(f"  {'Comp':<6s} {'GEMM':>6s} {'FA':>6s}  {'Before':>8s} {'After':>8s} {'Speedup':>8s}")
-    print(f"  {'-'*48}")
+    def dreamzero_scale(c, name):
+        """Scale with DreamZero mixed precision: QKV=FP8, FFN=NVFP4, FA=FP8."""
+        qkv_r = QKV_RATIO.get(name, 0.25)
+        gemm = c["gemm_ms"]
+        qkv_ms = gemm * qkv_r         # FP8 (2x)
+        ffn_ms = gemm * (1 - qkv_r)   # NVFP4 (4x)
+        fa_ms = c.get("fa_ms", 0)     # FP8 (2x)
+        other = c["other_ms"]          # FP16 (1x)
+        return qkv_ms / FP8_SP + ffn_ms / FP4_SP + fa_ms / FA_SP + other
+
+    print(f"\n{'='*80}")
+    print("Recommended Precision (DreamZero-aligned)")
+    print("  QKV proj → FP8 | FFN/Out proj → NVFP4 | FlashAttn → FP8 | Other → FP16")
+    print("=" * 80)
+    print(f"  {'Comp':<6s} {'QKV%':>5s} {'QKV':>5s} {'FFN':>6s} {'FA':>5s}  {'Before':>8s} {'After':>8s} {'Speedup':>8s}")
+    print(f"  {'-'*58}")
 
     scaled = {}
     for name, c in components.items():
         if c:
-            r = RECOMMENDED[name]
-            t = scale_time(c, r["gemm_sp"], r["fa_sp"])
+            t = dreamzero_scale(c, name)
             scaled[name] = t
             sp = c["total_ms"] / t if t > 0 else 0
-            print(f"  {name:<6s} {r['gemm']:>6s} {r['fa']:>6s}  {c['total_ms']:>7.2f}ms {t:>7.2f}ms {sp:>7.2f}x")
+            qr = QKV_RATIO.get(name, 0.25)
+            print(f"  {name:<6s} {qr*100:>4.0f}% {'fp8':>5s} {'nvfp4':>6s} {'fp8':>5s}  "
+                  f"{c['total_ms']:>7.2f}ms {t:>7.2f}ms {sp:>7.2f}x")
         else:
             scaled[name] = 0
 
     scaled_total = sum(scaled.values())
-    print(f"  {'-'*48}")
-    print(f"  {'TOTAL':<6s} {'':>6s} {'':>6s}  {total_ms:>7.2f}ms {scaled_total:>7.2f}ms {total_ms/scaled_total if scaled_total>0 else 0:>7.2f}x")
+    print(f"  {'-'*58}")
+    print(f"  {'TOTAL':<6s} {'':>5s} {'':>5s} {'':>6s} {'':>5s}  "
+          f"{total_ms:>7.2f}ms {scaled_total:>7.2f}ms {total_ms/scaled_total if scaled_total>0 else 0:>7.2f}x")
     if scaled_total > 0:
-        print(f"  {'FPS':<6s} {'':>6s} {'':>6s}  {1000/total_ms:>7.1f}   {1000/scaled_total:>7.1f}")
+        print(f"  {'FPS':<6s} {'':>5s} {'':>5s} {'':>6s} {'':>5s}  "
+              f"{1000/total_ms:>7.1f}   {1000/scaled_total:>7.1f}")
 
     # Save
     if args.output_json:
         out = {
             "components": {
-                name: {**c, "precision": RECOMMENDED[name], "scaled_ms": scaled.get(name, 0)}
+                name: {**c, "qkv_ratio": QKV_RATIO.get(name, 0.25),
+                       "precision": {"qkv": "fp8", "ffn": "nvfp4", "fa": "fp8", "other": "fp16"},
+                       "scaled_ms": scaled.get(name, 0)}
                 for name, c in components.items()
                 if c
             },
