@@ -340,10 +340,8 @@ def main():
     if args.output_json:
         out = {
             "components": {
-                name: {**c, "precision": prec, "scaled_ms": scaled.get(name, 0)}
-                for name, c, prec in [("VIT", vit, args.vit_precision),
-                                       ("LLM", llm, args.llm_precision),
-                                       ("DiT", dit, args.dit_precision)]
+                name: {**c, "precision": RECOMMENDED[name], "scaled_ms": scaled.get(name, 0)}
+                for name, c in components.items()
                 if c
             },
             "total_ms": total_ms,
