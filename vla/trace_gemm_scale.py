@@ -29,6 +29,7 @@ GEMM_PATTERNS = [
 FA_PATTERNS = [
     r"flash_fwd", r"flash_bwd", r"fmha", r"efficient_attention",
     r"scaled_dot_product", r"sdpa",
+    r"FlashAttnFwd", r"FlashAttnBwd", r"FlashAttn",
 ]
 GEMM_RE = re.compile("|".join(GEMM_PATTERNS), re.IGNORECASE)
 FA_RE = re.compile("|".join(FA_PATTERNS), re.IGNORECASE)
