@@ -18,10 +18,14 @@ for OUTLEN in 200 500; do
         continue
     fi
 
+    COMM="$BASE/tp1/comm.json"
+    [ -f "$COMM" ] && COMM_ARG="--comm-json $COMM" || COMM_ARG=""
+
     python3 "$SCRIPT_DIR/compensate_ppu.py" \
         --model-dir "$MODEL" \
         --asys-sqlite "$TRACE" \
         --output-len "$OUTLEN" \
+        $COMM_ARG \
         --output-json "$BASE/compensated_${OUTLEN}.json"
 
     # Decode BW utilization (MoE INT4)
