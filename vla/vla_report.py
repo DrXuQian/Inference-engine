@@ -138,6 +138,9 @@ def main():
     # LLM
     ap.add_argument("--llm-trace", default=None)
     ap.add_argument("--llm-ms", type=float, default=None, help="Manual LLM prefill time (ms)")
+    ap.add_argument("--llm-model", default="qwen3-vl-4b",
+                    choices=["qwen3-vl-4b", "qwen3-30b-a3b"],
+                    help="LLM model config for FLOPs/weight estimation")
     # DiT
     ap.add_argument("--dit-json", default=None)
     ap.add_argument("--dit-trace", default=None)
@@ -216,18 +219,45 @@ def main():
     )
     vit_flops = vit_target + vit_current + vit_temporal
 
-    # ② LLM Prefill: 1550 tokens, 36L, Qwen3-VL-4B
-    # GQA: Q=32heads×128=4096, KV=8heads×128=1024
-    # FFN: SwiGLU = 3 projections (gate + up + down) × 2560×9728
-    llm_flops = 36 * (
-        2 * 1550 * 2560 * 4096          # Q proj (2560→4096)
-        + 2 * 1550 * 2560 * 1024        # K proj (2560→1024)
-        + 2 * 1550 * 2560 * 1024        # V proj (2560→1024)
-        + 2 * 32 * 1550 * 1550 * 128    # QK^T
-        + 2 * 32 * 1550 * 1550 * 128    # AV
-        + 2 * 1550 * 4096 * 2560        # out proj (4096→2560)
-        + 3 * 2 * 1550 * 2560 * 9728    # FFN SwiGLU (gate+up+down)
+    # ② LLM Prefill
+    # Two model configs: Qwen3-VL-4B (dense) or Qwen3-30B-A3B (MoE)
+    LLM_CONFIGS = {
+        "qwen3-vl-4b": {
+            "name": "Qwen3-VL-4B", "hidden": 2560, "layers": 36,
+            "q_heads": 32, "kv_heads": 8, "head_dim": 128,
+            "ffn": 9728, "ffn_type": "swiglu",  # 3 proj
+            "moe": False,
+        },
+        "qwen3-30b-a3b": {
+            "name": "Qwen3-30B-A3B-GPTQ-Int4", "hidden": 2048, "layers": 48,
+            "q_heads": 32, "kv_heads": 4, "head_dim": 128,
+            "ffn": 6144, "ffn_type": "swiglu",  # 3 proj per expert
+            "moe": True, "num_experts": 128, "top_k": 8,
+        },
+    }
+    lcfg = LLM_CONFIGS.get(args.llm_model, LLM_CONFIGS["qwen3-vl-4b"])
+    H_l = lcfg["hidden"]; L_l = lcfg["layers"]
+    qd = lcfg["q_heads"] * lcfg["head_dim"]  # Q output dim
+    kvd = lcfg["kv_heads"] * lcfg["head_dim"]  # KV output dim
+    N_l = 1550  # seq len
+
+    # Attention FLOPs (same for dense/MoE)
+    attn_per_layer = (
+        2 * N_l * H_l * qd             # Q proj
+        + 2 * N_l * H_l * kvd          # K proj
+        + 2 * N_l * H_l * kvd          # V proj
+        + 2 * lcfg["q_heads"] * N_l * N_l * lcfg["head_dim"]  # QK^T
+        + 2 * lcfg["q_heads"] * N_l * N_l * lcfg["head_dim"]  # AV
+        + 2 * N_l * qd * H_l           # out proj
     )
+    # FFN FLOPs
+    if lcfg["moe"]:
+        # MoE: top_k experts active, each expert has 3 SwiGLU projections
+        ffn_per_layer = lcfg["top_k"] * 3 * 2 * N_l * H_l * lcfg["ffn"]
+    else:
+        ffn_per_layer = 3 * 2 * N_l * H_l * lcfg["ffn"]
+
+    llm_flops = L_l * (attn_per_layer + ffn_per_layer)
 
     # ③ DiT: 51 tokens, 18L, cross-attn with LLM KV (1550 tokens), ×N steps
     dit_1step_flops = 18 * (
@@ -246,7 +276,9 @@ def main():
     print(f"  {'①a VIT Target (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_target/1e12:>8.3f}")
     print(f"  {'①b VIT Current (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_current/1e12:>8.3f}")
     print(f"  {'①b+ Temporal CrossAttn':<30s} {'2700':>5s} {'Q1K18':>5s} {'6':>6s} {'1024':>6s} {vit_temporal/1e12:>8.3f}")
-    print(f"  {'② LLM Prefill':<30s} {'1':>5s} {'1550':>5s} {'36':>6s} {'2560':>6s} {llm_flops/1e12:>8.3f}")
+    llm_label = f"② LLM ({lcfg['name']})"
+    print(f"  {llm_label:<30s} {'1':>5s} {str(N_l):>5s} {str(L_l):>6s} {str(H_l):>6s} {llm_flops/1e12:>8.3f}"
+          + (f"  MoE {lcfg['num_experts']}E top-{lcfg['top_k']}" if lcfg["moe"] else ""))
     print(f"  {'③ DiT (×' + str(args.dit_steps) + ')':<30s} {'1':>5s} {'51':>5s} {'18':>6s} {'1024':>6s} {dit_flops/1e12:>8.3f}")
     print(f"  {'-'*68}")
     total_est = vit_flops + llm_flops + dit_flops
@@ -259,17 +291,24 @@ def main():
     vit_params = 24*(3*1024*1024 + 1024*1024 + 2*1024*4096) + \
                  6*(3*1024*1024 + 1024*1024) + \
                  1024*4*1024 + 1024*2560 + 1024*1024
-    # LLM: prefill is compute-bound, weight read once
-    # Qwen3-4B GQA: Q=2560→4096, K=2560→1024, V=2560→1024, O=4096→2560, FFN=2×2560×9728
-    llm_params = 36*(2560*4096 + 2*2560*1024 + 4096*2560 + 2*2560*9728)
+    # LLM weight params
+    if lcfg["moe"]:
+        # MoE: attn shared + all 128 expert FFN weights
+        llm_attn_params = L_l * (H_l*qd + 2*H_l*kvd + qd*H_l)
+        llm_ffn_params = L_l * lcfg["num_experts"] * 3 * H_l * lcfg["ffn"]  # all experts
+        llm_params = llm_attn_params + llm_ffn_params
+    else:
+        llm_params = L_l * (H_l*qd + 2*H_l*kvd + qd*H_l + 3*H_l*lcfg["ffn"])
     # DiT: ~305M params, weight re-read every denoising step
     dit_params = 18*(3*1024*1024 + 1024*1024 + 3*1024*1024 + 1024*1024 + 2*1024*4096) + \
                  2560*1024 + 62*1024 + 1024*62  # kv_proj + proj_in + proj_out
 
+    # Weight bytes: GPTQ-Int4 = 0.5B/param, bf16 = 2B/param
+    llm_bytes_per_param = 0.5 if "int4" in lcfg["name"].lower() or "gptq" in lcfg["name"].lower() else 2
     comp_weight_bytes = {
-        "VIT": vit_params * 2,                         # bf16, read once
-        "LLM": llm_params * 2,                         # bf16, read once (prefill)
-        "DiT": dit_params * 2 * args.dit_steps,        # bf16, ×50 steps
+        "VIT": vit_params * 2,                                    # bf16, read once
+        "LLM": llm_params * llm_bytes_per_param,                  # GPTQ-Int4 or bf16
+        "DiT": dit_params * 2 * args.dit_steps,                   # bf16, ×N steps
     }
 
     # Component breakdown
