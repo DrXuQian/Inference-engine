@@ -1,35 +1,41 @@
 #!/usr/bin/env python3
 """
-VLA (Vision-Language-Action) model benchmark via PyTorch tracing.
+VLA (Vision-Language-Action) model benchmark — VIT and DiT components.
 
-Profiles three components independently:
-  1. VIT: spatio-temporal vision transformer (24L, hidden=1024)
-  2. LLM: language model prefill (36L, hidden=2560)
-  3. DiT: diffusion action transformer, 50 denoise steps (18L, hidden=1024)
+LLM part runs separately via vLLM (see run_vla_bench.sh).
+
+Components:
+  1. VIT: spatio-temporal vision transformer
+     - 24 layers, hidden=1024, heads=16
+     - Input: 6 cam × 225 pos × 4 patches = 5400 tokens
+     - Every 4 layers: causal cross-attention with 17-frame history (11475 tokens)
+     - Output: aggregate 4 patches → 1, project to 2560D → 6×225 = 1350 tokens
+  2. DiT: diffusion action transformer
+     - 18 layers, hidden=1024, heads=8
+     - Input: 51 tokens (50 action steps + 1 robot state) × 62D → projected to 1024
+     - Cross-attention with LLM KV cache (1550 tokens × 2560 → projected to 1024)
+     - 50 denoising steps, each = full forward pass
+     - Output: 51 tokens → project to 62D
 
 Usage:
-    # Full benchmark (all 3 components)
-    python vla_bench.py
+    python vla_bench.py                           # both VIT + DiT
+    python vla_bench.py --component vit           # VIT only
+    python vla_bench.py --component dit           # DiT only
+    python vla_bench.py --dtype bf16 --no-compile # eager mode
 
     # Under profiler
-    nsys profile -t cuda --cuda-graph-trace=node -o vla_trace python vla_bench.py
-    # or on PPU:
+    nsys profile -t cuda -o vla_trace python vla_bench.py
     asys profile -t hggc,acdnn,acblas,hgtx -o vla_trace python vla_bench.py
-
-    # Single component
-    python vla_bench.py --component vit
-    python vla_bench.py --component llm
-    python vla_bench.py --component dit
-
-    # Custom params
-    python vla_bench.py --dtype bf16 --warmup 10 --iters 50
 """
 
 import argparse
+import json
+import os
 import time
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 try:
     import nvtx
@@ -41,317 +47,390 @@ except ImportError:
 # ============================================================
 # VIT: Spatio-Temporal Vision Transformer
 # ============================================================
+# Reference: Qwen2-VL vision encoder (ViT-L: hidden=1024, heads=16, depth=24)
+# Extended with spatio-temporal cross-attention to historical frames.
+
+class VITBlock(nn.Module):
+    """Single VIT block: self-attention + FFN, pre-norm."""
+    def __init__(self, hidden, heads, ffn_dim, dtype):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden, dtype=dtype)
+        self.attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+        self.norm2 = nn.LayerNorm(hidden, dtype=dtype)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden, ffn_dim, dtype=dtype),
+            nn.GELU(),
+            nn.Linear(ffn_dim, hidden, dtype=dtype),
+        )
+
+    def forward(self, x):
+        h = self.norm1(x)
+        h, _ = self.attn(h, h, h)
+        x = x + h
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+
+class CrossAttentionBlock(nn.Module):
+    """Cross-attention with historical frames, pre-norm."""
+    def __init__(self, hidden, heads, dtype):
+        super().__init__()
+        self.norm_q = nn.LayerNorm(hidden, dtype=dtype)
+        self.norm_kv = nn.LayerNorm(hidden, dtype=dtype)
+        self.cross_attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+
+    def forward(self, x, kv):
+        h = self.norm_q(x)
+        kv_n = self.norm_kv(kv)
+        h, _ = self.cross_attn(h, kv_n, kv_n)
+        return x + h
+
+
 class SpatioTemporalVIT(nn.Module):
     """
-    24 layers, hidden=1024, heads=16.
-    Every 4 layers: cross-attention with historical KV cache.
-    Input: 6 cameras × 225×4 tokens = 5400 tokens (high-res patches)
-    History: 17 frames × 3 cameras × 225 tokens = 11475 tokens (for cross-attn)
-    Output: 6 cameras × 225 tokens (aggregated) → projected to 2560D
+    Spatio-temporal VIT with historical cross-attention.
+
+    Architecture:
+      - depth=24 self-attention blocks (hidden=1024, heads=16)
+      - Every cross_every=4 layers: cross-attention with history KV
+      - Input: n_cams × tokens_per_cam × patch_factor tokens at hidden dim
+      - Output: n_cams × tokens_per_cam tokens projected to out_dim
     """
     def __init__(self, hidden=1024, heads=16, depth=24, cross_every=4,
                  patch_factor=4, n_cams=6, tokens_per_cam=225,
-                 ffn_mult=4, dtype=torch.bfloat16):
+                 out_dim=2560, ffn_mult=4, dtype=torch.bfloat16):
         super().__init__()
         self.depth = depth
         self.cross_every = cross_every
         self.patch_factor = patch_factor
         self.n_cams = n_cams
         self.tokens_per_cam = tokens_per_cam
+        ffn_dim = hidden * ffn_mult
 
-        self.self_attn_layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=hidden, nhead=heads,
-                dim_feedforward=hidden * ffn_mult,
-                batch_first=True, dtype=dtype, norm_first=True,
-            ) for _ in range(depth)
+        # Patch embedding (RGB 480×480 → patches → tokens)
+        # Simplified: assume input is already tokenized
+        self.patch_embed = nn.Linear(hidden, hidden, dtype=dtype)
+
+        # Self-attention blocks
+        self.blocks = nn.ModuleList([
+            VITBlock(hidden, heads, ffn_dim, dtype) for _ in range(depth)
         ])
-        # Cross-attention layers (every cross_every layers)
+
+        # Cross-attention blocks (every cross_every layers)
         n_cross = depth // cross_every
-        self.cross_attn_layers = nn.ModuleList([
-            nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
-            for _ in range(n_cross)
+        self.cross_blocks = nn.ModuleList([
+            CrossAttentionBlock(hidden, heads, dtype) for _ in range(n_cross)
         ])
-        # Aggregate patch_factor tokens → 1 token per spatial position
+
+        # Output: aggregate patches and project
         self.aggregate = nn.Linear(hidden * patch_factor, hidden, dtype=dtype)
-        self.proj_out = nn.Linear(hidden, 2560, dtype=dtype)
+        self.norm_out = nn.LayerNorm(hidden, dtype=dtype)
+        self.proj_out = nn.Linear(hidden, out_dim, dtype=dtype)
 
     def forward(self, x, history_kv):
-        # x: (B, n_cams * tokens_per_cam * patch_factor, hidden)
+        """
+        x: (B, n_cams * tokens_per_cam * patch_factor, hidden) = (B, 5400, 1024)
+        history_kv: (B, n_hist_tokens, hidden) = (B, 11475, 1024)
+        Returns: (B, n_cams * tokens_per_cam, out_dim) = (B, 1350, 2560)
+        """
+        x = self.patch_embed(x)
+
         cross_idx = 0
         for i in range(self.depth):
-            x = self.self_attn_layers[i](x)
+            x = self.blocks[i](x)
             if (i + 1) % self.cross_every == 0:
-                x_res = x
-                x, _ = self.cross_attn_layers[cross_idx](x, history_kv, history_kv)
-                x = x + x_res
+                x = self.cross_blocks[cross_idx](x, history_kv)
                 cross_idx += 1
 
-        # Aggregate: (B, n_cams*225*4, 1024) → (B, n_cams*225, 4*1024) → (B, n_cams*225, 1024)
+        # Aggregate: (B, 5400, 1024) → (B, 1350, 4096) → (B, 1350, 1024)
         B = x.shape[0]
         n_out = self.n_cams * self.tokens_per_cam
-        x = x.view(B, n_out, self.patch_factor, -1)  # (B, 1350, 4, 1024)
-        x = x.reshape(B, n_out, -1)                   # (B, 1350, 4096)
-        x = self.aggregate(x)                          # (B, 1350, 1024)
-        return self.proj_out(x)                        # (B, 1350, 2560)
-
-
-# ============================================================
-# LLM: Language Model (prefill only)
-# ============================================================
-class LLMPrefill(nn.Module):
-    """
-    36 layers, hidden=2560, heads=32, kv_heads=8.
-    GQA not directly supported by nn.TransformerEncoder, use MHA as proxy.
-    Input: 1550 tokens (1350 visual + 200 task)
-    """
-    def __init__(self, hidden=2560, heads=32, layers=36,
-                 ffn_mult=4, dtype=torch.bfloat16):
-        super().__init__()
-        self.encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=hidden, nhead=heads,
-                dim_feedforward=hidden * ffn_mult,
-                batch_first=True, dtype=dtype, norm_first=True,
-            ),
-            num_layers=layers,
-        )
-
-    def forward(self, x):
-        return self.encoder(x)
+        x = x.view(B, n_out, self.patch_factor, -1)
+        x = x.reshape(B, n_out, -1)
+        x = self.aggregate(x)
+        x = self.norm_out(x)
+        return self.proj_out(x)
 
 
 # ============================================================
 # DiT: Diffusion Action Transformer
 # ============================================================
+
+class DiTBlock(nn.Module):
+    """DiT block: self-attention + cross-attention + FFN, pre-norm."""
+    def __init__(self, hidden, heads, ffn_dim, dtype):
+        super().__init__()
+        # Self-attention
+        self.norm1 = nn.LayerNorm(hidden, dtype=dtype)
+        self.self_attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+        # Cross-attention with LLM KV
+        self.norm2 = nn.LayerNorm(hidden, dtype=dtype)
+        self.norm_kv = nn.LayerNorm(hidden, dtype=dtype)
+        self.cross_attn = nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
+        # FFN
+        self.norm3 = nn.LayerNorm(hidden, dtype=dtype)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden, ffn_dim, dtype=dtype),
+            nn.GELU(),
+            nn.Linear(ffn_dim, hidden, dtype=dtype),
+        )
+
+    def forward(self, x, kv):
+        # Self-attention
+        h = self.norm1(x)
+        h, _ = self.self_attn(h, h, h)
+        x = x + h
+        # Cross-attention
+        h = self.norm2(x)
+        kv_n = self.norm_kv(kv)
+        h, _ = self.cross_attn(h, kv_n, kv_n)
+        x = x + h
+        # FFN
+        x = x + self.ffn(self.norm3(x))
+        return x
+
+
 class ActionDiT(nn.Module):
     """
-    18 layers, hidden=1024, heads=8.
-    Cross-attention with LLM KV cache (1550 tokens × 2560 → projected to 1024).
-    Input: 51 tokens (50 action steps + 1 robot state) × 1024
-    Runs 50 diffusion denoising steps.
+    Diffusion Action Transformer.
+
+    Architecture:
+      - 18 layers, hidden=1024, heads=8
+      - Each layer: self-attn + cross-attn(LLM KV) + FFN
+      - Input: action(50×62) + state(1×62) → project to 1024 → 51 tokens
+      - Cross-attn KV: LLM output (1550 tokens × 2560) → project to 1024
+      - Output: 51 tokens × 1024 → project to 62D
+      - Runs N denoising steps (default 50)
     """
     def __init__(self, hidden=1024, heads=8, layers=18,
-                 llm_hidden=2560, ffn_mult=4, dtype=torch.bfloat16):
+                 action_dim=62, llm_hidden=2560,
+                 ffn_mult=4, dtype=torch.bfloat16):
         super().__init__()
-        self.proj_in = nn.Linear(62, hidden, dtype=dtype)  # action dim → hidden
-        self.kv_proj = nn.Linear(llm_hidden, hidden, dtype=dtype)  # LLM hidden → DiT hidden
-        self.layers = nn.ModuleList()
-        for _ in range(layers):
-            self.layers.append(nn.ModuleDict({
-                'self_attn': nn.TransformerEncoderLayer(
-                    d_model=hidden, nhead=heads,
-                    dim_feedforward=hidden * ffn_mult,
-                    batch_first=True, dtype=dtype, norm_first=True,
-                ),
-                'cross_attn': nn.MultiheadAttention(
-                    hidden, heads, batch_first=True, dtype=dtype
-                ),
-            }))
-        self.proj_out = nn.Linear(hidden, 62, dtype=dtype)  # hidden → action dim
+        ffn_dim = hidden * ffn_mult
+        self.proj_in = nn.Linear(action_dim, hidden, dtype=dtype)
+        self.kv_proj = nn.Linear(llm_hidden, hidden, dtype=dtype)
+
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden, heads, ffn_dim, dtype) for _ in range(layers)
+        ])
+
+        self.norm_out = nn.LayerNorm(hidden, dtype=dtype)
+        self.proj_out = nn.Linear(hidden, action_dim, dtype=dtype)
 
     def forward(self, action_tokens, llm_kv):
-        x = self.proj_in(action_tokens)
-        kv = self.kv_proj(llm_kv)
-        for layer in self.layers:
-            x = layer['self_attn'](x)
-            x_res = x
-            x, _ = layer['cross_attn'](x, kv, kv)
-            x = x + x_res
-        return self.proj_out(x)
+        """
+        action_tokens: (B, 51, 62)
+        llm_kv: (B, 1550, 2560)
+        Returns: (B, 51, 62)
+        """
+        x = self.proj_in(action_tokens)       # (B, 51, 1024)
+        kv = self.kv_proj(llm_kv)             # (B, 1550, 1024)
+        for block in self.blocks:
+            x = block(x, kv)
+        x = self.norm_out(x)
+        return self.proj_out(x)               # (B, 51, 62)
 
 
 # ============================================================
 # Benchmark harness
 # ============================================================
 
-def bench_component(name, model, inputs, warmup=10, iters=50, use_compile=True):
-    """Benchmark a single component with optional torch.compile."""
-    device = next(model.parameters()).device
-
-    if use_compile:
-        try:
-            model = torch.compile(model, mode="max-autotune")
-            print(f"  [{name}] torch.compile enabled")
-        except Exception as e:
-            print(f"  [{name}] torch.compile failed ({e}), using eager")
-
+def bench_component(name, fn, warmup=10, iters=50):
+    """Benchmark a callable with NVTX markers."""
     # Warmup
     if has_nvtx:
         rng = nvtx.start_range(f"{name}_warmup", color="red")
     with torch.no_grad():
         for _ in range(warmup):
-            model(*inputs)
+            fn()
     torch.cuda.synchronize()
     if has_nvtx:
         nvtx.end_range(rng)
 
     # Benchmark
-    torch.cuda.synchronize()
-    if has_nvtx:
-        rng = nvtx.start_range(f"{name}_bench", color="blue")
-
     times = []
     with torch.no_grad():
         for i in range(iters):
             if has_nvtx:
-                rng_iter = nvtx.start_range(f"{name}_iter_{i}", color="green")
+                rng = nvtx.start_range(f"{name}_{i}", color="green")
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            model(*inputs)
+            fn()
             torch.cuda.synchronize()
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000)
             if has_nvtx:
-                nvtx.end_range(rng_iter)
-
-    if has_nvtx:
-        nvtx.end_range(rng)
+                nvtx.end_range(rng)
 
     times.sort()
     median = times[len(times) // 2]
-    p10 = times[len(times) // 10]
-    p90 = times[len(times) * 9 // 10]
+    p10 = times[len(times) // 10] if len(times) >= 10 else times[0]
+    p90 = times[len(times) * 9 // 10] if len(times) >= 10 else times[-1]
     print(f"  [{name}] median={median:.2f}ms  p10={p10:.2f}ms  p90={p90:.2f}ms")
     return median
 
 
 def main():
-    ap = argparse.ArgumentParser(description="VLA model component benchmark")
-    ap.add_argument("--component", choices=["vit", "llm", "dit", "all"], default="all")
+    ap = argparse.ArgumentParser(description="VLA VIT/DiT benchmark")
+    ap.add_argument("--component", choices=["vit", "dit", "all"], default="all",
+                    help="Which component to benchmark (LLM uses vLLM separately)")
     ap.add_argument("--dtype", choices=["fp32", "fp16", "bf16"], default="bf16")
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--iters", type=int, default=50)
-    ap.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
+    ap.add_argument("--no-compile", action="store_true")
     ap.add_argument("--device", default="cuda:0")
-    # VIT params
+    # VIT
+    ap.add_argument("--vit-hidden", type=int, default=1024)
+    ap.add_argument("--vit-heads", type=int, default=16)
+    ap.add_argument("--vit-depth", type=int, default=24)
+    ap.add_argument("--vit-cross-every", type=int, default=4)
     ap.add_argument("--vit-cams", type=int, default=6)
     ap.add_argument("--vit-tokens-per-cam", type=int, default=225)
+    ap.add_argument("--vit-patch-factor", type=int, default=4)
     ap.add_argument("--vit-history-frames", type=int, default=17)
     ap.add_argument("--vit-history-cams", type=int, default=3)
-    # LLM params
-    ap.add_argument("--llm-task-tokens", type=int, default=200)
-    # DiT params
-    ap.add_argument("--dit-denoise-steps", type=int, default=50)
+    ap.add_argument("--vit-out-dim", type=int, default=2560)
+    # DiT
+    ap.add_argument("--dit-hidden", type=int, default=1024)
+    ap.add_argument("--dit-heads", type=int, default=8)
+    ap.add_argument("--dit-layers", type=int, default=18)
     ap.add_argument("--dit-action-dim", type=int, default=62)
+    ap.add_argument("--dit-denoise-steps", type=int, default=50)
+    ap.add_argument("--dit-llm-hidden", type=int, default=2560)
+    ap.add_argument("--dit-llm-tokens", type=int, default=1550)
+    # Output
+    ap.add_argument("--output-json", default=None)
     args = ap.parse_args()
 
     dtype = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[args.dtype]
     dev = args.device
     use_compile = not args.no_compile
 
-    patch_factor = 4  # each spatial position = 4 patch tokens
-    n_vit_input_tokens = args.vit_cams * args.vit_tokens_per_cam * patch_factor  # 6×225×4=5400
-    n_vis_tokens = args.vit_cams * args.vit_tokens_per_cam  # 6×225=1350 (after aggregation)
-    n_hist_tokens = args.vit_history_frames * args.vit_history_cams * args.vit_tokens_per_cam  # 17×3×225=11475
-    n_llm_tokens = n_vis_tokens + args.llm_task_tokens  # 1350+200=1550
-    n_dit_tokens = args.dit_denoise_steps + 1  # 50+1=51
+    n_vit_in = args.vit_cams * args.vit_tokens_per_cam * args.vit_patch_factor
+    n_vit_out = args.vit_cams * args.vit_tokens_per_cam
+    n_hist = args.vit_history_frames * args.vit_history_cams * args.vit_tokens_per_cam
+    n_dit_tokens = args.dit_denoise_steps + 1
 
     print("=" * 60)
-    print("VLA Benchmark")
+    print("VLA Benchmark (VIT + DiT)")
     print(f"  dtype={args.dtype}, device={dev}, compile={use_compile}")
-    print(f"  warmup={args.warmup}, iters={args.iters}")
-    print(f"  VIT: {n_vit_input_tokens} input tokens → {n_vis_tokens} output tokens, history={n_hist_tokens} tokens")
-    print(f"  LLM: {n_llm_tokens} tokens (prefill)")
-    print(f"  DiT: {n_dit_tokens} tokens × {args.dit_denoise_steps} denoise steps")
+    print(f"  VIT: {n_vit_in} → {n_vit_out} tokens, {args.vit_depth}L×{args.vit_hidden}, history={n_hist}")
+    print(f"  DiT: {n_dit_tokens} tokens × {args.dit_denoise_steps} steps, {args.dit_layers}L×{args.dit_hidden}")
+    print(f"  LLM: run separately via vLLM (Qwen3-4B, {args.dit_llm_tokens} tokens prefill)")
     print("=" * 60)
 
     results = {}
 
     # === VIT ===
     if args.component in ("vit", "all"):
-        print(f"\n=== VIT (Spatio-Temporal, 24L×1024, {n_vit_input_tokens} → {n_vis_tokens} tokens) ===")
-        vit = SpatioTemporalVIT(dtype=dtype).to(dev).eval()
-        x_vit = torch.randn(1, n_vit_input_tokens, 1024, dtype=dtype, device=dev)
-        hist = torch.randn(1, n_hist_tokens, 1024, dtype=dtype, device=dev)
+        print(f"\n{'='*60}")
+        print(f"VIT: {args.vit_depth}L×{args.vit_hidden}, {n_vit_in}→{n_vit_out} tokens")
+        print(f"  cross-attn every {args.vit_cross_every} layers with {n_hist} history tokens")
+        print(f"{'='*60}")
+
+        vit = SpatioTemporalVIT(
+            hidden=args.vit_hidden, heads=args.vit_heads,
+            depth=args.vit_depth, cross_every=args.vit_cross_every,
+            patch_factor=args.vit_patch_factor, n_cams=args.vit_cams,
+            tokens_per_cam=args.vit_tokens_per_cam, out_dim=args.vit_out_dim,
+            dtype=dtype,
+        ).to(dev).eval()
+
+        x_vit = torch.randn(1, n_vit_in, args.vit_hidden, dtype=dtype, device=dev)
+        hist = torch.randn(1, n_hist, args.vit_hidden, dtype=dtype, device=dev)
+
         params = sum(p.numel() for p in vit.parameters()) / 1e6
         print(f"  params: {params:.1f}M")
-        results["vit_ms"] = bench_component("VIT", vit, (x_vit, hist),
-                                            args.warmup, args.iters, use_compile)
-        del vit, x_vit, hist
-        torch.cuda.empty_cache()
 
-    # === LLM ===
-    if args.component in ("llm", "all"):
-        print("\n=== LLM (Prefill, 36L×2560) ===")
-        llm = LLMPrefill(dtype=dtype).to(dev).eval()
-        x_llm = torch.randn(1, n_llm_tokens, 2560, dtype=dtype, device=dev)
-        params = sum(p.numel() for p in llm.parameters()) / 1e6
-        print(f"  params: {params:.1f}M")
-        results["llm_ms"] = bench_component("LLM", llm, (x_llm,),
-                                            args.warmup, args.iters, use_compile)
-        # Save LLM output for DiT cross-attention
-        with torch.no_grad():
-            llm_out = llm(x_llm).detach()
-        del llm, x_llm
+        if use_compile:
+            try:
+                vit = torch.compile(vit, mode="max-autotune")
+                print("  torch.compile: enabled")
+            except Exception as e:
+                print(f"  torch.compile: failed ({e})")
+
+        results["vit_ms"] = bench_component("VIT", lambda: vit(x_vit, hist),
+                                            args.warmup, args.iters)
+        del vit, x_vit, hist
         torch.cuda.empty_cache()
 
     # === DiT ===
     if args.component in ("dit", "all"):
-        print(f"\n=== DiT (Action, 18L×1024, {args.dit_denoise_steps} steps) ===")
-        dit = ActionDiT(dtype=dtype).to(dev).eval()
-        # LLM KV for cross-attention
-        if "llm_out" not in dir():
-            llm_out = torch.randn(1, n_llm_tokens, 2560, dtype=dtype, device=dev)
-        action_input = torch.randn(1, n_dit_tokens, args.dit_action_dim, dtype=dtype, device=dev)
+        print(f"\n{'='*60}")
+        print(f"DiT: {args.dit_layers}L×{args.dit_hidden}, {n_dit_tokens} tokens")
+        print(f"  cross-attn with LLM KV: {args.dit_llm_tokens}×{args.dit_llm_hidden}")
+        print(f"  {args.dit_denoise_steps} denoising steps")
+        print(f"{'='*60}")
+
+        dit = ActionDiT(
+            hidden=args.dit_hidden, heads=args.dit_heads,
+            layers=args.dit_layers, action_dim=args.dit_action_dim,
+            llm_hidden=args.dit_llm_hidden, dtype=dtype,
+        ).to(dev).eval()
+
+        llm_kv = torch.randn(1, args.dit_llm_tokens, args.dit_llm_hidden, dtype=dtype, device=dev)
+        action_in = torch.randn(1, n_dit_tokens, args.dit_action_dim, dtype=dtype, device=dev)
+
         params = sum(p.numel() for p in dit.parameters()) / 1e6
-        print(f"  params: {params:.1f}M (per step)")
+        print(f"  params: {params:.1f}M")
 
-        # Benchmark SINGLE step first
-        results["dit_step_ms"] = bench_component("DiT_1step", dit, (action_input, llm_out),
-                                                 args.warmup, args.iters, use_compile)
+        if use_compile:
+            try:
+                dit = torch.compile(dit, mode="max-autotune")
+                print("  torch.compile: enabled")
+            except Exception as e:
+                print(f"  torch.compile: failed ({e})")
 
-        # Benchmark full 50-step denoising
-        def dit_full_denoise():
-            x = action_input
+        # Single step
+        results["dit_1step_ms"] = bench_component(
+            "DiT_1step", lambda: dit(action_in, llm_kv),
+            args.warmup, args.iters)
+
+        # Full denoising (50 steps)
+        def dit_full():
+            x = action_in
             for _ in range(args.dit_denoise_steps):
-                x_proj = dit(x, llm_out)
-            return x_proj
+                x = dit(x, llm_kv)
+            return x
 
-        print(f"\n  DiT full ({args.dit_denoise_steps} steps):")
-        if has_nvtx:
-            rng = nvtx.start_range("DiT_full_warmup", color="red")
-        with torch.no_grad():
-            for _ in range(args.warmup):
-                dit_full_denoise()
-        torch.cuda.synchronize()
-        if has_nvtx:
-            nvtx.end_range(rng)
+        results["dit_full_ms"] = bench_component(
+            f"DiT_{args.dit_denoise_steps}steps", dit_full,
+            max(args.warmup // 5, 3), max(args.iters // 5, 10))
 
-        times = []
-        with torch.no_grad():
-            for i in range(args.iters):
-                if has_nvtx:
-                    rng = nvtx.start_range(f"DiT_full_{i}", color="green")
-                torch.cuda.synchronize()
-                t0 = time.perf_counter()
-                dit_full_denoise()
-                torch.cuda.synchronize()
-                times.append((time.perf_counter() - t0) * 1000)
-                if has_nvtx:
-                    nvtx.end_range(rng)
-
-        times.sort()
-        median = times[len(times) // 2]
-        print(f"  [DiT_full] median={median:.2f}ms ({median/args.dit_denoise_steps:.2f}ms/step)")
-        results["dit_full_ms"] = median
-
-        del dit, action_input, llm_out
+        del dit, llm_kv, action_in
         torch.cuda.empty_cache()
 
     # === Summary ===
-    print("\n" + "=" * 60)
-    print("Summary")
+    print(f"\n{'='*60}")
+    print("Results")
     print("-" * 40)
-    total = 0
     for k, v in results.items():
-        print(f"  {k:20s}: {v:.2f} ms")
-        if k in ("vit_ms", "llm_ms", "dit_full_ms"):
-            total += v
-    if total > 0:
-        print(f"  {'TOTAL':20s}: {total:.2f} ms")
-        print(f"  {'FPS':20s}: {1000/total:.1f}")
+        print(f"  {k:25s}: {v:8.2f} ms")
+    if "dit_full_ms" in results:
+        print(f"  {'dit_per_step_ms':25s}: {results['dit_full_ms']/args.dit_denoise_steps:8.2f} ms")
+    total_vit_dit = results.get("vit_ms", 0) + results.get("dit_full_ms", 0)
+    if total_vit_dit > 0:
+        print(f"  {'vit+dit_total':25s}: {total_vit_dit:8.2f} ms")
+    print(f"\n  NOTE: Add LLM prefill time from vLLM trace for full pipeline latency")
     print("=" * 60)
+
+    # Save
+    if args.output_json:
+        out = {
+            "component_results": results,
+            "config": {
+                "vit": {"hidden": args.vit_hidden, "depth": args.vit_depth,
+                        "in_tokens": n_vit_in, "out_tokens": n_vit_out,
+                        "history_tokens": n_hist},
+                "dit": {"hidden": args.dit_hidden, "layers": args.dit_layers,
+                        "tokens": n_dit_tokens, "denoise_steps": args.dit_denoise_steps,
+                        "llm_kv_tokens": args.dit_llm_tokens},
+            },
+            "dtype": args.dtype,
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(out, f, indent=2)
+        print(f"Saved: {args.output_json}")
 
 
 if __name__ == "__main__":
