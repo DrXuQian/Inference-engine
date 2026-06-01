@@ -221,7 +221,7 @@ def analyze(sqlite_path, nvtx_filter=None, fp8_speedup=2.0, fp4_speedup=4.0, top
 
     # Projected times
     print(f"\n{'='*70}")
-    print(f"Projected Times (GEMM+FA scale with precision, Other unchanged)")
+    print(f"Projected Times (only GEMM scales with precision, FA+Other unchanged)")
     print(f"{'='*70}")
     print(f"  {'Precision':<12s} {'GEMM(ms)':>10s} {'FA(ms)':>10s} {'Other(ms)':>10s} {'Total(ms)':>10s} {'Speedup':>8s}")
     print(f"  {'-'*65}")
@@ -229,10 +229,9 @@ def analyze(sqlite_path, nvtx_filter=None, fp8_speedup=2.0, fp4_speedup=4.0, top
     for label, speedup in [("FP16 (base)", 1.0), (f"FP8 ({fp8_speedup}x)", fp8_speedup),
                             (f"FP4 ({fp4_speedup}x)", fp4_speedup)]:
         g = gemm_time / speedup
-        f = fa_time / speedup
-        t = g + f + other_time
+        t = g + fa_time + other_time  # FA unchanged
         sp = total_time / t if t > 0 else 0
-        print(f"  {label:<12s} {g/1e6:>10.2f} {f/1e6:>10.2f} {other_time/1e6:>10.2f} {t/1e6:>10.2f} {sp:>7.2f}x")
+        print(f"  {label:<12s} {g/1e6:>10.2f} {fa_time/1e6:>10.2f} {other_time/1e6:>10.2f} {t/1e6:>10.2f} {sp:>7.2f}x")
 
     # Also estimate wall time scaling (assume gaps don't change)
     gap_time = wall_ns - total_time

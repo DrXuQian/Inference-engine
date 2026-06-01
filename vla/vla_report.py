@@ -102,8 +102,8 @@ def analyze_trace(sqlite_path, nvtx_filter=None):
 
 
 def scale_time(c, speedup):
-    """Project time: GEMM+FA scale with precision, Other unchanged."""
-    return c["gemm_ms"] / speedup + c.get("fa_ms", 0) / speedup + c["other_ms"]
+    """Project time: only GEMM scales with precision. FA and Other unchanged."""
+    return c["gemm_ms"] / speedup + c.get("fa_ms", 0) + c["other_ms"]
 
 
 def load_component(json_path=None, trace_path=None, nvtx_filter=None,
