@@ -272,37 +272,51 @@ def rescale_metrics(metrics: dict, info: dict,
 
 def rescale_int4(metrics: dict, info: dict,
                  src_flops: float = 0, tgt_flops: float = 0,
-                 tgt_bw: float = 0,
-                 src_bw: float = 0) -> dict:
-    """Rescale to INT4 on target platform.
+                 tgt_bw: float = 0, src_bw: float = 0,
+                 kernel_breakdown: dict = None) -> dict:
+    """Rescale to INT4 on target platform using kernel-level breakdown.
 
-    TTFT: scale with FLOPS ratio (compute-bound, same as BF16)
-    TPOT: first rescale BW (source→target), then apply INT4 weight scale
+    TTFT: scale with FLOPS ratio (compute-bound)
+    TPOT: from kernel breakdown:
+      marlin + moe → scale by BW ratio × (int4_bpp / bf16_bpp = 0.25)
+      flash_attn + other → scale by BW ratio only (precision unchanged)
 
     Args:
-        metrics: dict with ttft, tpot (measured on source in BF16)
-        info: from decode_weight_bytes() (has int4_gb, int4_scale)
-        src_flops/tgt_flops: for TTFT scaling
-        src_bw: source platform BW GB/s (for BW rescale)
-        tgt_bw: target platform BW GB/s
+        metrics: dict with ttft, tpot
+        info: from decode_weight_bytes()
+        kernel_breakdown: dict with marlin_ms, moe_ms, fa_ms, other_ms
+            (from compensated JSON tail.kernel_breakdown)
+        src/tgt flops/bw: platform params
     """
     if not metrics:
         return None
+    if not kernel_breakdown:
+        raise ValueError("kernel_breakdown required for INT4 rescale. "
+                         "Re-run compensate to generate trace kernel breakdown.")
 
     ttft = metrics["ttft"]
     output_tokens = metrics.get("output_tokens", 64)
 
-    # TTFT: compute-bound → scale with FLOPS ratio
+    # TTFT: compute-bound
     if src_flops > 0 and tgt_flops > 0:
         ttft = ttft * (src_flops / tgt_flops)
 
-    # TPOT: 1) rescale BW to target, 2) apply INT4 weight ratio
-    tpot = metrics["tpot"]
-    if src_bw > 0 and tgt_bw > 0:
-        tpot = tpot * (src_bw / tgt_bw)  # BW rescale first
-    tpot_int4 = tpot * info["int4_scale"]  # then INT4 weight reduction
+    # TPOT: per-kernel-type scaling
+    bw_ratio = (src_bw / tgt_bw) if (src_bw > 0 and tgt_bw > 0) else 1.0
+    weight_scale = 0.25  # BF16(2B) → INT4(0.5B)
 
-    # Clamp to BW floor (can't be faster than memory bandwidth allows)
+    marlin = kernel_breakdown.get("marlin_ms", 0)
+    moe = kernel_breakdown.get("moe_ms", 0)
+    fa = kernel_breakdown.get("fa_ms", 0)
+    other = kernel_breakdown.get("other_ms", 0)
+
+    # Weight-bound kernels: scale by BW ratio × weight reduction
+    # Non-weight kernels: scale by BW ratio only (or 1.0 if no BW rescale)
+    tpot_int4 = ((marlin + moe) * bw_ratio * weight_scale
+                 + fa * bw_ratio
+                 + other * bw_ratio)
+
+    # Clamp to BW floor
     if tgt_bw > 0:
         bw_floor = info["int4_gb"] / tgt_bw * 1000
         tpot_int4 = max(tpot_int4, bw_floor)

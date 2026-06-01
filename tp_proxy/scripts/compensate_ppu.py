@@ -288,13 +288,51 @@ def measure_tail_from_trace(sqlite_path: str,
         else:
             print(f"\n  WARNING: no mode-count graph found for prefill")
 
+    # Kernel classification for the selected decode step
+    import re as _re
+    marlin_re = _re.compile(r"marlin", _re.IGNORECASE)
+    moe_re = _re.compile(r"moe_wna16|moe.*gemm", _re.IGNORECASE)
+    fa_re = _re.compile(r"flash_fwd|flash_bwd|fmha|FlashAttn", _re.IGNORECASE)
+
+    step_kernels = segs[0][1] if segs else []  # use same selected step's kernels
+    # Collect all kernels in the selected decode step (graph + gap)
+    for si in range(len(segs) - 1):
+        if segs[si][0] == "graph" and segs[si+1][0] == "gap":
+            if len(segs[si][1]) == mode:
+                step_kernels = segs[si][1] + segs[si+1][1]
+                break
+
+    marlin_ns = moe_ns = fa_ns = other_ns = 0
+    for evt in step_kernels:
+        name = evt[3]
+        dur = evt[1]
+        if fa_re.search(name):
+            fa_ns += dur
+        elif marlin_re.search(name):
+            marlin_ns += dur
+        elif moe_re.search(name):
+            moe_ns += dur
+        else:
+            other_ns += dur
+
+    kernel_breakdown = {
+        "marlin_ms": round(marlin_ns / 1e6, 4),
+        "moe_ms": round(moe_ns / 1e6, 4),
+        "fa_ms": round(fa_ns / 1e6, 4),
+        "other_ms": round(other_ns / 1e6, 4),
+    }
+
     print(f"\n  encoder (graph wall): {encoder_ms:.4f} ms")
     print(f"  tail (to next graph): {tail_ms:.4f} ms")
     print(f"    lm_head: {lm_head_ms:.4f} ms")
     print(f"    sampling: {sampling_ms:.4f} ms")
     print(f"  TPOT (step wall):     {tpot_ms:.4f} ms")
-    print(f"  TTFT (prefill wall):  {ttft_ms:.2f} ms")
-    print(f"  check: encoder + tail = {encoder_ms + tail_ms:.4f} ms == TPOT")
+    print(f"  TTFT (prefill):       {ttft_ms:.2f} ms")
+    print(f"  Decode kernel breakdown:")
+    print(f"    marlin (attn GEMV):   {kernel_breakdown['marlin_ms']:.4f} ms")
+    print(f"    moe_wna16 (MoE):     {kernel_breakdown['moe_ms']:.4f} ms")
+    print(f"    flash_attn:           {kernel_breakdown['fa_ms']:.4f} ms")
+    print(f"    other:                {kernel_breakdown['other_ms']:.4f} ms")
 
     return {
         "encoder_ms": round(encoder_ms, 4),
@@ -303,9 +341,10 @@ def measure_tail_from_trace(sqlite_path: str,
         "tpot_ms": round(tpot_ms, 4),
         "ttft_kernel_ms": round(ttft_ms, 2),
         "ttft_wall_ms": round(ttft_wall_ms, 2),
-        "ttft_ms": round(ttft_ms, 2),  # default to kernel time
+        "ttft_ms": round(ttft_ms, 2),
         "overhead_ms": 0,
         "tail_per_step_ms": round(tail_ms, 4),
+        "kernel_breakdown": kernel_breakdown,
     }
 
 

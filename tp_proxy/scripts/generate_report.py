@@ -524,9 +524,14 @@ def main():
                 fmt,
             )
 
-        # INT4 projected (always rescale if args given, otherwise same platform)
-        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb, sb) if m07_200 else None
-        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb, sb) if m07_500 else None
+        # INT4 projected using kernel breakdown from trace
+        kb_200 = d07_200.get("tail", {}).get("kernel_breakdown") if d07_200 else None
+        kb_500 = d07_500.get("tail", {}).get("kernel_breakdown") if d07_500 else None
+        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb, sb, kb_200) if m07_200 and kb_200 else None
+        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb, sb, kb_500) if m07_500 and kb_500 else None
+        if not m07_200_int4 and m07_200:
+            print("  WARNING: no kernel_breakdown in compensated JSON, INT4 projection skipped")
+            print("  Re-run compensate_scenarios/07 to generate kernel breakdown")
         int4_label = f"INT4 → Target ({tf}T/{tb}GB/s)" if has_rescale else "INT4 projected"
         print_scenario(
             f"Qwen3-30B-A3B {int4_label} (1.5K input)",
