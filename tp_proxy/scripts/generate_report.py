@@ -489,9 +489,22 @@ def main():
         d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_500.json"))
         m07_500 = get_metrics(d07_500) if d07_500 else None
 
-        # INT4 projected: scale TPOT by weight ratio (BF16→INT4 for MoE+attn)
-        # Qwen3-30B-A3B TP=2: BF16=2.938GB/GPU → INT4=1.469GB/GPU (scale=0.50x)
-        INT4_SCALE = 0.50  # int4_weight_gb / bf16_weight_gb
+        # INT4 projected: same formula as compensate_scenarios/07
+        # Weight per GPU (TP=2): layers(INT4) + lm_head(BF16) + router(BF16)
+        # Qwen3-30B-A3B: H=2048, qd=4096, kvd=512, moe_ffn=768, shared_ffn=6144
+        _H=2048; _qd=32*128; _kvd=4*128; _moe=768; _shared=6144; _L=48; _tp=2; _V=151936
+        _attn = _H*_qd + _H*_kvd + _H*_kvd + _qd*_H
+        _shared_p = 3*_H*_shared
+        _moe_p = 8*3*_H*_moe
+        _layer_params = (_attn + _shared_p + _moe_p) * _L / _tp
+        _lm_params = _V * _H / _tp
+        _router_params = _H * 128 * _L
+        _bf16_gb = (_layer_params + _lm_params + _router_params) * 2 / 1e9
+        _int4_layer_gb = _layer_params * 0.5 / 1e9
+        _int4_other_gb = (_lm_params + _router_params) * 2 / 1e9
+        _int4_gb = _int4_layer_gb + _int4_other_gb
+        INT4_SCALE = _int4_gb / _bf16_gb
+
         def scale_int4(m):
             if not m: return None
             tpot_int4 = m["tpot"] * INT4_SCALE
