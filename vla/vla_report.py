@@ -50,8 +50,8 @@ PRECISION_SPEEDUP = {
 
 
 def analyze_trace(sqlite_path, nvtx_filter=None):
-    """Extract GEMM vs non-GEMM time from trace. Returns {gemm_ms, other_ms, total_ms}."""
-    from trace_gemm_scale import find_kernel_table, find_nvtx_table, get_nvtx_range, GEMM_RE
+    """Extract GEMM/FA/Other time from trace. Returns {gemm_ms, fa_ms, other_ms, total_ms}."""
+    from trace_gemm_scale import find_kernel_table, find_nvtx_table, get_nvtx_range, GEMM_RE, FA_RE
     import sqlite3
 
     conn = sqlite3.connect(sqlite_path)
@@ -84,27 +84,35 @@ def analyze_trace(sqlite_path, nvtx_filter=None):
     if not rows:
         return None
 
-    gemm_ns = sum(d for d, n in rows if GEMM_RE.search(n))
-    other_ns = sum(d for d, n in rows if not GEMM_RE.search(n))
+    gemm_ns = fa_ns = other_ns = 0
+    for d, n in rows:
+        if FA_RE.search(n):
+            fa_ns += d
+        elif GEMM_RE.search(n):
+            gemm_ns += d
+        else:
+            other_ns += d
 
     return {
         "gemm_ms": gemm_ns / 1e6,
+        "fa_ms": fa_ns / 1e6,
         "other_ms": other_ns / 1e6,
-        "total_ms": (gemm_ns + other_ns) / 1e6,
+        "total_ms": (gemm_ns + fa_ns + other_ns) / 1e6,
     }
 
 
-def scale_time(gemm_ms, other_ms, speedup):
-    """Project time with GEMM speedup."""
-    return gemm_ms / speedup + other_ms
+def scale_time(c, speedup):
+    """Project time: GEMM+FA scale with precision, Other unchanged."""
+    return c["gemm_ms"] / speedup + c.get("fa_ms", 0) / speedup + c["other_ms"]
 
 
 def load_component(json_path=None, trace_path=None, nvtx_filter=None,
                    time_key="vit_ms", manual_ms=None):
     """Load component timing. Returns {gemm_ms, other_ms, total_ms}."""
     if manual_ms is not None:
-        # Assume 70% GEMM (typical for transformer)
-        return {"gemm_ms": manual_ms * 0.7, "other_ms": manual_ms * 0.3, "total_ms": manual_ms}
+        # Assume 50% GEMM, 20% FA, 30% Other (typical for transformer with FlashAttn)
+        return {"gemm_ms": manual_ms * 0.5, "fa_ms": manual_ms * 0.2,
+                "other_ms": manual_ms * 0.3, "total_ms": manual_ms}
 
     if trace_path and os.path.exists(trace_path):
         result = analyze_trace(trace_path, nvtx_filter)
@@ -115,8 +123,8 @@ def load_component(json_path=None, trace_path=None, nvtx_filter=None,
         with open(json_path) as f:
             d = json.load(f)
         total = d.get("component_results", d).get(time_key, 0)
-        # Without trace, assume 70% GEMM
-        return {"gemm_ms": total * 0.7, "other_ms": total * 0.3, "total_ms": total}
+        return {"gemm_ms": total * 0.5, "fa_ms": total * 0.2,
+                "other_ms": total * 0.3, "total_ms": total}
 
     return None
 
@@ -169,7 +177,7 @@ def main():
             dit_1step = load_component(None, args.dit_trace, "DiT_1step_0", None, None)
             if dit_1step:
                 print(f"  DiT 1step: {dit_1step['total_ms']:.2f}ms → ×{args.dit_steps} = {dit_1step['total_ms']*args.dit_steps:.2f}ms")
-                dit = {k: dit_1step[k] * args.dit_steps for k in ("gemm_ms", "other_ms", "total_ms")}
+                dit = {k: dit_1step.get(k, 0) * args.dit_steps for k in ("gemm_ms", "fa_ms", "other_ms", "total_ms")}
     if not dit:
         dit = load_component(args.dit_json, None, None, "dit_full_ms", None)
 
@@ -216,32 +224,32 @@ def main():
     }
 
     # Component breakdown
-    print(f"\n{'Comp':<6s} {'Compute':>7s} {'Other':>7s} {'Total':>8s} {'Comp%':>5s} "
-          f"{'GFLOPs':>7s} {'TFLOPS':>6s} {'MFU':>5s} {'WeightMB':>8s} {'BW%':>5s}")
-    print("-" * 80)
+    print(f"\n{'Comp':<6s} {'GEMM':>7s} {'FA':>7s} {'Other':>7s} {'Total':>8s} "
+          f"{'GFLOPs':>7s} {'TFLOPS':>6s} {'MFU':>5s} {'WtMB':>6s} {'BW%':>5s}")
+    print("-" * 78)
     components = {"VIT": vit, "LLM": llm, "DiT": dit}
     total_ms = 0
     for name, c in components.items():
         if c:
-            pct = c["gemm_ms"] / c["total_ms"] * 100 if c["total_ms"] > 0 else 0  # gemm_ms includes FA now
+            fa = c.get("fa_ms", 0)
             gflops = comp_flops[name] / 1e9
             tflops = comp_flops[name] / 1e12 / (c["total_ms"] / 1000) if c["total_ms"] > 0 else 0
             mfu = tflops / peak * 100 if peak > 0 else 0
             wb = comp_weight_bytes[name]
             bw_util = (wb / 1e9) / (c["total_ms"] / 1000) / peak_bw * 100 if c["total_ms"] > 0 and peak_bw > 0 else 0
-            print(f"{name:<6s} {c['gemm_ms']:>7.1f} {c['other_ms']:>7.1f} {c['total_ms']:>8.1f} {pct:>4.0f}% "
-                  f"{gflops:>7.0f} {tflops:>6.1f} {mfu:>4.1f}% {wb/1e6:>8.0f} {bw_util:>4.0f}%")
+            print(f"{name:<6s} {c['gemm_ms']:>7.1f} {fa:>7.1f} {c['other_ms']:>7.1f} {c['total_ms']:>8.1f} "
+                  f"{gflops:>7.0f} {tflops:>6.1f} {mfu:>4.1f}% {wb/1e6:>6.0f} {bw_util:>4.0f}%")
             total_ms += c["total_ms"]
         else:
-            print(f"{name:<6s} {'N/A':>7s} {'N/A':>7s} {'N/A':>8s}")
-    print("-" * 80)
+            print(f"{name:<6s} {'N/A':>7s} {'N/A':>7s} {'N/A':>7s} {'N/A':>8s}")
+    print("-" * 78)
     total_flops = sum(comp_flops.values())
     total_tflops = total_flops / 1e12 / (total_ms / 1000) if total_ms > 0 else 0
     total_mfu = total_tflops / peak * 100 if peak > 0 else 0
-    print(f"{'TOTAL':<6s} {'':>7s} {'':>7s} {total_ms:>8.1f} {'':>5s} "
+    print(f"{'TOTAL':<6s} {'':>7s} {'':>7s} {'':>7s} {total_ms:>8.1f} "
           f"{total_flops/1e9:>7.0f} {total_tflops:>6.1f} {total_mfu:>4.1f}%")
     if total_ms > 0:
-        print(f"{'FPS':<6s} {'':>7s} {'':>7s} {1000/total_ms:>8.1f}")
+        print(f"{'FPS':<6s} {'':>7s} {'':>7s} {'':>7s} {1000/total_ms:>8.1f}")
 
     print(f"\n  (peak: {peak} TFLOPS, {peak_bw} GB/s)")
 
@@ -256,7 +264,7 @@ def main():
                            ("DiT", dit, args.dit_precision)]:
         if c:
             sp = PRECISION_SPEEDUP[prec]
-            t = scale_time(c["gemm_ms"], c["other_ms"], sp)
+            t = scale_time(c, sp)
             scaled[name] = t
             speedup = c["total_ms"] / t if t > 0 else 0
             print(f"  {name}: {c['total_ms']:.2f}ms → {t:.2f}ms ({speedup:.2f}x with {prec})")
@@ -281,9 +289,9 @@ def main():
         for vp in precisions:
             for lp in precisions:
                 for dp in precisions:
-                    vt = scale_time(vit["gemm_ms"], vit["other_ms"], PRECISION_SPEEDUP[vp]) if vit else 0
-                    lt = scale_time(llm["gemm_ms"], llm["other_ms"], PRECISION_SPEEDUP[lp]) if llm else 0
-                    dt = scale_time(dit["gemm_ms"], dit["other_ms"], PRECISION_SPEEDUP[dp]) if dit else 0
+                    vt = scale_time(vit, PRECISION_SPEEDUP[vp]) if vit else 0
+                    lt = scale_time(llm, PRECISION_SPEEDUP[lp]) if llm else 0
+                    dt = scale_time(dit, PRECISION_SPEEDUP[dp]) if dit else 0
                     tt = vt + lt + dt
                     fps = 1000 / tt if tt > 0 else 0
                     sp = base_total / tt if tt > 0 else 0
