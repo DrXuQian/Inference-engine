@@ -1,0 +1,340 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 850" font-family="Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#555"/>
+    </marker>
+    <linearGradient id="vitGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90D9;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#2166AC;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="llmGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#5CB85C;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#3D8B3D;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="ditGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#D9534F;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#B52B27;stop-opacity:1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="600" y="35" text-anchor="middle" font-size="22" font-weight="bold" fill="#333">VLA Pipeline Architecture (DreamZero-aligned Precision)</text>
+
+  <!-- ============================================================ -->
+  <!-- VIT Section -->
+  <!-- ============================================================ -->
+  <rect x="20" y="55" width="760" height="310" rx="12" fill="#EBF2FA" stroke="#2166AC" stroke-width="2"/>
+  <text x="40" y="80" font-size="16" font-weight="bold" fill="#2166AC">① VIT: Spatio-Temporal Vision Transformer</text>
+  <text x="40" y="98" font-size="11" fill="#666">24L × 1024 hidden, 16 heads | Params: ~335M</text>
+
+  <!-- Input cameras -->
+  <rect x="40" y="110" width="130" height="70" rx="6" fill="#fff" stroke="#888" stroke-width="1.5"/>
+  <text x="105" y="133" text-anchor="middle" font-size="11" font-weight="bold" fill="#444">6 Cameras</text>
+  <text x="105" y="149" text-anchor="middle" font-size="10" fill="#666">RGB 480×480</text>
+  <text x="105" y="165" text-anchor="middle" font-size="10" fill="#666">225×4 = 900 patches/cam</text>
+
+  <!-- Arrow -->
+  <line x1="170" y1="145" x2="200" y2="145" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Patch Embed -->
+  <rect x="205" y="118" width="90" height="54" rx="6" fill="#D6E8F7" stroke="#4A90D9" stroke-width="1.5"/>
+  <text x="250" y="140" text-anchor="middle" font-size="10" font-weight="bold" fill="#2166AC">Patch</text>
+  <text x="250" y="154" text-anchor="middle" font-size="10" font-weight="bold" fill="#2166AC">Embed</text>
+  <text x="250" y="168" text-anchor="middle" font-size="8" fill="#888">5400 tokens</text>
+
+  <!-- Arrow -->
+  <line x1="295" y1="145" x2="320" y2="145" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Spatial Self-Attention Block -->
+  <rect x="325" y="108" width="200" height="165" rx="8" fill="url(#vitGrad)" stroke="#1a5276" stroke-width="2"/>
+  <text x="425" y="130" text-anchor="middle" font-size="12" font-weight="bold" fill="#fff">Spatial Self-Attention</text>
+  <text x="425" y="148" text-anchor="middle" font-size="10" fill="#D6E8F7">24 layers, per-camera (900 tok)</text>
+
+  <!-- Sub-blocks -->
+  <rect x="340" y="158" width="170" height="24" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="345" y="174" font-size="9" fill="#fff">QKV Proj (900×1024²)</text>
+  <text x="490" y="174" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="340" y="186" width="170" height="24" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="345" y="202" font-size="9" fill="#fff">FlashAttention (900²)</text>
+  <text x="490" y="202" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="340" y="214" width="170" height="24" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="345" y="230" font-size="9" fill="#fff">Out Proj + FFN (4096)</text>
+  <text x="478" y="230" font-size="8" font-weight="bold" fill="#7FFF00">NVFP4</text>
+
+  <rect x="340" y="242" width="170" height="20" rx="4" fill="#fff" fill-opacity="0.1" stroke="#fff" stroke-opacity="0.3"/>
+  <text x="345" y="256" font-size="9" fill="#ccc">LayerNorm, GELU</text>
+  <text x="490" y="256" font-size="8" fill="#ccc">FP16</text>
+
+  <!-- ①a/①b labels -->
+  <text x="425" y="285" text-anchor="middle" font-size="9" fill="#2166AC">①a Target 3cam + ①b Current 3cam = 1.87 + 1.87 TFLOPs</text>
+
+  <!-- Arrow to Temporal -->
+  <line x1="525" y1="190" x2="555" y2="190" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="540" y="183" font-size="8" fill="#888">every</text>
+  <text x="540" y="193" font-size="8" fill="#888">4 layers</text>
+
+  <!-- Temporal Cross-Attention -->
+  <rect x="560" y="108" width="200" height="165" rx="8" fill="#3572A5" stroke="#1a5276" stroke-width="2"/>
+  <text x="660" y="130" text-anchor="middle" font-size="12" font-weight="bold" fill="#fff">Temporal Cross-Attn</text>
+  <text x="660" y="148" text-anchor="middle" font-size="10" fill="#B0D4F1">6 layers, per-camera, no FFN</text>
+
+  <rect x="575" y="158" width="170" height="24" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="580" y="174" font-size="9" fill="#fff">Q: 900 patches (current)</text>
+  <text x="725" y="174" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="575" y="186" width="170" height="24" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="580" y="202" font-size="9" fill="#fff">KV: 3825 (17f×225, cache)</text>
+  <text x="725" y="202" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="575" y="214" width="170" height="24" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="580" y="230" font-size="9" fill="#fff">FlashAttn (900×3825)</text>
+  <text x="725" y="230" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="575" y="242" width="170" height="24" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="580" y="258" font-size="9" fill="#fff">Out Proj</text>
+  <text x="718" y="258" font-size="8" font-weight="bold" fill="#7FFF00">NVFP4</text>
+
+  <text x="660" y="285" text-anchor="middle" font-size="9" fill="#2166AC">①b+ Temporal = 0.61 TFLOPs</text>
+
+  <!-- History KV Cache -->
+  <rect x="580" y="295" width="160" height="35" rx="6" fill="#FFF3CD" stroke="#D4A017" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="660" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#856404">KV Cache (History)</text>
+  <text x="660" y="325" text-anchor="middle" font-size="9" fill="#856404">17f × 3cam × 225tok</text>
+
+  <!-- Patch Merge -->
+  <rect x="40" y="295" width="130" height="45" rx="6" fill="#D6E8F7" stroke="#4A90D9" stroke-width="1.5"/>
+  <text x="105" y="313" text-anchor="middle" font-size="10" font-weight="bold" fill="#2166AC">Patch Merge</text>
+  <text x="105" y="328" text-anchor="middle" font-size="9" fill="#666">900→225/cam → 2560D</text>
+
+  <!-- Arrow from spatial to merge -->
+  <path d="M 425 273 L 425 305 L 170 317" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- VIT output label -->
+  <text x="105" y="355" text-anchor="middle" font-size="10" font-weight="bold" fill="#2166AC">Output: 6×225 = 1350 tokens × 2560D</text>
+
+  <!-- ============================================================ -->
+  <!-- Arrow VIT → LLM -->
+  <!-- ============================================================ -->
+  <line x1="400" y1="365" x2="400" y2="395" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="415" y="388" font-size="9" fill="#666">1350 visual tokens</text>
+
+  <!-- ============================================================ -->
+  <!-- LLM Section -->
+  <!-- ============================================================ -->
+  <rect x="20" y="400" width="760" height="175" rx="12" fill="#EBF7EB" stroke="#3D8B3D" stroke-width="2"/>
+  <text x="40" y="425" font-size="16" font-weight="bold" fill="#3D8B3D">② LLM Prefill: Qwen3-VL-4B</text>
+  <text x="40" y="443" font-size="11" fill="#666">36L × 2560 hidden, 32 heads (GQA kv=8), SwiGLU FFN=9728 | 12.68 TFLOPs</text>
+
+  <!-- Input tokens -->
+  <rect x="40" y="455" width="140" height="55" rx="6" fill="#fff" stroke="#888" stroke-width="1.5"/>
+  <text x="110" y="475" text-anchor="middle" font-size="10" font-weight="bold" fill="#444">Input: 1550 tokens</text>
+  <text x="110" y="490" text-anchor="middle" font-size="9" fill="#666">1350 visual + 200 task</text>
+  <text x="110" y="503" text-anchor="middle" font-size="9" fill="#666">seq_len = 1550</text>
+
+  <!-- Arrow -->
+  <line x1="180" y1="482" x2="215" y2="482" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- LLM Transformer -->
+  <rect x="220" y="455" width="340" height="100" rx="8" fill="url(#llmGrad)" stroke="#2E6E2E" stroke-width="2"/>
+  <text x="390" y="478" text-anchor="middle" font-size="12" font-weight="bold" fill="#fff">36-Layer Transformer (Prefill)</text>
+
+  <rect x="235" y="486" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="240" y="500" font-size="9" fill="#fff">QKV Proj (GQA: Q=4096, KV=1024)</text>
+  <text x="365" y="500" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="235" y="510" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="240" y="524" font-size="9" fill="#fff">FlashAttention (1550²)</text>
+  <text x="365" y="524" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="395" y="486" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="400" y="500" font-size="9" fill="#fff">Out Proj + SwiGLU FFN (3×9728)</text>
+  <text x="528" y="500" font-size="8" font-weight="bold" fill="#7FFF00">NVFP4</text>
+
+  <rect x="395" y="510" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="400" y="524" font-size="9" fill="#fff">LayerNorm, RoPE</text>
+  <text x="528" y="524" font-size="8" fill="#ccc">FP16</text>
+
+  <text x="390" y="550" text-anchor="middle" font-size="9" fill="#3D8B3D">QKV = 16% of GEMM → FP8 | FFN+Out = 84% → NVFP4</text>
+
+  <!-- LLM Output -->
+  <rect x="590" y="455" width="160" height="55" rx="6" fill="#fff" stroke="#888" stroke-width="1.5"/>
+  <text x="670" y="475" text-anchor="middle" font-size="10" font-weight="bold" fill="#444">Output</text>
+  <text x="670" y="490" text-anchor="middle" font-size="9" fill="#666">1550 × 2560D hidden</text>
+  <text x="670" y="503" text-anchor="middle" font-size="9" fill="#666">→ KV cache for DiT</text>
+
+  <!-- Arrow -->
+  <line x1="560" y1="482" x2="590" y2="482" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ============================================================ -->
+  <!-- Arrow LLM → DiT -->
+  <!-- ============================================================ -->
+  <line x1="670" y1="510" x2="670" y2="580" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="685" y="550" font-size="9" fill="#666">KV cache</text>
+
+  <!-- ============================================================ -->
+  <!-- DiT Section -->
+  <!-- ============================================================ -->
+  <rect x="20" y="585" width="760" height="195" rx="12" fill="#FAEBEB" stroke="#B52B27" stroke-width="2"/>
+  <text x="40" y="610" font-size="16" font-weight="bold" fill="#B52B27">③ DiT: Diffusion Action Transformer (×10 denoise steps)</text>
+  <text x="40" y="628" font-size="11" fill="#666">18L × 1024 hidden, 8 heads | Params: ~305M | 1.58 TFLOPs (×10)</text>
+
+  <!-- Action Input -->
+  <rect x="40" y="640" width="130" height="55" rx="6" fill="#fff" stroke="#888" stroke-width="1.5"/>
+  <text x="105" y="660" text-anchor="middle" font-size="10" font-weight="bold" fill="#444">Action Input</text>
+  <text x="105" y="675" text-anchor="middle" font-size="9" fill="#666">50 actions + 1 state</text>
+  <text x="105" y="688" text-anchor="middle" font-size="9" fill="#666">51 tokens × 62D</text>
+
+  <!-- Arrow -->
+  <line x1="170" y1="667" x2="205" y2="667" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- DiT Transformer -->
+  <rect x="210" y="640" width="340" height="120" rx="8" fill="url(#ditGrad)" stroke="#8B1A1A" stroke-width="2"/>
+  <text x="380" y="663" text-anchor="middle" font-size="12" font-weight="bold" fill="#fff">18-Layer DiT Block (×10 steps)</text>
+
+  <rect x="225" y="672" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="230" y="686" font-size="9" fill="#fff">Self-Attn QKV (51 tokens)</text>
+  <text x="355" y="686" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="225" y="696" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="230" y="710" font-size="9" fill="#fff">Cross-Attn Q/K/V (51×1550)</text>
+  <text x="355" y="710" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="385" y="672" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="390" y="686" font-size="9" fill="#fff">FlashAttention</text>
+  <text x="518" y="686" font-size="8" font-weight="bold" fill="#FFD700">FP8</text>
+
+  <rect x="385" y="696" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-opacity="0.4"/>
+  <text x="390" y="710" font-size="9" fill="#fff">Out Proj + FFN (4096)</text>
+  <text x="518" y="710" font-size="8" font-weight="bold" fill="#7FFF00">NVFP4</text>
+
+  <rect x="305" y="720" width="150" height="20" rx="4" fill="#fff" fill-opacity="0.1" stroke="#fff" stroke-opacity="0.3"/>
+  <text x="310" y="734" font-size="9" fill="#ccc">LayerNorm, GELU</text>
+  <text x="438" y="734" font-size="8" fill="#ccc">FP16</text>
+
+  <text x="380" y="755" text-anchor="middle" font-size="9" fill="#B52B27">QKV = 87% of GEMM → FP8 | FFN+Out = 13% → NVFP4</text>
+
+  <!-- LLM KV Cache input to DiT -->
+  <rect x="580" y="650" width="160" height="45" rx="6" fill="#FFF3CD" stroke="#D4A017" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="660" y="668" text-anchor="middle" font-size="10" font-weight="bold" fill="#856404">LLM KV Cache</text>
+  <text x="660" y="683" text-anchor="middle" font-size="9" fill="#856404">1550 tok × 2560D → 1024D</text>
+
+  <!-- Arrow KV to DiT -->
+  <line x1="580" y1="672" x2="550" y2="695" stroke="#D4A017" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- DiT Output -->
+  <rect x="580" y="710" width="160" height="50" rx="6" fill="#fff" stroke="#888" stroke-width="1.5"/>
+  <text x="660" y="730" text-anchor="middle" font-size="10" font-weight="bold" fill="#444">Action Output</text>
+  <text x="660" y="745" text-anchor="middle" font-size="9" fill="#666">51 tokens × 62D → actions</text>
+
+  <!-- Arrow DiT to output -->
+  <line x1="550" y1="730" x2="580" y2="735" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ============================================================ -->
+  <!-- Summary Box -->
+  <!-- ============================================================ -->
+  <rect x="800" y="55" width="380" height="725" rx="12" fill="#F8F8F8" stroke="#AAA" stroke-width="1.5"/>
+  <text x="990" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#333">Performance Summary</text>
+
+  <!-- FLOPs Table -->
+  <text x="820" y="110" font-size="12" font-weight="bold" fill="#555">FLOPs Breakdown</text>
+  <line x1="820" y1="115" x2="1160" y2="115" stroke="#CCC" stroke-width="1"/>
+
+  <text x="820" y="135" font-size="10" fill="#2166AC" font-weight="bold">①a VIT Target (Spatial)</text>
+  <text x="1100" y="135" font-size="10" fill="#444" text-anchor="end">1.870 TF</text>
+  <text x="820" y="155" font-size="10" fill="#2166AC" font-weight="bold">①b VIT Current (Spatial)</text>
+  <text x="1100" y="155" font-size="10" fill="#444" text-anchor="end">1.870 TF</text>
+  <text x="820" y="175" font-size="10" fill="#2166AC" font-weight="bold">①b+ Temporal CrossAttn</text>
+  <text x="1100" y="175" font-size="10" fill="#444" text-anchor="end">0.611 TF</text>
+  <text x="820" y="195" font-size="10" fill="#3D8B3D" font-weight="bold">② LLM Prefill</text>
+  <text x="1100" y="195" font-size="10" fill="#444" text-anchor="end">12.680 TF</text>
+  <text x="820" y="215" font-size="10" fill="#B52B27" font-weight="bold">③ DiT (×10 steps)</text>
+  <text x="1100" y="215" font-size="10" fill="#444" text-anchor="end">1.581 TF</text>
+  <line x1="820" y1="225" x2="1160" y2="225" stroke="#CCC" stroke-width="1"/>
+  <text x="820" y="245" font-size="11" font-weight="bold" fill="#333">Total</text>
+  <text x="1100" y="245" font-size="11" font-weight="bold" fill="#333" text-anchor="end">18.61 TF</text>
+
+  <!-- Precision Legend -->
+  <text x="820" y="280" font-size="12" font-weight="bold" fill="#555">DreamZero Precision</text>
+  <line x1="820" y1="285" x2="1160" y2="285" stroke="#CCC" stroke-width="1"/>
+
+  <rect x="820" y="295" width="14" height="14" rx="2" fill="#FFD700"/>
+  <text x="840" y="307" font-size="10" fill="#444">FP8 (E4M3) — QKV proj, FlashAttention, Softmax</text>
+
+  <rect x="820" y="318" width="14" height="14" rx="2" fill="#7FFF00"/>
+  <text x="840" y="330" font-size="10" fill="#444">NVFP4 (E2M1) — FFN, Out proj, Linear layers</text>
+
+  <rect x="820" y="341" width="14" height="14" rx="2" fill="#CCC"/>
+  <text x="840" y="353" font-size="10" fill="#444">FP16 — LayerNorm, RoPE, GELU, elementwise</text>
+
+  <!-- Projected Performance -->
+  <text x="820" y="390" font-size="12" font-weight="bold" fill="#555">Projected Speedup</text>
+  <line x1="820" y1="395" x2="1160" y2="395" stroke="#CCC" stroke-width="1"/>
+
+  <text x="820" y="418" font-size="10" fill="#666">Component</text>
+  <text x="960" y="418" font-size="10" fill="#666" text-anchor="end">FP16</text>
+  <text x="1050" y="418" font-size="10" fill="#666" text-anchor="end">Optimized</text>
+  <text x="1140" y="418" font-size="10" fill="#666" text-anchor="end">Speedup</text>
+
+  <line x1="820" y1="425" x2="1160" y2="425" stroke="#EEE" stroke-width="1"/>
+
+  <text x="820" y="443" font-size="11" fill="#2166AC" font-weight="bold">VIT</text>
+  <text x="960" y="443" font-size="11" fill="#444" text-anchor="end">46.0 ms</text>
+  <text x="1050" y="443" font-size="11" fill="#2166AC" font-weight="bold" text-anchor="end">25.6 ms</text>
+  <text x="1140" y="443" font-size="11" fill="#444" text-anchor="end">1.80×</text>
+
+  <text x="820" y="465" font-size="11" fill="#3D8B3D" font-weight="bold">LLM</text>
+  <text x="960" y="465" font-size="11" fill="#444" text-anchor="end">98.0 ms</text>
+  <text x="1050" y="465" font-size="11" fill="#3D8B3D" font-weight="bold" text-anchor="end">53.4 ms</text>
+  <text x="1140" y="465" font-size="11" fill="#444" text-anchor="end">1.83×</text>
+
+  <text x="820" y="487" font-size="11" fill="#B52B27" font-weight="bold">DiT</text>
+  <text x="960" y="487" font-size="11" fill="#444" text-anchor="end">43.0 ms</text>
+  <text x="1050" y="487" font-size="11" fill="#B52B27" font-weight="bold" text-anchor="end">27.3 ms</text>
+  <text x="1140" y="487" font-size="11" fill="#444" text-anchor="end">1.58×</text>
+
+  <line x1="820" y1="497" x2="1160" y2="497" stroke="#333" stroke-width="1.5"/>
+
+  <text x="820" y="517" font-size="13" font-weight="bold" fill="#333">TOTAL</text>
+  <text x="960" y="517" font-size="13" font-weight="bold" fill="#444" text-anchor="end">187.0 ms</text>
+  <text x="1050" y="517" font-size="13" font-weight="bold" fill="#0066CC" text-anchor="end">106.3 ms</text>
+  <text x="1140" y="517" font-size="13" font-weight="bold" fill="#333" text-anchor="end">1.76×</text>
+
+  <text x="820" y="542" font-size="13" font-weight="bold" fill="#333">FPS</text>
+  <text x="960" y="542" font-size="13" fill="#444" text-anchor="end">5.3</text>
+  <text x="1050" y="542" font-size="15" font-weight="bold" fill="#0066CC" text-anchor="end">9.4</text>
+
+  <!-- QKV Ratio -->
+  <text x="820" y="580" font-size="12" font-weight="bold" fill="#555">QKV Ratio in GEMM</text>
+  <line x1="820" y1="585" x2="1160" y2="585" stroke="#CCC" stroke-width="1"/>
+
+  <!-- VIT bar -->
+  <text x="820" y="608" font-size="10" fill="#444">VIT</text>
+  <rect x="860" y="596" width="62" height="16" rx="3" fill="#FFD700"/>
+  <rect x="922" y="596" width="188" height="16" rx="3" fill="#7FFF00"/>
+  <text x="885" y="608" text-anchor="middle" font-size="8" fill="#333">25%</text>
+  <text x="1016" y="608" text-anchor="middle" font-size="8" fill="#333">75% NVFP4</text>
+
+  <!-- LLM bar -->
+  <text x="820" y="633" font-size="10" fill="#444">LLM</text>
+  <rect x="860" y="621" width="40" height="16" rx="3" fill="#FFD700"/>
+  <rect x="900" y="621" width="210" height="16" rx="3" fill="#7FFF00"/>
+  <text x="876" y="633" text-anchor="middle" font-size="8" fill="#333">16%</text>
+  <text x="1005" y="633" text-anchor="middle" font-size="8" fill="#333">84% NVFP4</text>
+
+  <!-- DiT bar -->
+  <text x="820" y="658" font-size="10" fill="#444">DiT</text>
+  <rect x="860" y="646" width="218" height="16" rx="3" fill="#FFD700"/>
+  <rect x="1078" y="646" width="32" height="16" rx="3" fill="#7FFF00"/>
+  <text x="969" y="658" text-anchor="middle" font-size="8" fill="#333">87% FP8</text>
+  <text x="1094" y="658" text-anchor="middle" font-size="7" fill="#333">13%</text>
+
+  <text x="860" y="678" font-size="9" fill="#888">■ FP8 (QKV)  ■ NVFP4 (FFN/Out)</text>
+
+  <!-- Reference -->
+  <text x="820" y="710" font-size="10" fill="#888">Ref: DreamZero (arXiv:2602.15922)</text>
+  <text x="820" y="726" font-size="9" fill="#AAA">"NVFP4 weights+activations, sensitive QKV</text>
+  <text x="820" y="740" font-size="9" fill="#AAA">projections and Softmax in FP8 (E4M3)"</text>
+  <text x="820" y="760" font-size="9" fill="#AAA">38× speedup, 7Hz real-time robotic control</text>
+</svg>
