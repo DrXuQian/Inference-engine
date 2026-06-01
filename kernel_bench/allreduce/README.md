@@ -20,10 +20,19 @@ custom all-reduce, a local safe push experiment, standalone Ring LL, and NCCL.
 ## Build Push/Oneshot/Twoshot Benchmark
 
 ```bash
-cd /root/autodl-tmp/Inference-engine/tp_proxy/scripts/allreduce_bench
+cd /root/autodl-tmp/Inference-engine/kernel_bench/allreduce
 
 nvcc -O3 -std=c++17 -arch=sm_120 bench_vllm_allreduce.cu \
   -o bench_vllm_allreduce -lpthread
+```
+
+Optional run labels are supported as the final argument, or as `--label <name>`.
+The typo form `--lable` is accepted too.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 ./bench_vllm_allreduce 2 20 50 6144 100 0 oneshot 0 --label tp2-same-numa
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 ./standalone_ringll 4 6144 100 20 --label tp4-cross-numa
 ```
 
 ## Test Safe Push

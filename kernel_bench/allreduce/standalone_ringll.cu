@@ -3,7 +3,7 @@
  * Faithful reproduction of prims_ll.h + all_reduce.h runRing() for general nranks.
  *
  * Build:  nvcc -O3 -std=c++17 -arch=sm_120 standalone_ringll.cu -o standalone_ringll -lpthread
- * Run:    ./standalone_ringll [ngpus] [size_bytes] [iters] [warmup]
+ * Run:    ./standalone_ringll [ngpus] [size_bytes] [iters] [warmup] [label|--label label]
  *         ./standalone_ringll 4 1024 100
  *         ./standalone_ringll              # default: detect GPUs, sweep sizes
  *
@@ -64,6 +64,21 @@ struct Timing {
   uint64_t reduce;
   int readll_spins;
 };
+
+const char* parse_label_arg(int argc, char** argv, int first_arg) {
+  for (int i = first_arg; i < argc; i++) {
+    if ((strcmp(argv[i], "--label") == 0 || strcmp(argv[i], "--lable") == 0) &&
+        i + 1 < argc) {
+      return argv[i + 1];
+    }
+    if (strncmp(argv[i], "--label=", 8) == 0) return argv[i] + 8;
+    if (strncmp(argv[i], "--lable=", 8) == 0) return argv[i] + 8;
+    if (strncmp(argv[i], "label=", 6) == 0) return argv[i] + 6;
+    if (strncmp(argv[i], "lable=", 6) == 0) return argv[i] + 6;
+    if (argv[i][0] != '-') return argv[i];
+  }
+  return nullptr;
+}
 
 // ============================================================
 // LL primitives (from prims_ll.h)
@@ -523,6 +538,8 @@ int main(int argc, char** argv) {
   size_t single_size = argc > 2 ? atoi(argv[2]) : 0;
   int iters = argc > 3 ? atoi(argv[3]) : 100;
   int warmup = argc > 4 ? atoi(argv[4]) : 20;
+  const char* label = parse_label_arg(argc, argv, 5);
+  if (label && label[0] == '\0') label = nullptr;
   if (iters <= 0) { fprintf(stderr, "iters must be positive\n"); return 1; }
 
   size_t* sizes;
@@ -565,7 +582,8 @@ int main(int argc, char** argv) {
   printf("Standalone Ring LL AllReduce (extracted from NCCL v2.27.5)\n");
   printf("  %d GPUs, ring: 0", ngpus);
   for (int i = 1; i < ngpus; i++) printf("->%d", i);
-  printf("->0, clock=%.0f MHz, warmup=%d, iters=%d, threads=%d\n", cyc_per_us, warmup, iters, RINGLL_THREADS);
+  printf("->0, clock=%.0f MHz, warmup=%d, iters=%d, threads=%d, label=%s\n",
+         cyc_per_us, warmup, iters, RINGLL_THREADS, label ? label : "-");
   printf("  expected sum = %.0f\n\n", expected);
 
   bool all_verify_ok = true;
@@ -624,15 +642,16 @@ int main(int argc, char** argv) {
     else if (bytes >= 1024) { ds = bytes/1024.0; unit = "KB"; }
 
     if (nsizes > 1) {
-      printf("%6.0f %-2s  event=%.1fus  clock=%.1fus  readLL=%.1f  storeLL=%.1f  "
+      printf("label=%s  %6.0f %-2s  event=%.1fus  clock=%.1fus  readLL=%.1f  storeLL=%.1f  "
              "waitSend=%.1f  barrier=%.1f  load=%.1f  reduce=%.1f  spins=%d  verify=%s\n",
-             ds, unit, max_us, total_us,
+             label ? label : "-", ds, unit, max_us, total_us,
              t.readll_spin / cyc_per_us, t.storell / cyc_per_us,
              t.waitsend / cyc_per_us, t.barrier / cyc_per_us,
              t.dataload / cyc_per_us, t.reduce / cyc_per_us,
              t.readll_spins, verify_ok ? "OK" : "FAIL");
     } else {
       printf("Size: %.0f %s\n", ds, unit);
+      printf("Label: %s\n", label ? label : "-");
       if (verify_ok) {
         printf("Verification: OK (expected %.0f on all %d GPUs)\n", expected, ngpus);
       } else {

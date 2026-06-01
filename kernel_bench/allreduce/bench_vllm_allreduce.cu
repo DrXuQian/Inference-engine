@@ -16,9 +16,9 @@
  *   nvcc -O3 -std=c++17 -arch=sm_120 bench_vllm_allreduce.cu -o bench_vllm_allreduce -lpthread
  *
  * Run:
- *   ./bench_vllm_allreduce [ngpus] [warmup] [iters] [size_bytes] [repeats] [direct_warmup] [algo] [verify]
+ *   ./bench_vllm_allreduce [ngpus] [warmup] [iters] [size_bytes] [repeats] [direct_warmup] [algo] [verify] [label|--label label]
  *   ./bench_vllm_allreduce 2 20 50 6144 20 0 auto 1
- *   ./bench_vllm_allreduce 4 20 50 6144 20 0 oneshot 1
+ *   ./bench_vllm_allreduce 4 20 50 6144 20 0 oneshot 1 --label same-numa
  *
  * Algos:
  *   auto    - vLLM threshold choice, with 4-GPU PCIe allowed here.
@@ -459,6 +459,21 @@ Algo resolve_algo(Algo requested, int ngpus, size_t bytes) {
   return Algo::TwoShot;
 }
 
+const char* parse_label_arg(int argc, char** argv, int first_arg) {
+  for (int i = first_arg; i < argc; i++) {
+    if ((strcmp(argv[i], "--label") == 0 || strcmp(argv[i], "--lable") == 0) &&
+        i + 1 < argc) {
+      return argv[i + 1];
+    }
+    if (strncmp(argv[i], "--label=", 8) == 0) return argv[i] + 8;
+    if (strncmp(argv[i], "--lable=", 8) == 0) return argv[i] + 8;
+    if (strncmp(argv[i], "label=", 6) == 0) return argv[i] + 6;
+    if (strncmp(argv[i], "lable=", 6) == 0) return argv[i] + 6;
+    if (argv[i][0] != '-') return argv[i];
+  }
+  return nullptr;
+}
+
 template <int ngpus>
 void launch_reduce(Algo algo, RankData* rd, RankSignals sg, Signal* signal,
                    const half* input, half* output, int rank, int packed_size,
@@ -634,7 +649,7 @@ void* bench_thread(void* arg) {
 
 void bench_size(GPUState* states, int ngpus, size_t bytes, int warmup, int iters,
                 int repeats, int direct_warmup, Algo requested_algo,
-                bool verify) {
+                bool verify, const char* label) {
   pthread_barrier_t barrier;
   pthread_barrier_init(&barrier, nullptr, ngpus);
 
@@ -695,9 +710,10 @@ void bench_size(GPUState* states, int ngpus, size_t bytes, int warmup, int iters
     unit = "KB";
   }
   Algo resolved = resolve_algo(requested_algo, ngpus, bytes);
-  if (verify) printf("%8.0f %-2s %12s\n", display_size, unit, "verify OK");
-  printf("%8.0f %-2s %12s %12.1f %12.1f %12.1f\n", display_size, unit,
-         algo_name(resolved), median, mean, p99);
+  const char* out_label = label ? label : "-";
+  if (verify) printf("%16s %8.0f %-2s %12s\n", out_label, display_size, unit, "verify OK");
+  printf("%16s %8.0f %-2s %12s %12.1f %12.1f %12.1f\n", out_label,
+         display_size, unit, algo_name(resolved), median, mean, p99);
 }
 
 void setup_gpus(GPUState* states, int ngpus, size_t max_bytes,
@@ -772,6 +788,8 @@ int main(int argc, char** argv) {
   int direct_warmup = argc > 6 ? atoi(argv[6]) : 0;
   Algo requested_algo = argc > 7 ? parse_algo(argv[7]) : Algo::Auto;
   bool verify = argc > 8 ? atoi(argv[8]) != 0 : true;
+  const char* label = parse_label_arg(argc, argv, 9);
+  if (label && label[0] == '\0') label = nullptr;
 
   if (ngpus != 2 && ngpus != 4 && ngpus != 6 && ngpus != 8) {
     fprintf(stderr, "Only 2, 4, 6, 8 GPUs supported\n");
@@ -809,16 +827,16 @@ int main(int argc, char** argv) {
 
   printf("vLLM Custom All-Reduce Standalone [out-of-place + CUDA Graph]\n");
   printf("  GPUs: %d, Requested Algo: %s, Direct warmup: %d, Graph warmup: %d, "
-         "Iters: %d, Repeats/graph: %d, Verify: %s\n\n",
+         "Iters: %d, Repeats/graph: %d, Verify: %s, Label: %s\n\n",
          ngpus, algo_name(requested_algo), direct_warmup, warmup, iters,
-         repeats, verify ? "on" : "off");
-  printf("%8s    %12s %12s %12s %12s\n", "Size", "Algo", "Median (us)",
-         "Mean (us)", "P99 (us)");
-  printf("-------------------------------------------------------------------\n");
+         repeats, verify ? "on" : "off", label ? label : "-");
+  printf("%16s %8s    %12s %12s %12s %12s\n", "Label", "Size", "Algo",
+         "Median (us)", "Mean (us)", "P99 (us)");
+  printf("------------------------------------------------------------------------------------\n");
 
   for (int s = 0; s < nsizes; s++) {
     bench_size(states, ngpus, sizes[s], warmup, iters, repeats, direct_warmup,
-               requested_algo, verify);
+               requested_algo, verify, label);
   }
 
   cleanup_gpus(states, ngpus);
