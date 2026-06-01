@@ -28,6 +28,7 @@ cat > "$BENCH_SCRIPT" << 'PYEOF'
 import sys, os, numpy as np
 os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 def main():
     # Apply NVTX batch size patch
