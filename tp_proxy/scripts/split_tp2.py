@@ -246,6 +246,9 @@ def fuse_and_split_moe_experts(originals: dict[str, np.ndarray], rank: int) -> d
         n_experts = max(experts_dict.keys()) + 1
         # Stack all experts: (num_experts, out_dim, in_dim)
         for proj, fused_name in [("gate_proj", "w1_weight"), ("down_proj", "w2_weight"), ("up_proj", "w3_weight")]:
+            # Skip if this proj not in this shard (split across files)
+            if not all(proj in experts_dict.get(i, {}) for i in range(n_experts)):
+                continue
             stack = [experts_dict[i][proj] for i in range(n_experts)]
             fused_tensor = np.stack(stack, axis=0)  # (num_experts, dim0, dim1)
 
