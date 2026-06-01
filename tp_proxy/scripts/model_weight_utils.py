@@ -281,20 +281,19 @@ def rescale_metrics(metrics: dict, info: dict,
 def rescale_int4(metrics: dict, info: dict,
                  src_flops: float = 0, tgt_flops: float = 0,
                  tgt_bw: float = 0, src_bw: float = 0,
-                 kernel_breakdown: dict = None) -> dict:
-    """Rescale to INT4 on target platform using kernel-level breakdown.
+                 kernel_breakdown: dict = None,
+                 layer_scale: float = 1.0, tp_size: int = 1,
+                 comm_ms: float = 0) -> dict:
+    """Rescale to INT4 on target platform from raw kernel breakdown.
 
-    TTFT: scale with FLOPS ratio (compute-bound)
-    TPOT: from kernel breakdown:
-      marlin + moe → scale by BW ratio × (int4_bpp / bf16_bpp = 0.25)
-      flash_attn + other → scale by BW ratio only (precision unchanged)
-
-    Args:
-        metrics: dict with ttft, tpot
-        info: from decode_weight_bytes()
-        kernel_breakdown: dict with marlin_ms, moe_ms, fa_ms, other_ms
-            (from compensated JSON tail.kernel_breakdown)
-        src/tgt flops/bw: platform params
+    Correct order:
+      1. Rescale raw encoder kernels (per pruned layer):
+         gemm → ×bw_ratio ×0.25 (INT4 weight)
+         fa   → ×bw_ratio (KV cache, BW-bound)
+         other → ×1.0 (compute-bound)
+      2. Apply layer_scale to encoder total
+      3. Rescale tail: lm_head ×bw_ratio /tp, sampling ×1.0
+      4. Add comm
     """
     if not metrics:
         return None
@@ -303,32 +302,34 @@ def rescale_int4(metrics: dict, info: dict,
                          "Re-run compensate to generate trace kernel breakdown.")
 
     ttft = metrics["ttft"]
-    tpot = metrics["tpot"]  # comp_tpot (already layer-scaled to full model)
     output_tokens = metrics.get("output_tokens", 64)
 
     # TTFT: compute-bound
     if src_flops > 0 and tgt_flops > 0:
         ttft = ttft * (src_flops / tgt_flops)
 
-    # Use kernel_breakdown RATIO (not absolute time, since it's from pruned model)
-    # gemm_int4_frac: fraction of decode step that's INT4-quantizable GEMM
-    # Rest (lm_head + fa + other): stays BF16 or non-weight
-    gemm_frac = kernel_breakdown.get("gemm_int4_frac", 0)
-    if gemm_frac <= 0:
-        # Compute from times if frac not stored
-        gemm = kernel_breakdown.get("gemm_int4_ms", kernel_breakdown.get("marlin_ms", 0) + kernel_breakdown.get("moe_ms", 0))
-        lmh = kernel_breakdown.get("lm_head_ms", 0)
-        fa = kernel_breakdown.get("fa_ms", 0)
-        other = kernel_breakdown.get("other_ms", 0)
-        total_k = gemm + lmh + fa + other
-        gemm_frac = gemm / total_k if total_k > 0 else 0.7
-
-    # TPOT: apply ratio to comp_tpot (full model)
-    # gemm_int4: BW ratio × 0.25 (BF16→INT4 weight reduction)
-    # rest (lm_head BF16 + FA + other): BW ratio × 1.0
     bw_ratio = (src_bw / tgt_bw) if (src_bw > 0 and tgt_bw > 0) else 1.0
 
-    tpot_int4 = tpot * bw_ratio * (gemm_frac * 0.25 + (1 - gemm_frac))
+    # Step 1: rescale raw encoder kernels (from pruned model trace)
+    enc_gemm = kernel_breakdown.get("enc_gemm_ms", 0)
+    enc_fa = kernel_breakdown.get("enc_fa_ms", 0)
+    enc_other = kernel_breakdown.get("enc_other_ms", 0)
+
+    encoder_int4 = (enc_gemm * bw_ratio * 0.25    # INT4 weight reduction
+                    + enc_fa * bw_ratio            # KV cache BW-bound
+                    + enc_other * 1.0)             # compute-bound
+
+    # Step 2: layer_scale (pruned → full model)
+    encoder_scaled = encoder_int4 * layer_scale
+
+    # Step 3: tail (no layer_scale)
+    tail_lmhead = kernel_breakdown.get("tail_lmhead_ms", 0)
+    tail_other = kernel_breakdown.get("tail_other_ms", 0)
+    tail_int4 = (tail_lmhead * bw_ratio / max(tp_size, 1)  # BF16 weight, /tp
+                 + tail_other * 1.0)                        # sampling, compute
+
+    # Step 4: total
+    tpot_int4 = encoder_scaled + tail_int4 + comm_ms
 
     # Clamp to BW floor
     if tgt_bw > 0:

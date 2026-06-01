@@ -537,8 +537,15 @@ def main():
             print(f"    other:            {kb_200.get('other_ms', 0):.3f}ms")
             print(f"    INT4 scale = {gf:.0%}×0.25 + {1-gf:.0%}×1.0 = {gf*0.25+(1-gf):.2f}x")
 
-        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb, sb, kb_200) if m07_200 and kb_200 else None
-        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb, sb, kb_500) if m07_500 and kb_500 else None
+        # Get layer_scale and tp from compensated JSON
+        _ls = d07_200.get("layer_scale", 1.0) if d07_200 else 1.0
+        _tp = d07_200.get("tp_size", 2) if d07_200 else 2
+        _comm = d07_200.get("communication", {}).get("decode_comm_ms", 0) if d07_200 else 0
+
+        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb, sb, kb_200,
+                                     layer_scale=_ls, tp_size=_tp, comm_ms=_comm) if m07_200 and kb_200 else None
+        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb, sb, kb_500,
+                                     layer_scale=_ls, tp_size=_tp, comm_ms=_comm) if m07_500 and kb_500 else None
         if not m07_200_int4 and m07_200:
             print("  WARNING: no kernel_breakdown in compensated JSON, INT4 projection skipped")
             print("  Re-run compensate_scenarios/07 to generate kernel breakdown")
