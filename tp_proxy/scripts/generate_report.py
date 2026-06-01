@@ -527,6 +527,16 @@ def main():
         # INT4 projected using kernel breakdown from trace
         kb_200 = d07_200.get("tail", {}).get("kernel_breakdown") if d07_200 else None
         kb_500 = d07_500.get("tail", {}).get("kernel_breakdown") if d07_500 else None
+
+        if kb_200:
+            gf = kb_200.get("gemm_int4_frac", 0)
+            print(f"\n  INT4 kernel breakdown (from trace):")
+            print(f"    gemm (INT4-able): {kb_200.get('gemm_int4_ms', 0):.3f}ms ({gf*100:.0f}%)")
+            print(f"    lm_head (BF16):   {kb_200.get('lm_head_ms', 0):.3f}ms")
+            print(f"    flash_attn:       {kb_200.get('fa_ms', 0):.3f}ms")
+            print(f"    other:            {kb_200.get('other_ms', 0):.3f}ms")
+            print(f"    INT4 scale = {gf:.0%}×0.25 + {1-gf:.0%}×1.0 = {gf*0.25+(1-gf):.2f}x")
+
         m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb, sb, kb_200) if m07_200 and kb_200 else None
         m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb, sb, kb_500) if m07_500 and kb_500 else None
         if not m07_200_int4 and m07_200:

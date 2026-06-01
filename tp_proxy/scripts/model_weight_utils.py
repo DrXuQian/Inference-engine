@@ -311,26 +311,24 @@ def rescale_int4(metrics: dict, info: dict,
         ttft = ttft * (src_flops / tgt_flops)
 
     # Use kernel_breakdown RATIO (not absolute time, since it's from pruned model)
-    marlin = kernel_breakdown.get("marlin_ms", 0)
-    moe = kernel_breakdown.get("moe_ms", 0)
-    fa = kernel_breakdown.get("fa_ms", 0)
-    other = kernel_breakdown.get("other_ms", 0)
-    total_kernel = marlin + moe + fa + other
-
-    if total_kernel > 0:
-        weight_frac = (marlin + moe) / total_kernel  # fraction affected by INT4
-        non_weight_frac = (fa + other) / total_kernel
-    else:
-        weight_frac = 0.7  # fallback estimate
-        non_weight_frac = 0.3
+    # gemm_int4_frac: fraction of decode step that's INT4-quantizable GEMM
+    # Rest (lm_head + fa + other): stays BF16 or non-weight
+    gemm_frac = kernel_breakdown.get("gemm_int4_frac", 0)
+    if gemm_frac <= 0:
+        # Compute from times if frac not stored
+        gemm = kernel_breakdown.get("gemm_int4_ms", kernel_breakdown.get("marlin_ms", 0) + kernel_breakdown.get("moe_ms", 0))
+        lmh = kernel_breakdown.get("lm_head_ms", 0)
+        fa = kernel_breakdown.get("fa_ms", 0)
+        other = kernel_breakdown.get("other_ms", 0)
+        total_k = gemm + lmh + fa + other
+        gemm_frac = gemm / total_k if total_k > 0 else 0.7
 
     # TPOT: apply ratio to comp_tpot (full model)
-    # weight kernels: BW ratio × INT4 reduction (0.25)
-    # non-weight kernels: BW ratio only
+    # gemm_int4: BW ratio × 0.25 (BF16→INT4 weight reduction)
+    # rest (lm_head BF16 + FA + other): BW ratio × 1.0
     bw_ratio = (src_bw / tgt_bw) if (src_bw > 0 and tgt_bw > 0) else 1.0
-    weight_scale = 0.25  # BF16(2B) → INT4(0.5B)
 
-    tpot_int4 = tpot * bw_ratio * (weight_frac * weight_scale + non_weight_frac)
+    tpot_int4 = tpot * bw_ratio * (gemm_frac * 0.25 + (1 - gemm_frac))
 
     # Clamp to BW floor
     if tgt_bw > 0:

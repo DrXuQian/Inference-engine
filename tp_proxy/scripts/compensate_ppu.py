@@ -289,48 +289,52 @@ def measure_tail_from_trace(sqlite_path: str,
             print(f"\n  WARNING: no mode-count graph found for prefill")
 
     # Kernel classification for the selected decode step
+    # gemm_int4: weight-bound GEMM that can be quantized to INT4 (attn proj, MoE FFN)
+    # lm_head: gemvt (lm_head stays BF16, not quantized)
+    # fa: FlashAttention (reads KV cache, not weight)
+    # other: layernorm, softmax, elementwise (compute, not weight)
     import re as _re
-    marlin_re = _re.compile(r"marlin", _re.IGNORECASE)
-    moe_re = _re.compile(r"moe_wna16|moe.*gemm", _re.IGNORECASE)
+    gemm_re = _re.compile(r"gemm_ktype|cutlass|cublas|cublasLt|marlin|moe_wna16|moe.*gemm|xmma", _re.IGNORECASE)
+    lmhead_re = _re.compile(r"gemvt", _re.IGNORECASE)
     fa_re = _re.compile(r"flash_fwd|flash_bwd|fmha|FlashAttn", _re.IGNORECASE)
 
-    step_kernels = segs[0][1] if segs else []  # use same selected step's kernels
-    # Collect all kernels in the selected decode step (graph + gap)
+    # Collect kernels from last consistent decode step (graph + gap)
+    step_kernels = []
     for si in range(len(segs) - 1):
         if segs[si][0] == "graph" and segs[si+1][0] == "gap":
             if len(segs[si][1]) == mode:
                 step_kernels = segs[si][1] + segs[si+1][1]
-                break
 
-    marlin_ns = moe_ns = fa_ns = other_ns = 0
+    gemm_ns = lmhead_ns = fa_ns = other_ns = 0
     for evt in step_kernels:
         name = evt[3]
         dur = evt[1]
         if fa_re.search(name):
             fa_ns += dur
-        elif marlin_re.search(name):
-            marlin_ns += dur
-        elif moe_re.search(name):
-            moe_ns += dur
+        elif lmhead_re.search(name):
+            lmhead_ns += dur
+        elif gemm_re.search(name):
+            gemm_ns += dur
         else:
             other_ns += dur
 
+    total_kernel_ns = gemm_ns + lmhead_ns + fa_ns + other_ns
     kernel_breakdown = {
-        "marlin_ms": round(marlin_ns / 1e6, 4),
-        "moe_ms": round(moe_ns / 1e6, 4),
+        "gemm_int4_ms": round(gemm_ns / 1e6, 4),
+        "lm_head_ms": round(lmhead_ns / 1e6, 4),
         "fa_ms": round(fa_ns / 1e6, 4),
         "other_ms": round(other_ns / 1e6, 4),
+        "gemm_int4_frac": round(gemm_ns / total_kernel_ns, 4) if total_kernel_ns > 0 else 0,
     }
 
     print(f"\n  encoder (graph wall): {encoder_ms:.4f} ms")
     print(f"  tail (to next graph): {tail_ms:.4f} ms")
-    print(f"    lm_head: {lm_head_ms:.4f} ms")
-    print(f"    sampling: {sampling_ms:.4f} ms")
     print(f"  TPOT (step wall):     {tpot_ms:.4f} ms")
     print(f"  TTFT (prefill):       {ttft_ms:.2f} ms")
     print(f"  Decode kernel breakdown:")
-    print(f"    marlin (attn GEMV):   {kernel_breakdown['marlin_ms']:.4f} ms")
-    print(f"    moe_wna16 (MoE):     {kernel_breakdown['moe_ms']:.4f} ms")
+    gf = kernel_breakdown["gemm_int4_frac"]
+    print(f"    gemm (INT4-able):     {kernel_breakdown['gemm_int4_ms']:.4f} ms ({gf*100:.0f}%)")
+    print(f"    lm_head (BF16):       {kernel_breakdown['lm_head_ms']:.4f} ms")
     print(f"    flash_attn:           {kernel_breakdown['fa_ms']:.4f} ms")
     print(f"    other:                {kernel_breakdown['other_ms']:.4f} ms")
 
