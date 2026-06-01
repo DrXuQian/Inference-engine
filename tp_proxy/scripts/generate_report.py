@@ -624,9 +624,20 @@ def main():
                     model_dirs = _glob.glob(os.path.join(parent_base, "model", "rank_0_*L"))
             cfg = load_model_config(model_dirs[0]) if model_dirs else None
 
+            # Scenario 07: use known full model config from model_weight_utils
+            if sc_dir == "07_qwen3_30b_a3b":
+                from model_weight_utils import load_model_config as _load_mwu
+                cfg = _load_mwu("qwen3-30b-a3b")
+                # Add fields expected by compute_prefill_flops / compute_decode_bytes
+                cfg.setdefault("attn_output_gate", False)
+                cfg.setdefault("num_experts", cfg.get("num_experts", 0))
+                cfg.setdefault("num_experts_per_tok", cfg.get("num_experts_per_tok", 0))
+                cfg.setdefault("layer_types", [])
+                cfg.setdefault("quant_bits", 16)
+
             # Pruned config has TP-split values and truncated layer_types.
             # Try to load the ORIGINAL model config from split_meta.json.
-            if cfg and comp:
+            elif cfg and comp:
                 orig_cfg = None
                 meta_path = os.path.join(base, "model", "split_meta.json")
                 if os.path.exists(meta_path):
