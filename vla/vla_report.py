@@ -210,7 +210,12 @@ def main():
     # ①b VIT Current (Spatial): 3 cams × 900 tokens, 24L
     vit_current = transformer_flops(3, 900, 24, 1024, 16, 64, 4096)
     # ①b+ Temporal Attention: 2700 patches (3cam × 900tok) × 18 timesteps, 6L
-    vit_temporal = transformer_flops(2700, 18, 6, 1024, 16, 64, 4096)
+    # Attention only (no FFN): QKV + attn + out proj
+    vit_temporal = 6 * (
+        3 * 2 * 2700 * 18 * 1024 * 1024      # QKV proj
+        + 2 * 2 * 16 * 2700 * 18 * 18 * 64   # QK^T + AV
+        + 2 * 2700 * 18 * 1024 * 1024         # out proj
+    )
     vit_flops = vit_target + vit_current + vit_temporal
 
     # ② LLM Prefill: 1550 tokens, 36L, Qwen3-VL-4B

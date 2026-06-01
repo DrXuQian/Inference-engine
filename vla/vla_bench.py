@@ -156,10 +156,16 @@ class SpatioTemporalVIT(nn.Module):
             VITBlock(hidden, heads, ffn_dim, dtype) for _ in range(depth)
         ])
 
-        # Temporal self-attention blocks (every cross_every layers)
+        # Temporal self-attention blocks (attention only, no FFN)
         n_temporal = depth // cross_every
-        self.temporal_blocks = nn.ModuleList([
-            VITBlock(hidden, heads, ffn_dim, dtype) for _ in range(n_temporal)
+        self.temporal_norms = nn.ModuleList([
+            nn.LayerNorm(hidden, dtype=dtype) for _ in range(n_temporal)
+        ])
+        self.temporal_qkvs = nn.ModuleList([
+            nn.Linear(hidden, 3 * hidden, dtype=dtype) for _ in range(n_temporal)
+        ])
+        self.temporal_outs = nn.ModuleList([
+            nn.Linear(hidden, hidden, dtype=dtype) for _ in range(n_temporal)
         ])
 
         # Output projection
@@ -214,8 +220,15 @@ class SpatioTemporalVIT(nn.Module):
                 # Reshape: (B*3*900, 18, C)
                 temporal_seq = temporal_seq.permute(0, 1, 3, 2, 4).reshape(B * NC_hist * S_full, NT, C)
 
-                # Temporal self-attention
-                temporal_seq = self.temporal_blocks[temporal_idx](temporal_seq)  # (B*2700, 18, C)
+                # Temporal self-attention (no FFN)
+                BT, NT_seq, CT = temporal_seq.shape
+                h = self.temporal_norms[temporal_idx](temporal_seq)
+                qkv = self.temporal_qkvs[temporal_idx](h)
+                qkv = qkv.reshape(BT, NT_seq, 3, self.blocks[0].heads, self.blocks[0].head_dim).permute(2, 0, 3, 1, 4)
+                q, k, v = qkv.unbind(0)
+                h = F.scaled_dot_product_attention(q, k, v)
+                h = h.transpose(1, 2).reshape(BT, NT_seq, CT)
+                temporal_seq = temporal_seq + self.temporal_outs[temporal_idx](h)
 
                 # Extract current timestep
                 x_temporal = temporal_seq[:, -1, :].view(B, NC_hist, S_full, C)
