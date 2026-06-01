@@ -204,16 +204,12 @@ def main():
     vit_target = transformer_flops(3, 900, 24, 1024, 16, 64, 4096)
     # ①b VIT Current (Spatial): 3 cams × 900 tokens, 24L
     vit_current = transformer_flops(3, 900, 24, 1024, 16, 64, 4096)
-    # ①b+ Temporal Cross-Attention: Q=900/cam, KV=3825/cam (17f×225), 3cam, 6L
-    # Per-camera independent, no FFN. QKV proj only for current frame.
-    Nq_t, Nkv_t, cams_t = 900, 17*225, 3  # Q=900 patches, KV=3825 history
-    vit_temporal = 6 * cams_t * (
-        2 * Nq_t * 1024 * 1024               # Q proj
-        + 2 * Nkv_t * 1024 * 1024            # K proj (history)
-        + 2 * Nkv_t * 1024 * 1024            # V proj (history)
-        + 2 * 16 * Nq_t * Nkv_t * 64         # QK^T
-        + 2 * 16 * Nq_t * Nkv_t * 64         # softmax(QK^T) × V
-        + 2 * Nq_t * 1024 * 1024             # out proj
+    # ①b+ Temporal Self-Attention: batch=2700 (3cam×900patches), seq=18, 6L
+    # Each patch independently attends across 18 timesteps. No FFN.
+    vit_temporal = 6 * (
+        3 * 2 * 2700 * 18 * 1024 * 1024      # QKV proj
+        + 2 * 2 * 16 * 2700 * 18 * 18 * 64   # QK^T + AV (seq=18, small)
+        + 2 * 2700 * 18 * 1024 * 1024         # out proj
     )
     vit_flops = vit_target + vit_current + vit_temporal
 
@@ -246,7 +242,7 @@ def main():
     print(f"  {'-'*68}")
     print(f"  {'①a VIT Target (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_target/1e12:>8.3f}")
     print(f"  {'①b VIT Current (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_current/1e12:>8.3f}")
-    print(f"  {'①b+ Temporal CrossAttn':<30s} {'Q=900':>5s} {'K=3825':>6s} {'6':>6s} {'1024':>6s} {vit_temporal/1e12:>8.3f}")
+    print(f"  {'①b+ Temporal SelfAttn':<30s} {'2700':>5s} {'18':>5s} {'6':>6s} {'1024':>6s} {vit_temporal/1e12:>8.3f}")
     print(f"  {'② LLM Prefill':<30s} {'1':>5s} {'1550':>5s} {'36':>6s} {'2560':>6s} {llm_flops/1e12:>8.3f}")
     print(f"  {'③ DiT (×' + str(args.dit_steps) + ')':<30s} {'1':>5s} {'51':>5s} {'18':>6s} {'1024':>6s} {dit_flops/1e12:>8.3f}")
     print(f"  {'-'*68}")
