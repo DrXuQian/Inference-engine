@@ -202,48 +202,39 @@ class SpatioTemporalVIT(nn.Module):
             x = self.blocks[i](x)  # (B*NC, 900, 1024)
 
             if (i + 1) % self.cross_every == 0:
-                # Temporal self-attention: each patch attends across 18 timesteps
-                # batch=2700 (3cam × 900patches), seq=18 (1 current + 17 history)
+                # Temporal cross-attention: Q=current(seq=1), KV=history(seq=18)
+                # batch=2700 (3cam × 900patches), Q_seq=1, KV_seq=18
                 heads = self.blocks[0].heads
                 head_dim = self.blocks[0].head_dim
                 x_all = x.view(B, NC, S, PF, C)
 
-                # Current cameras: (B, 3, 225, 4, C)
+                # Q: current frame patches (B, 3, 225, 4, C) → (B*2700, 1, C)
                 x_curr = x_all[:, NC_hist:, :, :, :]
+                q_in = x_curr.reshape(B * NC_hist * S * PF, 1, C)
 
-                # History: (B, 3, 17, 225, C) → expand to 900: (B, 3, 17, 225, 4, C)
+                # KV: history (B, 3, 17, 225, C) → expand to 900 → (B*2700, 17, C)
+                # + current frame as last timestep → (B*2700, 18, C)
                 hist_exp = hist.unsqueeze(4).expand(-1, -1, -1, -1, PF, -1)
+                hist_flat = hist_exp.permute(0, 1, 3, 4, 2, 5).reshape(B * NC_hist * S * PF, HF, C)
+                kv_in = torch.cat([hist_flat, q_in], dim=1)  # (B*2700, 18, C)
 
-                # Stack current + history: (B, 3, 18, 225, 4, C)
-                temporal_seq = torch.cat([hist_exp, x_curr.unsqueeze(2)], dim=2)
+                # Project Q (current only), K/V (all 18 timesteps)
+                BT = B * NC_hist * S * PF  # 2700
+                q_norm = self.temporal_norm_q[temporal_idx](q_in)
+                q = self.temporal_q[temporal_idx](q_norm).reshape(BT, 1, heads, head_dim).transpose(1, 2)
+                k = self.temporal_k[temporal_idx](kv_in).reshape(BT, HF + 1, heads, head_dim).transpose(1, 2)
+                v = self.temporal_v[temporal_idx](kv_in).reshape(BT, HF + 1, heads, head_dim).transpose(1, 2)
 
-                # Reshape to (B*2700, 18, C): each patch independently across 18 timesteps
-                temporal_seq = temporal_seq.permute(0, 1, 3, 4, 2, 5)  # (B, 3, 225, 4, 18, C)
-                temporal_seq = temporal_seq.reshape(B * NC_hist * S * PF, HF + 1, C)
+                # Cross-attention: Q(1) × KV(18)
+                h = F.scaled_dot_product_attention(q, k, v)
+                h = h.transpose(1, 2).reshape(BT, 1, C)
+                h = self.temporal_out[temporal_idx](h).squeeze(1)  # (B*2700, C)
 
-                # Self-attention (no FFN)
-                BT, NT, CT = temporal_seq.shape
-                h = self.temporal_norm_q[temporal_idx](temporal_seq)
-                qkv = self.temporal_q[temporal_idx](h)  # reuse as QKV proj
-                # Actually need separate Q/K/V for self-attention
-                q_h = self.temporal_q[temporal_idx](h)
-                k_h = self.temporal_k[temporal_idx](h)
-                v_h = self.temporal_v[temporal_idx](h)
-                q_h = q_h.reshape(BT, NT, heads, head_dim).transpose(1, 2)
-                k_h = k_h.reshape(BT, NT, heads, head_dim).transpose(1, 2)
-                v_h = v_h.reshape(BT, NT, heads, head_dim).transpose(1, 2)
-                h = F.scaled_dot_product_attention(q_h, k_h, v_h)
-                h = h.transpose(1, 2).reshape(BT, NT, CT)
-                temporal_seq = temporal_seq + self.temporal_out[temporal_idx](h)
-
-                # Extract current timestep (last one): (B*2700, C) → (B, 3, 225, 4, C)
-                x_temporal = temporal_seq[:, -1, :].view(B, NC_hist, S, PF, C)
-
-                # Update current cameras (residual add)
+                # Residual add to current cameras
+                x_temporal = h.view(B, NC_hist, S, PF, C)
                 x_all = x_all.clone()
                 x_all[:, NC_hist:] = x_all[:, NC_hist:] + x_temporal
 
-                # Back to (B*NC, 900, C)
                 x = x_all.reshape(B * NC, S_full, C)
                 temporal_idx += 1
 

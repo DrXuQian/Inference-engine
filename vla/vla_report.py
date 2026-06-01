@@ -204,12 +204,15 @@ def main():
     vit_target = transformer_flops(3, 900, 24, 1024, 16, 64, 4096)
     # ①b VIT Current (Spatial): 3 cams × 900 tokens, 24L
     vit_current = transformer_flops(3, 900, 24, 1024, 16, 64, 4096)
-    # ①b+ Temporal Self-Attention: batch=2700 (3cam×900patches), seq=18, 6L
-    # Each patch independently attends across 18 timesteps. No FFN.
+    # ①b+ Temporal Cross-Attn: Q(batch=2700, seq=1) × KV(seq=18), 6L, no FFN
+    # Q proj: current only. KV proj: all 18 timesteps (or cached).
     vit_temporal = 6 * (
-        3 * 2 * 2700 * 18 * 1024 * 1024      # QKV proj
-        + 2 * 2 * 16 * 2700 * 18 * 18 * 64   # QK^T + AV (seq=18, small)
-        + 2 * 2700 * 18 * 1024 * 1024         # out proj
+        2 * 2700 * 1 * 1024 * 1024            # Q proj (current, seq=1)
+        + 2 * 2700 * 1 * 1024 * 1024          # K proj (current → cache)
+        + 2 * 2700 * 1 * 1024 * 1024          # V proj (current → cache)
+        + 2 * 16 * 2700 * 1 * 18 * 64         # QK^T (1×18)
+        + 2 * 16 * 2700 * 1 * 18 * 64         # AV (1×18)
+        + 2 * 2700 * 1 * 1024 * 1024          # out proj
     )
     vit_flops = vit_target + vit_current + vit_temporal
 
@@ -242,7 +245,7 @@ def main():
     print(f"  {'-'*68}")
     print(f"  {'①a VIT Target (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_target/1e12:>8.3f}")
     print(f"  {'①b VIT Current (Spatial)':<30s} {'3':>5s} {'900':>5s} {'24':>6s} {'1024':>6s} {vit_current/1e12:>8.3f}")
-    print(f"  {'①b+ Temporal SelfAttn':<30s} {'2700':>5s} {'18':>5s} {'6':>6s} {'1024':>6s} {vit_temporal/1e12:>8.3f}")
+    print(f"  {'①b+ Temporal CrossAttn':<30s} {'2700':>5s} {'Q1K18':>5s} {'6':>6s} {'1024':>6s} {vit_temporal/1e12:>8.3f}")
     print(f"  {'② LLM Prefill':<30s} {'1':>5s} {'1550':>5s} {'36':>6s} {'2560':>6s} {llm_flops/1e12:>8.3f}")
     print(f"  {'③ DiT (×' + str(args.dit_steps) + ')':<30s} {'1':>5s} {'51':>5s} {'18':>6s} {'1024':>6s} {dit_flops/1e12:>8.3f}")
     print(f"  {'-'*68}")
