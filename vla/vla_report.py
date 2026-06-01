@@ -152,21 +152,21 @@ def main():
     llm = load_component(None, args.llm_trace, "prefill", None, args.llm_ms)
     if llm:
         print(f"  LLM: {llm['total_ms']:.2f}ms (gemm={llm['gemm_ms']:.2f}, other={llm['other_ms']:.2f})")
-    # DiT: use single step from trace, multiply by dit_steps for total
-    dit_1step = load_component(args.dit_json, args.dit_trace, "DiT_1step_0", "dit_1step_ms", None)
-    if dit_1step:
-        print(f"  DiT 1step: {dit_1step['total_ms']:.2f}ms → ×{args.dit_steps} = {dit_1step['total_ms']*args.dit_steps:.2f}ms")
+    # DiT: use full 50-step NVTX range directly (kernel sum = real time)
+    dit = None
     if args.dit_ms is not None:
         dit = load_component(None, None, None, None, args.dit_ms)
-    elif dit_1step:
-        # Scale single step to full denoising
-        factor = args.dit_steps
-        dit = {
-            "gemm_ms": dit_1step["gemm_ms"] * factor,
-            "other_ms": dit_1step["other_ms"] * factor,
-            "total_ms": dit_1step["total_ms"] * factor,
-        }
-    else:
+    elif args.dit_trace:
+        # Try DiT_50steps_0 first (full run), then DiT_1step_0 × N
+        dit = load_component(None, args.dit_trace, f"DiT_{args.dit_steps}steps_0", None, None)
+        if dit:
+            print(f"  DiT {args.dit_steps}steps: {dit['total_ms']:.2f}ms (from trace)")
+        else:
+            dit_1step = load_component(None, args.dit_trace, "DiT_1step_0", None, None)
+            if dit_1step:
+                print(f"  DiT 1step: {dit_1step['total_ms']:.2f}ms → ×{args.dit_steps} = {dit_1step['total_ms']*args.dit_steps:.2f}ms")
+                dit = {k: dit_1step[k] * args.dit_steps for k in ("gemm_ms", "other_ms", "total_ms")}
+    if not dit:
         dit = load_component(args.dit_json, None, None, "dit_full_ms", None)
 
     print("=" * 75)
