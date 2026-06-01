@@ -185,23 +185,67 @@ def main():
     print("VLA Pipeline Summary")
     print("=" * 75)
 
-    # Estimate FLOPs per component (from architecture params)
-    # VIT: 24L×1024, per-cam 900 tokens self-attn, 900×3825 cross-attn
-    vit_flops = (
-        24 * (3*2*900*1024*1024 + 2*2*16*900*900*64 + 2*900*1024*1024 + 2*2*900*1024*4096)  # self-attn
-        + 6 * (2*900*1024*1024 + 2*2*3825*1024*1024 + 2*2*16*900*3825*64 + 2*900*1024*1024)  # cross-attn
-    ) * 6  # 6 cameras
-    # LLM: 36L×2560, 1550 tokens prefill
-    llm_flops = 36 * (3*2*1550*2560*2560 + 2*2*32*1550*1550*128 + 2*1550*2560*2560 + 2*2*1550*2560*9728)
-    # DiT: 18L×1024, 51 query × 1550 KV, ×50 steps
+    # Estimate FLOPs per sub-component
+    # Transformer FLOPs helper: 2 × (QKV + Attn + Out + FFN) per layer
+    def transformer_flops(batch, seq, layers, hidden, heads, head_dim, ffn_dim):
+        per_layer = (
+            3 * 2 * batch * seq * hidden * hidden      # QKV proj
+            + 2 * 2 * batch * heads * seq * seq * head_dim  # QK^T + AV
+            + 2 * batch * seq * hidden * hidden          # out proj
+            + 2 * 2 * batch * seq * hidden * ffn_dim     # FFN
+        )
+        return per_layer * layers
+
+    def cross_attn_flops(batch, seq_q, seq_kv, layers, hidden, heads, head_dim):
+        per_layer = (
+            2 * batch * seq_q * hidden * hidden          # Q proj
+            + 2 * 2 * batch * seq_kv * hidden * hidden   # KV proj
+            + 2 * 2 * batch * heads * seq_q * seq_kv * head_dim  # QK^T + AV
+            + 2 * batch * seq_q * hidden * hidden        # out proj
+        )
+        return per_layer * layers
+
+    # ①a VIT Target (Spatial): 3 cams × 225 tokens, 24L
+    vit_target = transformer_flops(3, 225, 24, 1024, 16, 64, 4096)
+    # ①b VIT Current (Spatial): 3 cams × 225 tokens, 24L
+    vit_current = transformer_flops(3, 225, 24, 1024, 16, 64, 4096)
+    # ①b+ Temporal Attention: 675 positions × 18 timesteps, 6L (every 4 of 24)
+    vit_temporal = cross_attn_flops(675, 1, 18, 6, 1024, 16, 64)
+    # Actually temporal is self-attn across time per spatial position
+    vit_temporal = transformer_flops(675, 18, 6, 1024, 16, 64, 4096)
+    vit_flops = vit_target + vit_current + vit_temporal
+
+    # ② LLM Prefill: 1550 tokens, 36L, Qwen3-VL (GQA: q=4096, kv=1024)
+    llm_flops = 36 * (
+        2 * 1550 * 2560 * 4096          # Q proj (2560→32×128=4096)
+        + 2 * 2 * 1550 * 2560 * 1024    # KV proj (2560→8×128=1024)
+        + 2 * 2 * 32 * 1550 * 1550 * 128  # QK^T + AV
+        + 2 * 1550 * 4096 * 2560        # out proj
+        + 2 * 2 * 1550 * 2560 * 9728    # FFN (SwiGLU)
+    )
+
+    # ③ DiT: 51 tokens, 18L, cross-attn with LLM KV (1550 tokens), ×N steps
     dit_1step_flops = 18 * (
-        3*2*51*1024*1024 + 2*2*8*51*51*128 + 2*51*1024*1024  # self-attn
-        + 2*51*1024*1024 + 2*2*1550*1024*1024 + 2*2*8*51*1550*128 + 2*51*1024*1024  # cross-attn
-        + 2*2*51*1024*4096  # FFN
-    ) + 2*1550*2560*1024  # kv_proj
+        3 * 2 * 51 * 1024 * 1024 + 2 * 2 * 8 * 51 * 51 * 128 + 2 * 51 * 1024 * 1024  # self-attn
+        + 2 * 51 * 1024 * 1024 + 2 * 2 * 1550 * 1024 * 1024 + 2 * 2 * 8 * 51 * 1550 * 128 + 2 * 51 * 1024 * 1024  # cross-attn
+        + 2 * 2 * 51 * 1024 * 4096  # FFN
+    ) + 2 * 1550 * 2560 * 1024  # kv_proj (once)
     dit_flops = dit_1step_flops * args.dit_steps
 
     comp_flops = {"VIT": vit_flops, "LLM": llm_flops, "DiT": dit_flops}
+
+    # Print detailed FLOPs breakdown
+    print(f"\nFLOPs Breakdown:")
+    print(f"  {'Stage':<30s} {'Batch':>5s} {'Seq':>5s} {'Layers':>6s} {'Hidden':>6s} {'TFLOPs':>8s}")
+    print(f"  {'-'*68}")
+    print(f"  {'①a VIT Target (Spatial)':<30s} {'3':>5s} {'225':>5s} {'24':>6s} {'1024':>6s} {vit_target/1e12:>8.3f}")
+    print(f"  {'①b VIT Current (Spatial)':<30s} {'3':>5s} {'225':>5s} {'24':>6s} {'1024':>6s} {vit_current/1e12:>8.3f}")
+    print(f"  {'①b+ Temporal Attention':<30s} {'675':>5s} {'18':>5s} {'6':>6s} {'1024':>6s} {vit_temporal/1e12:>8.3f}")
+    print(f"  {'② LLM Prefill':<30s} {'1':>5s} {'1550':>5s} {'36':>6s} {'2560':>6s} {llm_flops/1e12:>8.3f}")
+    print(f"  {'③ DiT (×' + str(args.dit_steps) + ')':<30s} {'1':>5s} {'51':>5s} {'18':>6s} {'1024':>6s} {dit_flops/1e12:>8.3f}")
+    print(f"  {'-'*68}")
+    total_est = vit_flops + llm_flops + dit_flops
+    print(f"  {'Total':<30s} {'':>5s} {'':>5s} {'':>6s} {'':>6s} {total_est/1e12:>8.3f}")
     peak = args.peak_tflops
     peak_bw = args.peak_bw
 
