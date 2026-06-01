@@ -75,22 +75,9 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
     if n.startswith("mtp.fc.") or n.startswith("mtp.norm.") or "pre_fc_norm" in n:
         return "replicate", None
 
-    # ---- GPTQ-quantised expert weights (qweight / scales / qzeros / g_idx) ----
+    # ---- MoE expert weights: replicate (vLLM handles MoE TP internally) ----
     if ".experts." in n:
-        is_gptq = any(n.endswith(sfx) for sfx in (".qweight", ".qzeros", ".scales", ".g_idx"))
-        if is_gptq:
-            is_col = ".gate_proj." in n or ".up_proj." in n
-            is_row = ".down_proj." in n
-            if is_col:
-                return ("replicate", None) if n.endswith(".g_idx") else ("gptq_col", None)
-            if is_row:
-                return ("gptq_gidx", None) if n.endswith(".g_idx") else ("gptq_row", None)
-        else:
-            # bf16 expert weights (MTP layer experts)
-            if ".gate_proj." in n or ".up_proj." in n:
-                return "col", 0
-            if ".down_proj." in n:
-                return "row", 1
+        return "replicate", None
 
     # ---- full attention (self_attn) ----
     if ".self_attn." in n:
