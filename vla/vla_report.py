@@ -310,7 +310,7 @@ def main():
     RECOMMENDED = {
         "VIT": {"gemm": "fp8",  "fa": "fp8",  "gemm_sp": 2.0, "fa_sp": 2.0},
         "LLM": {"gemm": "fp4",  "fa": "fp8",  "gemm_sp": 4.0, "fa_sp": 2.0},
-        "DiT": {"gemm": "fp16", "fa": "fp16", "gemm_sp": 1.0, "fa_sp": 1.0},
+        "DiT": {"gemm": "fp8",  "fa": "fp8",  "gemm_sp": 2.0, "fa_sp": 2.0},
     }
 
     print(f"\n{'='*75}")
