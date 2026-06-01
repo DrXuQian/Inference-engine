@@ -45,14 +45,19 @@ class SpatioTemporalVIT(nn.Module):
     """
     24 layers, hidden=1024, heads=16.
     Every 4 layers: cross-attention with historical KV cache.
-    Input: 6 cameras × 225 tokens = 1350 tokens
+    Input: 6 cameras × 225×4 tokens = 5400 tokens (high-res patches)
     History: 17 frames × 3 cameras × 225 tokens = 11475 tokens (for cross-attn)
+    Output: 6 cameras × 225 tokens (aggregated) → projected to 2560D
     """
     def __init__(self, hidden=1024, heads=16, depth=24, cross_every=4,
+                 patch_factor=4, n_cams=6, tokens_per_cam=225,
                  ffn_mult=4, dtype=torch.bfloat16):
         super().__init__()
         self.depth = depth
         self.cross_every = cross_every
+        self.patch_factor = patch_factor
+        self.n_cams = n_cams
+        self.tokens_per_cam = tokens_per_cam
 
         self.self_attn_layers = nn.ModuleList([
             nn.TransformerEncoderLayer(
@@ -67,19 +72,28 @@ class SpatioTemporalVIT(nn.Module):
             nn.MultiheadAttention(hidden, heads, batch_first=True, dtype=dtype)
             for _ in range(n_cross)
         ])
+        # Aggregate patch_factor tokens → 1 token per spatial position
+        self.aggregate = nn.Linear(hidden * patch_factor, hidden, dtype=dtype)
         self.proj_out = nn.Linear(hidden, 2560, dtype=dtype)
 
     def forward(self, x, history_kv):
+        # x: (B, n_cams * tokens_per_cam * patch_factor, hidden)
         cross_idx = 0
         for i in range(self.depth):
             x = self.self_attn_layers[i](x)
             if (i + 1) % self.cross_every == 0:
-                # Cross-attention with historical frames
                 x_res = x
                 x, _ = self.cross_attn_layers[cross_idx](x, history_kv, history_kv)
                 x = x + x_res
                 cross_idx += 1
-        return self.proj_out(x)
+
+        # Aggregate: (B, n_cams*225*4, 1024) → (B, n_cams*225, 4*1024) → (B, n_cams*225, 1024)
+        B = x.shape[0]
+        n_out = self.n_cams * self.tokens_per_cam
+        x = x.view(B, n_out, self.patch_factor, -1)  # (B, 1350, 4, 1024)
+        x = x.reshape(B, n_out, -1)                   # (B, 1350, 4096)
+        x = self.aggregate(x)                          # (B, 1350, 1024)
+        return self.proj_out(x)                        # (B, 1350, 2560)
 
 
 # ============================================================
@@ -226,7 +240,9 @@ def main():
     dev = args.device
     use_compile = not args.no_compile
 
-    n_vis_tokens = args.vit_cams * args.vit_tokens_per_cam  # 6×225=1350
+    patch_factor = 4  # each spatial position = 4 patch tokens
+    n_vit_input_tokens = args.vit_cams * args.vit_tokens_per_cam * patch_factor  # 6×225×4=5400
+    n_vis_tokens = args.vit_cams * args.vit_tokens_per_cam  # 6×225=1350 (after aggregation)
     n_hist_tokens = args.vit_history_frames * args.vit_history_cams * args.vit_tokens_per_cam  # 17×3×225=11475
     n_llm_tokens = n_vis_tokens + args.llm_task_tokens  # 1350+200=1550
     n_dit_tokens = args.dit_denoise_steps + 1  # 50+1=51
@@ -235,7 +251,7 @@ def main():
     print("VLA Benchmark")
     print(f"  dtype={args.dtype}, device={dev}, compile={use_compile}")
     print(f"  warmup={args.warmup}, iters={args.iters}")
-    print(f"  VIT: {n_vis_tokens} tokens, history={n_hist_tokens} tokens")
+    print(f"  VIT: {n_vit_input_tokens} input tokens → {n_vis_tokens} output tokens, history={n_hist_tokens} tokens")
     print(f"  LLM: {n_llm_tokens} tokens (prefill)")
     print(f"  DiT: {n_dit_tokens} tokens × {args.dit_denoise_steps} denoise steps")
     print("=" * 60)
@@ -244,9 +260,9 @@ def main():
 
     # === VIT ===
     if args.component in ("vit", "all"):
-        print("\n=== VIT (Spatio-Temporal, 24L×1024) ===")
+        print(f"\n=== VIT (Spatio-Temporal, 24L×1024, {n_vit_input_tokens} → {n_vis_tokens} tokens) ===")
         vit = SpatioTemporalVIT(dtype=dtype).to(dev).eval()
-        x_vit = torch.randn(1, n_vis_tokens, 1024, dtype=dtype, device=dev)
+        x_vit = torch.randn(1, n_vit_input_tokens, 1024, dtype=dtype, device=dev)
         hist = torch.randn(1, n_hist_tokens, 1024, dtype=dtype, device=dev)
         params = sum(p.numel() for p in vit.parameters()) / 1e6
         print(f"  params: {params:.1f}M")
