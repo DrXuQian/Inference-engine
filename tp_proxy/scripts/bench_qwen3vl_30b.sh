@@ -194,6 +194,18 @@ for OUTLEN in $OUTPUT_LENS; do
             "$RUN_DIR/trace.nsys-rep" > /dev/null 2>&1 || true
     fi
 
+    # Extract TTFT/TPOT from trace (kernel time, not wall clock)
+    TRACE_SQLITE="$RUN_DIR/trace.sqlite"
+    if [ -f "$TRACE_SQLITE" ]; then
+        echo "  Extracting kernel times from trace..."
+        python3 "$SCRIPT_DIR/compensate_ppu.py" \
+            --model-dir "$MODEL" \
+            --asys-sqlite "$TRACE_SQLITE" \
+            --output-len "$OUTLEN" \
+            --output-json "$RUN_DIR/trace_result.json" \
+            2>&1 | tee -a "$RUN_DIR/bench.log" || true
+    fi
+
     echo "[Done] Output=${OUTLEN} → $RUN_DIR/"
     echo ""
 done
@@ -201,15 +213,28 @@ done
 # Summary
 echo "============================================"
 echo "  Results: $OUT_DIR"
+echo ""
 for OUTLEN in $OUTPUT_LENS; do
     RUN_DIR="$OUT_DIR/out${OUTLEN}"
+    echo "  Output=${OUTLEN}:"
+
+    # Wall clock (from Python timer)
     if [ -f "$RUN_DIR/result.json" ]; then
-        echo "  Output=${OUTLEN}:"
         python3 -c "
 import json
 d = json.load(open('$RUN_DIR/result.json'))
-print(f'    TTFT={d[\"ttft_median_ms\"]:.2f}ms  TPOT={d[\"tpot_median_ms\"]:.3f}ms  Total={d[\"total_median_ms\"]:.2f}ms')
-" 2>/dev/null || echo "    see $RUN_DIR/bench.log"
+print(f'    [wall]  TTFT={d[\"ttft_median_ms\"]:.2f}ms  TPOT={d[\"tpot_median_ms\"]:.3f}ms')
+" 2>/dev/null || true
+    fi
+
+    # Kernel time (from trace)
+    if [ -f "$RUN_DIR/trace_result.json" ]; then
+        python3 -c "
+import json
+d = json.load(open('$RUN_DIR/trace_result.json'))
+t = d.get('tail', {})
+print(f'    [trace] TTFT_kernel={t.get(\"ttft_kernel_ms\",\"?\"):.2f}ms  TTFT_wall={t.get(\"ttft_wall_ms\",\"?\"):.2f}ms  TPOT={t.get(\"tpot_ms\",\"?\"):.4f}ms')
+" 2>/dev/null || true
     fi
 done
 echo "============================================"

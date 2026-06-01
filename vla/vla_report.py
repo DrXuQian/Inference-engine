@@ -269,6 +269,9 @@ def main():
 
     comp_flops = {"VIT": vit_flops, "LLM": llm_flops, "DiT": dit_flops}
 
+    # QKV ratio within GEMM (from architecture analysis)
+    QKV_RATIO = {"VIT": 0.25, "LLM": 0.16, "DiT": 0.87}
+
     # Print detailed FLOPs breakdown
     print(f"\nFLOPs Breakdown:")
     print(f"  {'Stage':<30s} {'Batch':>5s} {'Seq':>5s} {'Layers':>6s} {'Hidden':>6s} {'TFLOPs':>8s}")
@@ -303,12 +306,11 @@ def main():
     dit_params = 18*(3*1024*1024 + 1024*1024 + 3*1024*1024 + 1024*1024 + 2*1024*4096) + \
                  2560*1024 + 62*1024 + 1024*62  # kv_proj + proj_in + proj_out
 
-    # Weight bytes: GPTQ-Int4 = 0.5B/param, bf16 = 2B/param
-    llm_bytes_per_param = 0.5 if "int4" in lcfg["name"].lower() or "gptq" in lcfg["name"].lower() else 2
+    # Weight bytes: benchmark runs in BF16 (2B/param), quantization is projection only
     comp_weight_bytes = {
-        "VIT": vit_params * 2,                                    # bf16, read once
-        "LLM": llm_params * llm_bytes_per_param,                  # GPTQ-Int4 or bf16
-        "DiT": dit_params * 2 * args.dit_steps,                   # bf16, ×N steps
+        "VIT": vit_params * 2,                         # bf16
+        "LLM": llm_params * 2,                         # bf16 (even if model is GPTQ, FLOPs assume bf16)
+        "DiT": dit_params * 2 * args.dit_steps,        # bf16, ×N steps
     }
 
     # Component breakdown
