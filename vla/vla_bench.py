@@ -553,7 +553,7 @@ def main():
             "component_results": results,
             "config": {
                 "vit": {"hidden": args.vit_hidden, "depth": args.vit_depth,
-                        "in_tokens": n_vit_in, "out_tokens": n_vit_out,
+                        "in_tokens": n_vit_tokens, "out_tokens": n_vit_tokens,
                         "history_tokens": n_hist},
                 "dit": {"hidden": args.dit_hidden, "layers": args.dit_layers,
                         "tokens": n_dit_tokens, "denoise_steps": args.dit_denoise_steps,
