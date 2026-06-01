@@ -484,9 +484,9 @@ def main():
     # 6. Qwen3-30B-A3B (1.5K input, 200/500 output)
     # =========================================================================
     if show_vla:
-        d07_200 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "compensated_200.json"))
+        d07_200 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_200.json"))
         m07_200 = get_metrics(d07_200) if d07_200 else None
-        d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "compensated_500.json"))
+        d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_500.json"))
         m07_500 = get_metrics(d07_500) if d07_500 else None
         print_scenario(
             "Qwen3-30B-A3B-GPTQ-INT4 (1.5K input)",
@@ -513,8 +513,8 @@ def main():
             ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 3072, 2, 1),
             ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 3072, 2, 1),
             ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1, 1),
-            ("07 30B-A3B out=200", "07_qwen3_30b_a3b", None, 1536, 200, 1, 1),
-            ("07 30B-A3B out=500", "07_qwen3_30b_a3b", None, 1536, 500, 1, 1),
+            ("07 30B-A3B TP2 out=200", "07_qwen3_30b_a3b", "tp2", 1536, 200, 2, 1),
+            ("07 30B-A3B TP2 out=500", "07_qwen3_30b_a3b", "tp2", 1536, 500, 2, 1),
         ]
         # Add batch scenarios (04c/05c)
         for b in [1, 2, 4, 8]:
