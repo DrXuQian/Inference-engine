@@ -502,58 +502,37 @@ def main():
 
         _info = decode_weight_bytes("qwen3-30b-a3b", tp=2)
 
-        # INT4 projected (same platform)
-        m07_200_int4 = rescale_int4(m07_200, _info) if m07_200 else None
-        m07_500_int4 = rescale_int4(m07_500, _info) if m07_500 else None
-
-        # Target platform rescaled (if --src/tgt-flops/bw given)
-        has_rescale = args.src_flops > 0 and args.tgt_flops > 0
-        if has_rescale:
-            m07_200_tgt = rescale_metrics(m07_200, _info,
-                args.src_flops, args.tgt_flops, args.src_bw, args.tgt_bw) if m07_200 else None
-            m07_500_tgt = rescale_metrics(m07_500, _info,
-                args.src_flops, args.tgt_flops, args.src_bw, args.tgt_bw) if m07_500 else None
-            # INT4 on target platform
-            _info_int4 = decode_weight_bytes("qwen3-30b-a3b-gptq-int4", tp=2)
-            m07_200_tgt_int4 = rescale_int4(m07_200, _info_int4,
-                args.src_flops, args.tgt_flops, args.tgt_bw) if m07_200 else None
-            m07_500_tgt_int4 = rescale_int4(m07_500, _info_int4,
-                args.src_flops, args.tgt_flops, args.tgt_bw) if m07_500 else None
-
+        # BF16 measured (source platform)
         print_scenario(
             "Qwen3-30B-A3B BF16 measured (1.5K input)",
-            [
-                ("Output=200", m07_200),
-                ("Output=500", m07_500),
-            ],
+            [("Output=200", m07_200), ("Output=500", m07_500)],
             fmt,
         )
-        print_scenario(
-            "Qwen3-30B-A3B INT4 projected (1.5K input)",
-            [
-                ("Output=200 (INT4)", m07_200_int4),
-                ("Output=500 (INT4)", m07_500_int4),
-            ],
-            fmt,
-        )
+
+        # Rescaled results
+        has_rescale = args.src_flops > 0 and args.tgt_flops > 0
+        sf = args.src_flops; tf = args.tgt_flops
+        sb = args.src_bw; tb = args.tgt_bw
+
+        # BF16 → target platform
         if has_rescale:
-            tgt_label = f"→ Target ({args.tgt_flops}T/{args.tgt_bw}GB/s)"
+            m07_200_tgt = rescale_metrics(m07_200, _info, sf, tf, sb, tb) if m07_200 else None
+            m07_500_tgt = rescale_metrics(m07_500, _info, sf, tf, sb, tb) if m07_500 else None
             print_scenario(
-                f"Qwen3-30B-A3B BF16 {tgt_label} (1.5K input)",
-                [
-                    ("Output=200", m07_200_tgt),
-                    ("Output=500", m07_500_tgt),
-                ],
+                f"Qwen3-30B-A3B BF16 → Target ({tf}T/{tb}GB/s)",
+                [("Output=200", m07_200_tgt), ("Output=500", m07_500_tgt)],
                 fmt,
             )
-            print_scenario(
-                f"Qwen3-30B-A3B INT4 {tgt_label} (1.5K input)",
-                [
-                    ("Output=200 (INT4)", m07_200_tgt_int4),
-                    ("Output=500 (INT4)", m07_500_tgt_int4),
-                ],
-                fmt,
-            )
+
+        # INT4 projected (always rescale if args given, otherwise same platform)
+        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb) if m07_200 else None
+        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb) if m07_500 else None
+        int4_label = f"INT4 → Target ({tf}T/{tb}GB/s)" if has_rescale else "INT4 projected"
+        print_scenario(
+            f"Qwen3-30B-A3B {int4_label} (1.5K input)",
+            [("Output=200 (INT4)", m07_200_int4), ("Output=500 (INT4)", m07_500_int4)],
+            fmt,
+        )
 
     # =========================================================================
     # 5. Prefill MFU + Decode Bandwidth Utilization
