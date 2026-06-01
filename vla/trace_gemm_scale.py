@@ -68,13 +68,22 @@ def get_nvtx_range(cursor, nvtx_table, nvtx_filter):
     if not start_col:
         return None, None
 
-    # Build query: text may be inline or via textId → StringIds
-    if text_id_col:
-        where = "s.value LIKE ?"
-        join = f'JOIN StringIds s ON n."{text_id_col}" = s.id'
-    elif text_col:
+    # Build query: try inline text first, fallback to textId → StringIds
+    # PPU (HGTX): text is inline in 'text' column
+    # nsys (NVTX): text is empty, stored via textId → StringIds
+    use_inline = False
+    if text_col:
+        # Check if inline text has actual data
+        cursor.execute(f'SELECT n."{text_col}" FROM "{nvtx_table}" n '
+                       f'WHERE n."{text_col}" IS NOT NULL AND n."{text_col}" != "" LIMIT 1')
+        use_inline = cursor.fetchone() is not None
+
+    if use_inline:
         where = f'n."{text_col}" LIKE ?'
         join = ""
+    elif text_id_col:
+        where = "s.value LIKE ?"
+        join = f'JOIN StringIds s ON n."{text_id_col}" = s.id'
     else:
         return None, None
 
