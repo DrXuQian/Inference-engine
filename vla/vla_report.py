@@ -101,9 +101,9 @@ def analyze_trace(sqlite_path, nvtx_filter=None):
     }
 
 
-def scale_time(c, speedup):
-    """Project time: only GEMM scales with precision. FA and Other unchanged."""
-    return c["gemm_ms"] / speedup + c.get("fa_ms", 0) + c["other_ms"]
+def scale_time(c, gemm_speedup, fa_speedup=1.0):
+    """Project time: GEMM and FA scale independently. Other unchanged."""
+    return c["gemm_ms"] / gemm_speedup + c.get("fa_ms", 0) / fa_speedup + c["other_ms"]
 
 
 def load_component(json_path=None, trace_path=None, nvtx_filter=None,
@@ -135,20 +135,15 @@ def main():
     ap.add_argument("--vit-json", default=None)
     ap.add_argument("--vit-trace", default=None)
     ap.add_argument("--vit-ms", type=float, default=None, help="Manual VIT time (ms)")
-    ap.add_argument("--vit-precision", default="fp16", choices=PRECISION_SPEEDUP.keys())
     # LLM
     ap.add_argument("--llm-trace", default=None)
     ap.add_argument("--llm-ms", type=float, default=None, help="Manual LLM prefill time (ms)")
-    ap.add_argument("--llm-precision", default="fp16", choices=PRECISION_SPEEDUP.keys())
     # DiT
     ap.add_argument("--dit-json", default=None)
     ap.add_argument("--dit-trace", default=None)
-    ap.add_argument("--dit-ms", type=float, default=None, help="Manual DiT 50-step time (ms)")
-    ap.add_argument("--dit-precision", default="fp16", choices=PRECISION_SPEEDUP.keys())
+    ap.add_argument("--dit-ms", type=float, default=None, help="Manual DiT total time (ms)")
     # Options
     ap.add_argument("--dit-steps", type=int, default=10)
-    ap.add_argument("--show-all-combos", action="store_true",
-                    help="Show all FP16/FP8/FP4 combinations")
     ap.add_argument("--peak-tflops", type=float, default=500,
                     help="Peak BF16 tensor TFLOPS for MFU calculation")
     ap.add_argument("--peak-bw", type=float, default=680,
@@ -304,49 +299,38 @@ def main():
 
     print(f"\n  (peak: {peak} TFLOPS, {peak_bw} GB/s)")
 
-    # Selected precision
+    # Recommended precision config
+    # VIT: GEMM=FP8, FA=FP8 (entire VIT in FP8)
+    # LLM: GEMM=FP4, FA=FP8
+    # DiT: GEMM=FP16, FA=FP16 (all FP16)
+    RECOMMENDED = {
+        "VIT": {"gemm": "fp8",  "fa": "fp8",  "gemm_sp": 2.0, "fa_sp": 2.0},
+        "LLM": {"gemm": "fp4",  "fa": "fp8",  "gemm_sp": 4.0, "fa_sp": 2.0},
+        "DiT": {"gemm": "fp16", "fa": "fp16", "gemm_sp": 1.0, "fa_sp": 1.0},
+    }
+
     print(f"\n{'='*75}")
-    print(f"Selected Precision: VIT={args.vit_precision} LLM={args.llm_precision} DiT={args.dit_precision}")
+    print("Recommended Precision")
     print("=" * 75)
+    print(f"  {'Comp':<6s} {'GEMM':>6s} {'FA':>6s}  {'Before':>8s} {'After':>8s} {'Speedup':>8s}")
+    print(f"  {'-'*48}")
 
     scaled = {}
-    for name, c, prec in [("VIT", vit, args.vit_precision),
-                           ("LLM", llm, args.llm_precision),
-                           ("DiT", dit, args.dit_precision)]:
+    for name, c in components.items():
         if c:
-            sp = PRECISION_SPEEDUP[prec]
-            t = scale_time(c, sp)
+            r = RECOMMENDED[name]
+            t = scale_time(c, r["gemm_sp"], r["fa_sp"])
             scaled[name] = t
-            speedup = c["total_ms"] / t if t > 0 else 0
-            print(f"  {name}: {c['total_ms']:.2f}ms → {t:.2f}ms ({speedup:.2f}x with {prec})")
+            sp = c["total_ms"] / t if t > 0 else 0
+            print(f"  {name:<6s} {r['gemm']:>6s} {r['fa']:>6s}  {c['total_ms']:>7.2f}ms {t:>7.2f}ms {sp:>7.2f}x")
         else:
             scaled[name] = 0
 
     scaled_total = sum(scaled.values())
-    print(f"\n  Pipeline: {total_ms:.2f}ms → {scaled_total:.2f}ms")
+    print(f"  {'-'*48}")
+    print(f"  {'TOTAL':<6s} {'':>6s} {'':>6s}  {total_ms:>7.2f}ms {scaled_total:>7.2f}ms {total_ms/scaled_total if scaled_total>0 else 0:>7.2f}x")
     if scaled_total > 0:
-        print(f"  FPS: {1000/total_ms:.1f} → {1000/scaled_total:.1f}")
-
-    # All combos table
-    if args.show_all_combos:
-        precisions = ["fp16", "fp8", "fp4"]
-        print(f"\n{'='*75}")
-        print("All Precision Combinations")
-        print("=" * 75)
-        print(f"{'VIT':>6s} {'LLM':>6s} {'DiT':>6s}  {'VIT(ms)':>8s} {'LLM(ms)':>8s} {'DiT(ms)':>8s}  {'Total':>8s} {'FPS':>6s} {'vs base':>8s}")
-        print("-" * 75)
-
-        base_total = total_ms
-        for vp in precisions:
-            for lp in precisions:
-                for dp in precisions:
-                    vt = scale_time(vit, PRECISION_SPEEDUP[vp]) if vit else 0
-                    lt = scale_time(llm, PRECISION_SPEEDUP[lp]) if llm else 0
-                    dt = scale_time(dit, PRECISION_SPEEDUP[dp]) if dit else 0
-                    tt = vt + lt + dt
-                    fps = 1000 / tt if tt > 0 else 0
-                    sp = base_total / tt if tt > 0 else 0
-                    print(f"{vp:>6s} {lp:>6s} {dp:>6s}  {vt:>8.2f} {lt:>8.2f} {dt:>8.2f}  {tt:>8.2f} {fps:>6.1f} {sp:>7.2f}x")
+        print(f"  {'FPS':<6s} {'':>6s} {'':>6s}  {1000/total_ms:>7.1f}   {1000/scaled_total:>7.1f}")
 
     # Save
     if args.output_json:
