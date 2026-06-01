@@ -138,7 +138,7 @@ def main():
     ap.add_argument("--dit-ms", type=float, default=None, help="Manual DiT 50-step time (ms)")
     ap.add_argument("--dit-precision", default="fp16", choices=PRECISION_SPEEDUP.keys())
     # Options
-    ap.add_argument("--dit-steps", type=int, default=50)
+    ap.add_argument("--dit-steps", type=int, default=10)
     ap.add_argument("--show-all-combos", action="store_true",
                     help="Show all FP16/FP8/FP4 combinations")
     ap.add_argument("--peak-tflops", type=float, default=500,

@@ -14,7 +14,7 @@ Components:
      - 18 layers, hidden=1024, heads=8
      - Input: 51 tokens (50 action steps + 1 robot state) × 62D → projected to 1024
      - Cross-attention with LLM KV cache (1550 tokens × 2560 → projected to 1024)
-     - 50 denoising steps, each = full forward pass
+     - 10 denoising steps (default), each = full forward pass
      - Output: 51 tokens → project to 62D
 
 Usage:
@@ -403,7 +403,7 @@ def main():
     ap.add_argument("--dit-ffn-dim", type=int, default=4096,
                     help="DiT FFN intermediate size")
     ap.add_argument("--dit-action-dim", type=int, default=62)
-    ap.add_argument("--dit-denoise-steps", type=int, default=50)
+    ap.add_argument("--dit-denoise-steps", type=int, default=10)
     ap.add_argument("--dit-llm-hidden", type=int, default=2560)
     ap.add_argument("--dit-llm-tokens", type=int, default=1550)
     # Output
