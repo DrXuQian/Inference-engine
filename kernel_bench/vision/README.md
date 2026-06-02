@@ -1,10 +1,12 @@
 # Vision Benchmarks
 
-This directory contains PyTorch vision-model benchmarks. Timing follows
-`vla/vla_bench.py`: eager warmup, optional CUDA Graph capture, per-iteration
-`torch.cuda.synchronize()` around `time.perf_counter()`, sorted samples, and
-middle-element median. Profiler traces are collected by `run_vision_bench.sh`,
-not by `vision_bench.py` itself.
+This directory follows the same split as `vla/`:
+
+- `vision_bench.py` runs the model and emits NVTX ranges plus `results.json`.
+- `run_vision_bench.sh` is the default entry point and runs `asys`/`nsys`.
+- `vision_report.py` reads `trace.sqlite` first, filters one measured NVTX range,
+  and computes GEMM / FlashAttention / Other kernel time. `results.json` is only
+  a fallback when sqlite is unavailable.
 
 ## Workloads
 
@@ -69,6 +71,18 @@ bash kernel_bench/vision/run_vision_bench.sh ./results/vision clipdino
 bash kernel_bench/vision/run_vision_bench.sh ./results/vision all
 ```
 
+`all` automatically writes:
+
+```text
+./results/vision_YYYYmmdd_HHMMSS/
+  vit/results.json
+  vit/trace.sqlite
+  clipdino/results.json
+  clipdino/trace.sqlite
+  report.txt
+  report.json
+```
+
 PPU systems use `asys` by default:
 
 ```bash
@@ -89,4 +103,13 @@ WARMUP=5
 ITERS=20
 CUDA_GRAPH=1
 TORCH_TRACE=1
+```
+
+## Report From Existing Trace
+
+```bash
+python3 kernel_bench/vision/vision_report.py \
+  --vit-trace ./results/vision_YYYYmmdd_HHMMSS/vit/trace.sqlite \
+  --clipdino-trace ./results/vision_YYYYmmdd_HHMMSS/clipdino/trace.sqlite \
+  --output-json ./results/vision_YYYYmmdd_HHMMSS/report.json
 ```

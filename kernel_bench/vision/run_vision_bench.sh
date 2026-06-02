@@ -112,6 +112,25 @@ case "$COMPONENT" in
   all)
     run_component vit
     run_component clipdino
+
+    # Auto-generate report, matching vla/run_vla_bench.sh behavior:
+    # prefer trace.sqlite, fall back to results.json.
+    echo ""
+    echo "=== [3/2] Vision Report ==="
+    REPORT_ARGS=""
+    VIT_SQLITE="$OUT_DIR/vit/trace.sqlite"
+    CLIPDINO_SQLITE="$OUT_DIR/clipdino/trace.sqlite"
+
+    [ -f "$VIT_SQLITE" ] && REPORT_ARGS="$REPORT_ARGS --vit-trace $VIT_SQLITE" || \
+      { [ -f "$OUT_DIR/vit/results.json" ] && REPORT_ARGS="$REPORT_ARGS --vit-json $OUT_DIR/vit/results.json"; }
+    [ -f "$CLIPDINO_SQLITE" ] && REPORT_ARGS="$REPORT_ARGS --clipdino-trace $CLIPDINO_SQLITE" || \
+      { [ -f "$OUT_DIR/clipdino/results.json" ] && REPORT_ARGS="$REPORT_ARGS --clipdino-json $OUT_DIR/clipdino/results.json"; }
+
+    if [ -n "$REPORT_ARGS" ]; then
+      python3 "$SCRIPT_DIR/vision_report.py" $REPORT_ARGS \
+        --output-json "$OUT_DIR/report.json" \
+        2>&1 | tee "$OUT_DIR/report.txt"
+    fi
     ;;
   *)
     echo "Unknown component: $COMPONENT (use vit|clipdino|all)" >&2
