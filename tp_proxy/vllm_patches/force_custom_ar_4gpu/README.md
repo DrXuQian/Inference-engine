@@ -15,6 +15,7 @@ Run vLLM with this directory at the front of `PYTHONPATH`:
 ```bash
 PYTHONPATH=/root/autodl-tmp/Inference-engine/tp_proxy/vllm_patches/force_custom_ar_4gpu:$PYTHONPATH \
 VLLM_FORCE_CUSTOM_AR_4GPU=1 \
+VLLM_FORCE_CUSTOM_AR_DEBUG=1 \
 VLLM_FORCE_CUSTOM_AR_MAX_WORLD=4 \
 VLLM_FORCE_CUSTOM_AR_MAX_BYTES=524288 \
 VLLM_ALLREDUCE_USE_SYMM_MEM=0 \
@@ -36,6 +37,23 @@ The process should print:
 [force_custom_ar_4gpu] enabled: forcing vLLM custom AR topology gate for <=4 GPUs, small packets only
 ```
 
+With `VLLM_FORCE_CUSTOM_AR_DEBUG=1`, the patch also prints low-frequency
+runtime checks:
+
+```text
+[force_custom_ar_4gpu] CustomAllreduce init: rank=0 world=4 disabled=False max_size=524288 fully_connected=True
+[force_custom_ar_4gpu] should_custom_ar=True: rank=0 world=4 bytes=6144 dtype=torch.bfloat16 shape=(...)
+[force_custom_ar_4gpu] custom_all_reduce used: rank=0 world=4 bytes=6144 dtype=torch.bfloat16 shape=(...)
+```
+
+Interpretation:
+
+- `enabled` means the patch was imported.
+- `disabled=False` means vLLM's custom all-reduce communicator initialized.
+- `should_custom_ar=True` means a tensor passed vLLM's size/contiguity checks.
+- `custom_all_reduce used` means this process actually entered vLLM's custom
+  all-reduce path. For small packets, vLLM resolves this path to oneshot.
+
 Check vLLM logs. If this still appears, the patch did not reach the worker
 processes:
 
@@ -53,6 +71,7 @@ nsys profile \
   -o /tmp/vllm_force_custom_ar_tp4 \
   env PYTHONPATH=/root/autodl-tmp/Inference-engine/tp_proxy/vllm_patches/force_custom_ar_4gpu:$PYTHONPATH \
       VLLM_FORCE_CUSTOM_AR_4GPU=1 \
+      VLLM_FORCE_CUSTOM_AR_DEBUG=1 \
       VLLM_FORCE_CUSTOM_AR_MAX_WORLD=4 \
       VLLM_FORCE_CUSTOM_AR_MAX_BYTES=524288 \
       VLLM_ALLREDUCE_USE_SYMM_MEM=0 \
