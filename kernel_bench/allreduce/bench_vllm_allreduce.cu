@@ -440,6 +440,71 @@ const char* algo_name(Algo algo) {
   return "unknown";
 }
 
+void print_usage(const char* prog) {
+  printf("vLLM custom all-reduce standalone benchmark\n");
+  printf("\n");
+  printf("Usage:\n");
+  printf("  %s [ngpus] [warmup] [iters] [size_bytes] [repeats] [direct_warmup] [algo] [verify] [label]\n", prog);
+  printf("  %s --help\n", prog);
+  printf("\n");
+  printf("Positional arguments:\n");
+  printf("  ngpus          Number of local GPUs/ranks to use. Supported: 2, 4, 6, 8.\n");
+  printf("                 Default: 2. Usually combine with CUDA_VISIBLE_DEVICES.\n");
+  printf("\n");
+  printf("  warmup         Number of CUDA Graph warmup launches before timing.\n");
+  printf("                 Default: 20.\n");
+  printf("\n");
+  printf("  iters          Number of timed CUDA Graph launches. Supported: 1..4096.\n");
+  printf("                 Reported median/mean/p99 are computed from these iterations.\n");
+  printf("                 Default: 50.\n");
+  printf("\n");
+  printf("  size_bytes     Message size per rank, in bytes. Must be a positive multiple\n");
+  printf("                 of 16 because kernels operate on 16-byte packed values.\n");
+  printf("                 Default: 0, which runs the built-in sweep:\n");
+  printf("                 1024, 4096, 6144, 8192, 16384, 32768, 65536,\n");
+  printf("                 131072, 262144, 524288, 1048576.\n");
+  printf("\n");
+  printf("  repeats        Number of all-reduce launches captured inside one CUDA Graph.\n");
+  printf("                 The measured graph time is divided by repeats, so larger\n");
+  printf("                 values reduce timing noise for tiny messages. Default: 20.\n");
+  printf("\n");
+  printf("  direct_warmup  Number of direct, non-graph kernel launches before graph\n");
+  printf("                 capture. Useful for warming P2P/TLB/cache state. Default: 0.\n");
+  printf("\n");
+  printf("  algo           Algorithm to run. Default: auto.\n");
+  printf("                   auto    - vLLM policy: TP=2 uses oneshot; <=4 GPUs and\n");
+  printf("                             size < 512KB uses oneshot; <=8 GPUs and\n");
+  printf("                             size < 256KB uses oneshot; otherwise twoshot.\n");
+  printf("                   oneshot - vLLM cross_device_reduce_1stage pull path.\n");
+  printf("                             Aliases: 1stage.\n");
+  printf("                   twoshot - vLLM cross_device_reduce_2stage path.\n");
+  printf("                             Aliases: 2stage.\n");
+  printf("                   push    - local safe experimental push path using scratch\n");
+  printf("                             buffers; max size is 8MB in this benchmark.\n");
+  printf("                             Alias: pushshot.\n");
+  printf("\n");
+  printf("  verify         1 to verify output before/after timing, 0 to skip verify.\n");
+  printf("                 Default: 1. Expected value is sum(rank+1) across ranks.\n");
+  printf("\n");
+  printf("  label          Optional label printed as the first output column.\n");
+  printf("                 Accepted forms: bare label, --label LABEL, --label=LABEL,\n");
+  printf("                 label=LABEL. The misspelling --lable/lable= is also accepted.\n");
+  printf("\n");
+  printf("Output columns:\n");
+  printf("  Label          User label, or '-' when unset.\n");
+  printf("  Size           Message size, shown in B/KB/MB.\n");
+  printf("  Algo           Resolved algorithm after auto selection.\n");
+  printf("  Median/Mean/P99(us)\n");
+  printf("                 Per all-reduce latency in microseconds. For each iteration,\n");
+  printf("                 the benchmark takes the max time across ranks, then reports\n");
+  printf("                 median/mean/p99 over iters.\n");
+  printf("\n");
+  printf("Examples:\n");
+  printf("  CUDA_VISIBLE_DEVICES=0,1 %s 2 20 50 6144 100 0 oneshot 1 --label tp2-6kb\n", prog);
+  printf("  CUDA_VISIBLE_DEVICES=0,1,2,3 %s 4 0 10 6144 100 0 twoshot 1 --label tp4-6kb\n", prog);
+  printf("  CUDA_VISIBLE_DEVICES=0,1,2,3 nsys profile -o /tmp/ar %s 4 0 10 6144 100 0 push 0\n", prog);
+}
+
 Algo parse_algo(const char* s) {
   if (strcmp(s, "auto") == 0) return Algo::Auto;
   if (strcmp(s, "1stage") == 0 || strcmp(s, "oneshot") == 0) return Algo::OneShot;
@@ -780,6 +845,13 @@ void cleanup_gpus(GPUState* states, int ngpus) {
 }
 
 int main(int argc, char** argv) {
+  if (argc > 1 &&
+      (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0 ||
+       strcmp(argv[1], "help") == 0)) {
+    print_usage(argv[0]);
+    return 0;
+  }
+
   int ngpus = argc > 1 ? atoi(argv[1]) : 2;
   int warmup = argc > 2 ? atoi(argv[2]) : 20;
   int iters = argc > 3 ? atoi(argv[3]) : 50;
