@@ -12,4 +12,4 @@ echo "TP=1: no communication"
 
 # TP=2: measure AR/AG latency with trace (kernel-level accuracy)
 mkdir -p "$BASE/tp2"
-bash "$SCRIPT_DIR/comm_bench.sh" "$MODEL" 2 1536 "$BASE/tp2/comm.json" --trace
+bash "$SCRIPT_DIR/comm_bench.sh" "$MODEL" 2 1536 "$BASE/tp2/comm.json"
