@@ -80,7 +80,7 @@ else
         -n 500 -w 100 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1)
 fi
 echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
-AR_DECODE_US=$(echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
+AR_DECODE_US=$(echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
 
 echo ""
 echo "=== All-Reduce PREFILL (${AR_PREFILL_SIZE} bytes, input_len=$INPUT_LEN) ==="
@@ -94,7 +94,7 @@ else
         -n 100 -w 20 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1)
 fi
 echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
-AR_PREFILL_US=$(echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
+AR_PREFILL_US=$(echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
 
 echo ""
 echo "=== All-Gather (lm_head, ${AG_SIZE} bytes) ==="
@@ -108,7 +108,7 @@ else
         -n 300 -w 50 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1)
 fi
 echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
-AG_US=$(echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
+AG_US=$(echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
 
 # Compute per decode step
 N_AR=$((NUM_LAYERS * 2))
