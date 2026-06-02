@@ -117,7 +117,7 @@ export PATCH_NVTX
 
 if [ "$PLATFORM" = "ppu" ]; then
     asys profile -o "$OUT_DIR/trace.report" -f true \
-        -t hggc,acdnn,acblas,hgtx \
+        -t hggc,acdnn,acblas,hgtx --cuda-graph-trace=node \
         python3 "$BENCH_SCRIPT" "$MODEL" "$INPUT_LEN" "$OUTPUT_LEN" \
             "$NUM_PROMPTS" "$BATCH_SIZE" "$MAX_MODEL_LEN" \
         2>&1 | tee "$OUT_DIR/bench_trace.txt"
