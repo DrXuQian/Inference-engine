@@ -60,6 +60,18 @@ def row(m, include_total=True):
     return cells
 
 
+def get_int4_metrics(data: dict) -> dict | None:
+    if not data or "int4" not in data:
+        return None
+    i = data["int4"]
+    return {
+        "ttft": i["comp_ttft_ms"],
+        "tpot": i["comp_tpot_ms"],
+        "tps": i["tps"],
+        "total": i["total_ms"],
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="./results")
@@ -176,6 +188,25 @@ def main():
     m06 = get_metrics(d06) if d06 else None
     w.writerow(["模型", "TTFT", "TPOT", "TPS"])
     w.writerow(["Qwen3.5-35B-GPTQ-INT4"] + row(m06, include_total=False))
+    w.writerow([])
+
+    # === Qwen3-30B-A3B VLA ===
+    w.writerow(["Qwen3-30B-A3B VLA"])
+    w.writerow(["子场景", "单次上下文(token)", "单次产出(token)", "模型"])
+    w.writerow(["VLA LLM", "1.5K", "200/500", "Qwen3-30B-A3B BF16 / INT4 projected"])
+    w.writerow([])
+
+    w.writerow(["模型", "TTFT", "TPOT", "TPS", "总延迟"])
+    for tp in [1, 2, 4]:
+        for out_len in [200, 500]:
+            data = load_json(os.path.join(
+                rd, "07_qwen3_30b_a3b", f"tp{tp}",
+                f"compensated_{out_len}.json"))
+            m = get_metrics(data) if data else None
+            w.writerow([f"Qwen3-30B-A3B-BF16-TP{tp}-out{out_len}"] + row(m))
+
+            mi = get_int4_metrics(data) if data else None
+            w.writerow([f"Qwen3-30B-A3B-INT4proj-TP{tp}-out{out_len}"] + row(mi))
 
     if args.output:
         out.close()

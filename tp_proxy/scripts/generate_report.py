@@ -42,6 +42,8 @@ def fmt_ms(val_ms: float) -> str:
 # ---------------------------------------------------------------------------
 DEFAULT_PEAK_FLOPS_TFLOPS = 0    # set via CLI
 DEFAULT_PEAK_BW_GB_S = 0         # set via CLI
+SCENARIO_07_TPS = (1, 2, 4)
+SCENARIO_07_OUTLENS = (200, 500)
 
 
 def load_model_config(model_dir: str) -> dict | None:
@@ -492,18 +494,6 @@ def main():
     # 6. Qwen3-30B-A3B (1.5K input, 200/500 output)
     # =========================================================================
     if show_vla:
-        d07_200 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_200.json"))
-        m07_200 = get_metrics(d07_200) if d07_200 else None
-        d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_500.json"))
-        m07_500 = get_metrics(d07_500) if d07_500 else None
-
-        # BF16 measured (source platform)
-        print_scenario(
-            "Qwen3-30B-A3B BF16 measured (1.5K input)",
-            [("Output=200", m07_200), ("Output=500", m07_500)],
-            fmt,
-        )
-
         # INT4 projected — read directly from compensated JSON
         def get_int4_metrics(d):
             if not d or "int4" not in d:
@@ -517,15 +507,39 @@ def main():
                 "output_tokens": d.get("results", [{}])[0].get("output_tokens", 64),
             }
 
-        m07_200_int4 = get_int4_metrics(d07_200)
-        m07_500_int4 = get_int4_metrics(d07_500)
+        d07 = {}
+        for tp in SCENARIO_07_TPS:
+            for out_len in SCENARIO_07_OUTLENS:
+                path = os.path.join(
+                    rd, "07_qwen3_30b_a3b", f"tp{tp}",
+                    f"compensated_{out_len}.json")
+                data = load_json(path)
+                d07[(tp, out_len)] = data
 
-        if not m07_200_int4 and m07_200:
-            print("  WARNING: no 'int4' in compensated JSON. Re-run compensate_scenarios/07")
+        bf16_rows = []
+        int4_rows = []
+        for tp in SCENARIO_07_TPS:
+            for out_len in SCENARIO_07_OUTLENS:
+                data = d07[(tp, out_len)]
+                metric = get_metrics(data) if data else None
+                bf16_rows.append((f"TP={tp} Output={out_len}", metric))
+                int4 = get_int4_metrics(data)
+                int4_rows.append((f"TP={tp} Output={out_len} (INT4)", int4))
+                if metric and not int4:
+                    print(
+                        f"  WARNING: no 'int4' for TP={tp} output={out_len}. "
+                        "Re-run compensate_scenarios/07")
+
+        # BF16 measured (source platform)
+        print_scenario(
+            "Qwen3-30B-A3B BF16 measured (1.5K input)",
+            bf16_rows,
+            fmt,
+        )
 
         print_scenario(
             "Qwen3-30B-A3B INT4 projected (1.5K input)",
-            [("Output=200 (INT4)", m07_200_int4), ("Output=500 (INT4)", m07_500_int4)],
+            int4_rows,
             fmt,
         )
 
@@ -533,24 +547,37 @@ def main():
         has_rescale = args.src_flops > 0 and args.tgt_flops > 0
         if has_rescale:
             from model_weight_utils import decode_weight_bytes, rescale_metrics
-            _info = decode_weight_bytes("qwen3-30b-a3b", tp=2)
             sf = args.src_flops; tf = args.tgt_flops
             sb = args.src_bw; tb = args.tgt_bw
-
-            m07_200_tgt = rescale_metrics(m07_200, _info, sf, tf, sb, tb) if m07_200 else None
-            m07_500_tgt = rescale_metrics(m07_500, _info, sf, tf, sb, tb) if m07_500 else None
-            m07_200_tgt_int4 = rescale_metrics(m07_200_int4, _info, sf, tf, sb, tb) if m07_200_int4 else None
-            m07_500_tgt_int4 = rescale_metrics(m07_500_int4, _info, sf, tf, sb, tb) if m07_500_int4 else None
+            bf16_tgt_rows = []
+            int4_tgt_rows = []
+            for tp in SCENARIO_07_TPS:
+                info = decode_weight_bytes("qwen3-30b-a3b", tp=tp)
+                for out_len in SCENARIO_07_OUTLENS:
+                    data = d07[(tp, out_len)]
+                    metric = get_metrics(data) if data else None
+                    int4 = get_int4_metrics(data)
+                    label = f"TP={tp} Output={out_len}"
+                    bf16_tgt_rows.append((
+                        label,
+                        rescale_metrics(metric, info, sf, tf, sb, tb)
+                        if metric else None,
+                    ))
+                    int4_tgt_rows.append((
+                        f"{label} (INT4)",
+                        rescale_metrics(int4, info, sf, tf, sb, tb)
+                        if int4 else None,
+                    ))
 
             tgt = f"→ Target ({tf}T/{tb}GB/s)"
             print_scenario(
                 f"Qwen3-30B-A3B BF16 {tgt} (1.5K input)",
-                [("Output=200", m07_200_tgt), ("Output=500", m07_500_tgt)],
+                bf16_tgt_rows,
                 fmt,
             )
             print_scenario(
                 f"Qwen3-30B-A3B INT4 {tgt} (1.5K input)",
-                [("Output=200 (INT4)", m07_200_tgt_int4), ("Output=500 (INT4)", m07_500_tgt_int4)],
+                int4_tgt_rows,
                 fmt,
             )
 
@@ -570,9 +597,19 @@ def main():
             ("04 Agent 122B TP=2", "04_agent_122B", "tp2", 102400, 3072, 2, 1),
             ("05 Agent 397B TP=2", "05_agent_397B", "tp2", 102400, 3072, 2, 1),
             ("06 RAG 35B", "06_rag_35B", None, 819200, 3072, 1, 1),
-            ("07 30B-A3B TP2 out=200", "07_qwen3_30b_a3b", "tp2", 1536, 200, 2, 1, "compensated_200.json"),
-            ("07 30B-A3B TP2 out=500", "07_qwen3_30b_a3b", "tp2", 1536, 500, 2, 1, "compensated_500.json"),
         ]
+        for tp in SCENARIO_07_TPS:
+            for out_len in SCENARIO_07_OUTLENS:
+                scenario_defs.append((
+                    f"07 30B-A3B TP={tp} out={out_len}",
+                    "07_qwen3_30b_a3b",
+                    f"tp{tp}",
+                    1536,
+                    out_len,
+                    tp,
+                    1,
+                    f"compensated_{out_len}.json",
+                ))
         # Add batch scenarios (04c/05c)
         for b in [1, 2, 4, 8]:
             scenario_defs.append(

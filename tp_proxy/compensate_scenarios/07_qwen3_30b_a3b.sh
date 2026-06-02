@@ -1,10 +1,12 @@
 #!/bin/bash
-# Qwen3-30B-A3B BF16, TP=2
+# Qwen3-30B-A3B BF16, TP=1/2/4
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 BASE=./results/07_qwen3_30b_a3b
+TPS="${TPS:-1 2 4}"
+OUTLENS="${OUTLENS:-200 500}"
 
-for TP in 2; do
+for TP in $TPS; do
     echo "--- TP=$TP ---"
     DIR="$BASE/tp${TP}"
 
@@ -19,7 +21,7 @@ for TP in 2; do
     COMM="$DIR/comm.json"
     [ -f "$COMM" ] && COMM_ARG="--comm-json $COMM" || COMM_ARG=""
 
-    for OUTLEN in 200 500; do
+    for OUTLEN in $OUTLENS; do
         echo "--- TP=$TP, Output=${OUTLEN} ---"
         TRACE="$DIR/trace_${OUTLEN}/trace.sqlite"
         if [ ! -f "$TRACE" ]; then
