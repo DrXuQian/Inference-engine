@@ -32,26 +32,55 @@ for TP in 2; do
             $COMM_ARG \
             --output-json "$DIR/compensated_${OUTLEN}.json"
 
-        # Decode BW utilization via model_weight_utils
+        # Compute INT4 projection and save to JSON
         python3 -c "
 import sys, json
 sys.path.insert(0, '$SCRIPT_DIR')
 from model_weight_utils import decode_weight_bytes, print_decode_bw
 
-d = json.load(open('$DIR/compensated_${OUTLEN}.json'))
+f = '$DIR/compensated_${OUTLEN}.json'
+d = json.load(open(f))
 t = d.get('tail', {})
-print(f'  TTFT: kernel={t.get(\"ttft_kernel_ms\",0):.2f}ms  wall={t.get(\"ttft_wall_ms\",0):.2f}ms')
-print(f'  TPOT: {t.get(\"tpot_ms\",0):.4f}ms')
+ls = d.get('layer_scale', 1.0)
+tp = d.get('tp_size', $TP)
 
-comp_tpot = 0
+comp_ttft = comp_tpot = 0
 for r in d.get('results', []):
     if 'comp_tpot_ms' in r:
-        comp_tpot = r['comp_tpot_ms']; break
+        comp_tpot = r['comp_tpot_ms']
+        comp_ttft = r.get('comp_ttft_ms', 0)
+        break
 if comp_tpot <= 0:
     comp_tpot = t.get('tpot_ms', 0)
 
-info = decode_weight_bytes('qwen3-30b-a3b', tp=$TP)
+info = decode_weight_bytes('qwen3-30b-a3b', tp=tp)
 print_decode_bw(info, comp_tpot_ms=comp_tpot, peak_bw=680)
+
+# INT4 projection: TPOT × int4_scale
+int4_tpot = comp_tpot * info['int4_scale']
+int4_tps = 1000 / int4_tpot if int4_tpot > 0 else 0
+output_tokens = d.get('results', [{}])[0].get('output_tokens', $OUTLEN)
+int4_total = comp_ttft + (output_tokens - 1) * int4_tpot
+
+# Save INT4 results back to JSON
+d['int4'] = {
+    'comp_ttft_ms': round(comp_ttft, 3),
+    'comp_tpot_ms': round(int4_tpot, 4),
+    'tps': round(int4_tps, 1),
+    'total_ms': round(int4_total, 2),
+    'int4_scale': round(info['int4_scale'], 4),
+    'bf16_gb': round(info['bf16_gb'], 3),
+    'int4_gb': round(info['int4_gb'], 3),
+}
+d['decode_bw'] = {
+    'weight_gb': round(info['total_gb'], 3),
+    'bf16_gb': round(info['bf16_gb'], 3),
+    'int4_gb': round(info['int4_gb'], 3),
+    'bw_floor_ms': round(info['total_gb'] / 680 * 1000, 3),
+}
+json.dump(d, open(f, 'w'), indent=2)
+print(f'  INT4: comp_TPOT={int4_tpot:.2f}ms  TPS={int4_tps:.1f}  scale={info[\"int4_scale\"]:.3f}')
+print(f'  Saved INT4 projection to {f}')
 " 2>/dev/null || true
     done
     echo ""

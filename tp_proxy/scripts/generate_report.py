@@ -497,11 +497,6 @@ def main():
         d07_500 = load_json(os.path.join(rd, "07_qwen3_30b_a3b", "tp2", "compensated_500.json"))
         m07_500 = get_metrics(d07_500) if d07_500 else None
 
-        # Projections via model_weight_utils
-        from model_weight_utils import decode_weight_bytes, rescale_metrics, rescale_int4
-
-        _info = decode_weight_bytes("qwen3-30b-a3b", tp=2)
-
         # BF16 measured (source platform)
         print_scenario(
             "Qwen3-30B-A3B BF16 measured (1.5K input)",
@@ -509,52 +504,55 @@ def main():
             fmt,
         )
 
-        # Rescaled results
-        has_rescale = args.src_flops > 0 and args.tgt_flops > 0
-        sf = args.src_flops; tf = args.tgt_flops
-        sb = args.src_bw; tb = args.tgt_bw
+        # INT4 projected — read directly from compensated JSON
+        def get_int4_metrics(d):
+            if not d or "int4" not in d:
+                return None
+            i = d["int4"]
+            return {
+                "ttft": i["comp_ttft_ms"],
+                "tpot": i["comp_tpot_ms"],
+                "tps": i["tps"],
+                "total": i["total_ms"],
+                "output_tokens": d.get("results", [{}])[0].get("output_tokens", 64),
+            }
 
-        # BF16 → target platform
-        if has_rescale:
-            m07_200_tgt = rescale_metrics(m07_200, _info, sf, tf, sb, tb) if m07_200 else None
-            m07_500_tgt = rescale_metrics(m07_500, _info, sf, tf, sb, tb) if m07_500 else None
-            print_scenario(
-                f"Qwen3-30B-A3B BF16 → Target ({tf}T/{tb}GB/s)",
-                [("Output=200", m07_200_tgt), ("Output=500", m07_500_tgt)],
-                fmt,
-            )
+        m07_200_int4 = get_int4_metrics(d07_200)
+        m07_500_int4 = get_int4_metrics(d07_500)
 
-        # INT4 projected using kernel breakdown from trace
-        kb_200 = d07_200.get("tail", {}).get("kernel_breakdown") if d07_200 else None
-        kb_500 = d07_500.get("tail", {}).get("kernel_breakdown") if d07_500 else None
-
-        if kb_200:
-            gf = kb_200.get("gemm_int4_frac", 0)
-            print(f"\n  INT4 kernel breakdown (from trace):")
-            print(f"    gemm (INT4-able): {kb_200.get('gemm_int4_ms', 0):.3f}ms ({gf*100:.0f}%)")
-            print(f"    lm_head (BF16):   {kb_200.get('lm_head_ms', 0):.3f}ms")
-            print(f"    flash_attn:       {kb_200.get('fa_ms', 0):.3f}ms")
-            print(f"    other:            {kb_200.get('other_ms', 0):.3f}ms")
-            print(f"    INT4 scale = {gf:.0%}×0.25 + {1-gf:.0%}×1.0 = {gf*0.25+(1-gf):.2f}x")
-
-        # Get layer_scale and tp from compensated JSON
-        _ls = d07_200.get("layer_scale", 1.0) if d07_200 else 1.0
-        _tp = d07_200.get("tp_size", 2) if d07_200 else 2
-        _comm = d07_200.get("communication", {}).get("decode_comm_ms", 0) if d07_200 else 0
-
-        m07_200_int4 = rescale_int4(m07_200, _info, sf, tf, tb, sb, kb_200,
-                                     layer_scale=_ls, tp_size=_tp, comm_ms=_comm) if m07_200 and kb_200 else None
-        m07_500_int4 = rescale_int4(m07_500, _info, sf, tf, tb, sb, kb_500,
-                                     layer_scale=_ls, tp_size=_tp, comm_ms=_comm) if m07_500 and kb_500 else None
         if not m07_200_int4 and m07_200:
-            print("  WARNING: no kernel_breakdown in compensated JSON, INT4 projection skipped")
-            print("  Re-run compensate_scenarios/07 to generate kernel breakdown")
-        int4_label = f"INT4 → Target ({tf}T/{tb}GB/s)" if has_rescale else "INT4 projected"
+            print("  WARNING: no 'int4' in compensated JSON. Re-run compensate_scenarios/07")
+
         print_scenario(
-            f"Qwen3-30B-A3B {int4_label} (1.5K input)",
+            "Qwen3-30B-A3B INT4 projected (1.5K input)",
             [("Output=200 (INT4)", m07_200_int4), ("Output=500 (INT4)", m07_500_int4)],
             fmt,
         )
+
+        # BF16/INT4 → target platform (if --src/tgt given)
+        has_rescale = args.src_flops > 0 and args.tgt_flops > 0
+        if has_rescale:
+            from model_weight_utils import decode_weight_bytes, rescale_metrics
+            _info = decode_weight_bytes("qwen3-30b-a3b", tp=2)
+            sf = args.src_flops; tf = args.tgt_flops
+            sb = args.src_bw; tb = args.tgt_bw
+
+            m07_200_tgt = rescale_metrics(m07_200, _info, sf, tf, sb, tb) if m07_200 else None
+            m07_500_tgt = rescale_metrics(m07_500, _info, sf, tf, sb, tb) if m07_500 else None
+            m07_200_tgt_int4 = rescale_metrics(m07_200_int4, _info, sf, tf, sb, tb) if m07_200_int4 else None
+            m07_500_tgt_int4 = rescale_metrics(m07_500_int4, _info, sf, tf, sb, tb) if m07_500_int4 else None
+
+            tgt = f"→ Target ({tf}T/{tb}GB/s)"
+            print_scenario(
+                f"Qwen3-30B-A3B BF16 {tgt} (1.5K input)",
+                [("Output=200", m07_200_tgt), ("Output=500", m07_500_tgt)],
+                fmt,
+            )
+            print_scenario(
+                f"Qwen3-30B-A3B INT4 {tgt} (1.5K input)",
+                [("Output=200 (INT4)", m07_200_tgt_int4), ("Output=500 (INT4)", m07_500_tgt_int4)],
+                fmt,
+            )
 
     # =========================================================================
     # 5. Prefill MFU + Decode Bandwidth Utilization
