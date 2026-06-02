@@ -69,42 +69,40 @@ else
 fi
 
 echo ""
-AR_CMD="$AR -b $AR_DECODE_SIZE -e $AR_DECODE_SIZE -f 2 -d bf16 -o sum -n 500 -w 100 -g $TP_SIZE -c 0 -a 1 -G 1"
+AR_DEC_CMD="$AR -b $AR_DECODE_SIZE -e $AR_DECODE_SIZE -f 2 -d bf16 -n 50 -w 10 -g $TP_SIZE -c 1 -G 100"
 echo "=== All-Reduce DECODE (${AR_DECODE_SIZE} bytes) ==="
-echo "CMD: $AR_CMD"
+echo "CMD: $AR_DEC_CMD"
 if [ -n "$PROF_PREFIX" ]; then
-    $PROF_PREFIX -o "$TRACE_DIR/ar_decode" $AR_CMD 2>&1 | tee "$TRACE_DIR/ar_decode.log"
+    $PROF_PREFIX -o "$TRACE_DIR/ar_decode" $AR_DEC_CMD 2>&1 | tee "$TRACE_DIR/ar_decode.log"
     AR_DEC_OUTPUT=$(cat "$TRACE_DIR/ar_decode.log")
 else
-    AR_DEC_OUTPUT=$($AR_CMD 2>&1)
+    AR_DEC_OUTPUT=$($AR_DEC_CMD 2>&1)
 fi
 echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
 AR_DECODE_US=$(echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
 
 echo ""
+AR_PRE_CMD="$AR -b $AR_PREFILL_SIZE -e $AR_PREFILL_SIZE -f 2 -d bf16 -n 50 -w 10 -g $TP_SIZE -c 1 -G 100"
 echo "=== All-Reduce PREFILL (${AR_PREFILL_SIZE} bytes, input_len=$INPUT_LEN) ==="
+echo "CMD: $AR_PRE_CMD"
 if [ -n "$PROF_PREFIX" ]; then
-    $PROF_PREFIX -o "$TRACE_DIR/ar_prefill" \
-        $AR -b $AR_PREFILL_SIZE -e $AR_PREFILL_SIZE -f 2 -d bf16 -o sum \
-        -n 100 -w 20 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1 | tee "$TRACE_DIR/ar_prefill.log"
+    $PROF_PREFIX -o "$TRACE_DIR/ar_prefill" $AR_PRE_CMD 2>&1 | tee "$TRACE_DIR/ar_prefill.log"
     AR_PRE_OUTPUT=$(cat "$TRACE_DIR/ar_prefill.log")
 else
-    AR_PRE_OUTPUT=$($AR -b $AR_PREFILL_SIZE -e $AR_PREFILL_SIZE -f 2 -d bf16 -o sum \
-        -n 100 -w 20 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1)
+    AR_PRE_OUTPUT=$($AR_PRE_CMD 2>&1)
 fi
 echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
 AR_PREFILL_US=$(echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
 
 echo ""
+AG_CMD="$AG -b $AG_SIZE -e $AG_SIZE -f 2 -d bf16 -n 50 -w 10 -g $TP_SIZE -c 1 -G 100"
 echo "=== All-Gather (lm_head, ${AG_SIZE} bytes) ==="
+echo "CMD: $AG_CMD"
 if [ -n "$PROF_PREFIX" ]; then
-    $PROF_PREFIX -o "$TRACE_DIR/ag" \
-        $AG -b $AG_SIZE -e $AG_SIZE -f 2 -d bf16 \
-        -n 300 -w 50 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1 | tee "$TRACE_DIR/ag.log"
+    $PROF_PREFIX -o "$TRACE_DIR/ag" $AG_CMD 2>&1 | tee "$TRACE_DIR/ag.log"
     AG_OUTPUT=$(cat "$TRACE_DIR/ag.log")
 else
-    AG_OUTPUT=$($AG -b $AG_SIZE -e $AG_SIZE -f 2 -d bf16 \
-        -n 300 -w 50 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1)
+    AG_OUTPUT=$($AG_CMD 2>&1)
 fi
 echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
 AG_US=$(echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
