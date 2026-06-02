@@ -6,8 +6,8 @@ Default workloads:
   vit:
     4 images, 480x480, ViT-L-like synthetic trunk
   clipdino:
-    1 image, 480x480, CLIP ViT-B/16 trunk from openai/clip-vit-base-patch16
-    config plus a small DINO-style MLP head
+    1 image, 480x480, CLIP ViT-B/16 vision tower from
+    openai/clip-vit-base-patch16 config
 
 The models use synthetic weights and inputs. This is intended to measure kernel
 shape and runtime behavior, not model accuracy.
@@ -169,27 +169,10 @@ class VisionTransformer(nn.Module):
         return self.proj(pooled)
 
 
-class DinoHead(nn.Module):
-    def __init__(self, hidden: int, head_dim: int, out_dim: int) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(hidden, head_dim),
-            nn.GELU(),
-            nn.Linear(head_dim, head_dim),
-            nn.GELU(),
-            nn.Linear(head_dim, out_dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
 class ClipDinoVision(nn.Module):
     def __init__(
         self,
         image_size: int = 480,
-        dino_head_dim: int = 2048,
-        dino_out_dim: int = 1024,
     ) -> None:
         super().__init__()
         cfg = CLIP_VIT_B16_CONFIG
@@ -205,18 +188,13 @@ class ClipDinoVision(nn.Module):
             layer_norm_eps=cfg["layer_norm_eps"],
             pool="cls",
         )
-        self.dino_head = DinoHead(cfg["hidden_size"], dino_head_dim, dino_out_dim)
 
     @property
     def tokens(self) -> int:
         return self.trunk.tokens
 
-    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        tokens = self.trunk.forward_tokens(images)
-        cls = tokens[:, 0]
-        clip = self.trunk.proj(cls)
-        dino = self.dino_head(cls)
-        return clip, dino
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return self.trunk(images)
 
 
 def capture_cuda_graph(fn: Callable[[], object], warmup: int = 3,
@@ -330,8 +308,6 @@ def make_vit(args: argparse.Namespace, dtype: torch.dtype, device: str):
 def make_clipdino(args: argparse.Namespace, dtype: torch.dtype, device: str):
     model = ClipDinoVision(
         image_size=args.clipdino_image_size,
-        dino_head_dim=args.clipdino_dino_head_dim,
-        dino_out_dim=args.clipdino_dino_out_dim,
     ).to(device=device, dtype=dtype).eval()
     images = torch.randn(
         args.clipdino_batch,
@@ -368,8 +344,6 @@ def add_args() -> argparse.Namespace:
 
     parser.add_argument("--clipdino-batch", type=int, default=1)
     parser.add_argument("--clipdino-image-size", type=int, default=480)
-    parser.add_argument("--clipdino-dino-head-dim", type=int, default=2048)
-    parser.add_argument("--clipdino-dino-out-dim", type=int, default=1024)
     return parser.parse_args()
 
 
@@ -449,7 +423,8 @@ def main() -> None:
             f"clipdino: batch={args.clipdino_batch} image={args.clipdino_image_size} "
             f"patch={CLIP_VIT_B16_CONFIG['patch_size']} tokens={tokens} "
             f"layers={CLIP_VIT_B16_CONFIG['num_hidden_layers']} "
-            f"hidden={CLIP_VIT_B16_CONFIG['hidden_size']} params={params_m:.1f}M"
+            f"hidden={CLIP_VIT_B16_CONFIG['hidden_size']} "
+            f"params={params_m:.1f}M"
         )
         results["clipdino_ms"] = bench_component(
             "CLIPDINO", run_clipdino, args.warmup, args.iters, args.cuda_graph)

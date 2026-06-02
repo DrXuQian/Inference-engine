@@ -13,7 +13,7 @@ This directory follows the same split as `vla/`:
 | Component | Input | Model |
 |---|---:|---|
 | `vit` | 4 x 3 x 480 x 480 | synthetic ViT-L-like trunk, default 24L x 1024 |
-| `clipdino` | 1 x 3 x 480 x 480 | CLIP ViT-B/16 config plus DINO-style MLP head |
+| `clipdino` | 1 x 3 x 480 x 480 | `openai/clip-vit-base-patch16` vision tower |
 
 The CLIP trunk uses the public `openai/clip-vit-base-patch16` config:
 
@@ -27,8 +27,10 @@ projection_dim=512
 hidden_act=quick_gelu
 ```
 
-The original config image size is 224. This benchmark intentionally runs
-480 x 480 inputs, so the CLIP-DINO path has `30 x 30 + CLS = 901` tokens.
+The original CLIP config image size is 224. This benchmark intentionally runs
+480 x 480 inputs, so the vision path has `30 x 30 + CLS = 901` tokens. The
+`text_config` in the CLIPModel config is not executed for this image-only
+benchmark.
 
 ## Direct PyTorch Runs
 
