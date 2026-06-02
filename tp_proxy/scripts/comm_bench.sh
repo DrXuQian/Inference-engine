@@ -59,7 +59,7 @@ TRACE_DIR="$(dirname "$OUTPUT_JSON")/comm_trace"
 if [ "$USE_TRACE" = "--trace" ]; then
     mkdir -p "$TRACE_DIR"
     if [ "$PLATFORM" = "ppu" ]; then
-        PROF_PREFIX="asys profile -f true -t hggc,acdnn,acblas,hgtx --cuda-graph-trace=node"
+        PROF_PREFIX="asys profile -f true -t hggc,acdnn,acblas"
     else
         PROF_PREFIX="nsys profile -t cuda --cuda-graph-trace=node --force-overwrite=true"
     fi
