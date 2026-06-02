@@ -79,7 +79,7 @@ else
     AR_DEC_OUTPUT=$($AR_DEC_CMD 2>&1)
 fi
 echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
-AR_DECODE_US=$(echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
+AR_DECODE_US=$(echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
 
 echo ""
 AR_PRE_CMD="$AR -b $AR_PREFILL_SIZE -e $AR_PREFILL_SIZE -f 2 -d bf16 -n 50 -w 10 -g $TP_SIZE -c 1 -G 100"
@@ -92,7 +92,7 @@ else
     AR_PRE_OUTPUT=$($AR_PRE_CMD 2>&1)
 fi
 echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
-AR_PREFILL_US=$(echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
+AR_PREFILL_US=$(echo "$AR_PRE_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
 
 echo ""
 AG_CMD="$AG -b $AG_SIZE -e $AG_SIZE -f 2 -d bf16 -n 50 -w 10 -g $TP_SIZE -c 1 -G 100"
@@ -105,7 +105,7 @@ else
     AG_OUTPUT=$($AG_CMD 2>&1)
 fi
 echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
-AG_US=$(echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
+AG_US=$(echo "$AG_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $6}')
 
 # Compute per decode step
 N_AR=$((NUM_LAYERS * 2))
