@@ -69,15 +69,14 @@ else
 fi
 
 echo ""
+AR_CMD="$AR -b $AR_DECODE_SIZE -e $AR_DECODE_SIZE -f 2 -d bf16 -o sum -n 500 -w 100 -g $TP_SIZE -c 0 -a 1 -G 1"
 echo "=== All-Reduce DECODE (${AR_DECODE_SIZE} bytes) ==="
+echo "CMD: $AR_CMD"
 if [ -n "$PROF_PREFIX" ]; then
-    $PROF_PREFIX -o "$TRACE_DIR/ar_decode" \
-        $AR -b $AR_DECODE_SIZE -e $AR_DECODE_SIZE -f 2 -d bf16 -o sum \
-        -n 500 -w 100 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1 | tee "$TRACE_DIR/ar_decode.log"
+    $PROF_PREFIX -o "$TRACE_DIR/ar_decode" $AR_CMD 2>&1 | tee "$TRACE_DIR/ar_decode.log"
     AR_DEC_OUTPUT=$(cat "$TRACE_DIR/ar_decode.log")
 else
-    AR_DEC_OUTPUT=$($AR -b $AR_DECODE_SIZE -e $AR_DECODE_SIZE -f 2 -d bf16 -o sum \
-        -n 500 -w 100 -g $TP_SIZE -c 0 -a 1 -G 1 2>&1)
+    AR_DEC_OUTPUT=$($AR_CMD 2>&1)
 fi
 echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -3
 AR_DECODE_US=$(echo "$AR_DEC_OUTPUT" | grep -v "^#" | grep -v "^$" | head -1 | awk '{print $11}')
