@@ -13,22 +13,24 @@ This directory follows the same split as `vla/`:
 | Component | Input | Model |
 |---|---:|---|
 | `vit` | 4 x 3 x 480 x 480 | synthetic ViT-L-like trunk, default 24L x 1024 |
-| `clipdino` | 1 x 3 x 480 x 480 | `openai/clip-vit-base-patch16` vision tower |
+| `clipdino` | 1 x 3 x 480 x 480 | `clip-vit-large-patch14` vision tower |
 
-The CLIP trunk uses the public `openai/clip-vit-base-patch16` config:
+The CLIP trunk uses the provided `clip-vit-large-patch14` config:
 
 ```text
-patch_size=16
-hidden_size=768
-intermediate_size=3072
-num_hidden_layers=12
-num_attention_heads=12
-projection_dim=512
+patch_size=14
+hidden_size=1024
+intermediate_size=4096
+num_hidden_layers=24
+num_attention_heads=16
+projection_dim=768
 hidden_act=quick_gelu
 ```
 
 The original CLIP config image size is 224. This benchmark intentionally runs
-480 x 480 inputs, so the vision path has `30 x 30 + CLS = 901` tokens. The
+480 x 480 inputs. With patch size 14, Conv2d patch embedding produces
+`34 x 34 + CLS = 1157` tokens; the final 4 pixels on each axis are not covered
+by full patches. The
 `text_config` in the CLIPModel config is not executed for this image-only
 benchmark.
 

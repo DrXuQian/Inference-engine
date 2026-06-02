@@ -6,8 +6,8 @@ Default workloads:
   vit:
     4 images, 480x480, ViT-L-like synthetic trunk
   clipdino:
-    1 image, 480x480, CLIP ViT-B/16 vision tower from
-    openai/clip-vit-base-patch16 config
+    1 image, 480x480, CLIP ViT-L/14 vision tower from clip-vit-large-patch14
+    config
 
 The models use synthetic weights and inputs. This is intended to measure kernel
 shape and runtime behavior, not model accuracy.
@@ -32,15 +32,15 @@ except ImportError:
     has_nvtx = False
 
 
-CLIP_VIT_B16_CONFIG = {
-    "source": "https://huggingface.co/openai/clip-vit-base-patch16/blob/main/config.json",
+CLIP_VIT_L14_CONFIG = {
+    "source": "clip-vit-large-patch14 config provided in benchmark request",
     "config_image_size": 224,
-    "patch_size": 16,
-    "hidden_size": 768,
-    "intermediate_size": 3072,
-    "num_hidden_layers": 12,
-    "num_attention_heads": 12,
-    "projection_dim": 512,
+    "patch_size": 14,
+    "hidden_size": 1024,
+    "intermediate_size": 4096,
+    "num_hidden_layers": 24,
+    "num_attention_heads": 16,
+    "projection_dim": 768,
     "hidden_act": "quick_gelu",
     "layer_norm_eps": 1e-5,
 }
@@ -57,6 +57,13 @@ def make_activation(name: str) -> nn.Module:
     if name == "gelu":
         return nn.GELU()
     raise ValueError(f"unsupported activation: {name}")
+
+
+def patch_grid(image_size: int, patch_size: int) -> int:
+    """Return Conv2d patch embedding output grid for square input."""
+    if image_size < patch_size:
+        raise ValueError("image_size must be >= patch_size")
+    return (image_size - patch_size) // patch_size + 1
 
 
 class ViTBlock(nn.Module):
@@ -112,13 +119,11 @@ class VisionTransformer(nn.Module):
         pool: str = "cls",
     ) -> None:
         super().__init__()
-        if image_size % patch_size != 0:
-            raise ValueError("image_size must be divisible by patch_size")
         if pool not in ("cls", "mean"):
             raise ValueError("pool must be cls or mean")
         self.image_size = image_size
         self.patch_size = patch_size
-        self.grid = image_size // patch_size
+        self.grid = patch_grid(image_size, patch_size)
         self.num_patches = self.grid * self.grid
         self.hidden = hidden
         self.pool = pool
@@ -175,7 +180,7 @@ class ClipDinoVision(nn.Module):
         image_size: int = 480,
     ) -> None:
         super().__init__()
-        cfg = CLIP_VIT_B16_CONFIG
+        cfg = CLIP_VIT_L14_CONFIG
         self.trunk = VisionTransformer(
             image_size=image_size,
             patch_size=cfg["patch_size"],
@@ -368,7 +373,7 @@ def main() -> None:
     print("timing=VLA-compatible sync + time.perf_counter median")
     print(
         "CLIP config source: "
-        f"{CLIP_VIT_B16_CONFIG['source']} "
+        f"{CLIP_VIT_L14_CONFIG['source']} "
         f"(bench image_size={args.clipdino_image_size})"
     )
     print("=" * 80)
@@ -380,7 +385,7 @@ def main() -> None:
         model, example = make_vit(args, dtype, args.device)
         params_m = count_params_m(model)
         model = maybe_trace_model(model, example, args.torch_trace, "vit")
-        tokens = (args.vit_image_size // args.vit_patch_size) ** 2 + 1
+        tokens = patch_grid(args.vit_image_size, args.vit_patch_size) ** 2 + 1
         holder = {}
 
         def run_vit():
@@ -412,7 +417,8 @@ def main() -> None:
         model, example = make_clipdino(args, dtype, args.device)
         params_m = count_params_m(model)
         model = maybe_trace_model(model, example, args.torch_trace, "clipdino")
-        tokens = (args.clipdino_image_size // CLIP_VIT_B16_CONFIG["patch_size"]) ** 2 + 1
+        tokens = patch_grid(
+            args.clipdino_image_size, CLIP_VIT_L14_CONFIG["patch_size"]) ** 2 + 1
         holder = {}
 
         def run_clipdino():
@@ -421,9 +427,9 @@ def main() -> None:
 
         print(
             f"clipdino: batch={args.clipdino_batch} image={args.clipdino_image_size} "
-            f"patch={CLIP_VIT_B16_CONFIG['patch_size']} tokens={tokens} "
-            f"layers={CLIP_VIT_B16_CONFIG['num_hidden_layers']} "
-            f"hidden={CLIP_VIT_B16_CONFIG['hidden_size']} "
+            f"patch={CLIP_VIT_L14_CONFIG['patch_size']} tokens={tokens} "
+            f"layers={CLIP_VIT_L14_CONFIG['num_hidden_layers']} "
+            f"hidden={CLIP_VIT_L14_CONFIG['hidden_size']} "
             f"params={params_m:.1f}M"
         )
         results["clipdino_ms"] = bench_component(
@@ -431,12 +437,12 @@ def main() -> None:
         config["clipdino"] = {
             "batch": args.clipdino_batch,
             "image_size": args.clipdino_image_size,
-            "patch_size": CLIP_VIT_B16_CONFIG["patch_size"],
+            "patch_size": CLIP_VIT_L14_CONFIG["patch_size"],
             "tokens": tokens,
-            "hidden": CLIP_VIT_B16_CONFIG["hidden_size"],
-            "layers": CLIP_VIT_B16_CONFIG["num_hidden_layers"],
-            "heads": CLIP_VIT_B16_CONFIG["num_attention_heads"],
-            "mlp_dim": CLIP_VIT_B16_CONFIG["intermediate_size"],
+            "hidden": CLIP_VIT_L14_CONFIG["hidden_size"],
+            "layers": CLIP_VIT_L14_CONFIG["num_hidden_layers"],
+            "heads": CLIP_VIT_L14_CONFIG["num_attention_heads"],
+            "mlp_dim": CLIP_VIT_L14_CONFIG["intermediate_size"],
             "params_m": params_m,
         }
         del model, example, holder
@@ -455,7 +461,7 @@ def main() -> None:
             "config": {k: v for k, v in config.items() if v is not None},
             "dtype": args.dtype,
             "timing": "sync_perf_counter_median",
-            "clip_vit_b16_config": CLIP_VIT_B16_CONFIG,
+            "clip_vit_l14_config": CLIP_VIT_L14_CONFIG,
             "args": vars(args),
         }
         path = Path(args.output_json)

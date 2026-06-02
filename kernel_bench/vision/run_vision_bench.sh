@@ -6,7 +6,7 @@
 #
 # Components:
 #   vit       4x 480x480 input, synthetic ViT-L-like trunk
-#   clipdino 1x 480x480 input, openai/clip-vit-base-patch16 vision tower
+#   clipdino 1x 480x480 input, clip-vit-large-patch14 vision tower
 #   all       run both components serially
 #
 # Environment:
