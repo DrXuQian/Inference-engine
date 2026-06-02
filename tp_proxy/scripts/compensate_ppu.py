@@ -436,11 +436,16 @@ def main():
     if args.comm_json:
         with open(args.comm_json) as f:
             comm = json.load(f)
-        decode_comm = comm.get("decode_total_per_step_ms", comm.get("total_per_step_ms", 0))
-        prefill_comm = comm.get("prefill_total_per_step_ms", decode_comm)
+        # Prefer kernel time from trace (if available), fallback to wall clock
+        decode_comm = comm.get("decode_total_kernel_ms",
+                               comm.get("decode_total_per_step_ms",
+                                        comm.get("total_per_step_ms", 0)))
+        prefill_comm = comm.get("prefill_total_kernel_ms",
+                                comm.get("prefill_total_per_step_ms", decode_comm))
         comm["decode_comm_ms"] = decode_comm
         comm["prefill_comm_ms"] = prefill_comm
-        print(f"=== a) Communication (from {args.comm_json}) ===")
+        source = "kernel" if "decode_total_kernel_ms" in comm else "wall"
+        print(f"=== a) Communication (from {args.comm_json}, {source}) ===")
         print(f"  Decode:  {decode_comm:.3f} ms/step")
         print(f"  Prefill: {prefill_comm:.3f} ms/step")
     elif tp_size > 1:
