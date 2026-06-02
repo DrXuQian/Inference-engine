@@ -14,6 +14,7 @@
 #   PLATFORM=nvidia bash dump_trace_scenarios.sh /path/to/model 4 [output_dir]
 #   SCENARIOS=mainstream bash dump_trace_scenarios.sh /path/to/model 4
 #   GPU_IDS=2,3 CAPTURE_ITERS=3 BATCH_SIZE=1 bash dump_trace_scenarios.sh /path/to/model 2
+#   FORCE_CUSTOM_AR_PATCH=1 PLATFORM=nvidia bash dump_trace_scenarios.sh /path/to/model 4
 #
 # Environment:
 #   PLATFORM        nvidia or ppu. Defaults to capture_trace.sh default: ppu.
@@ -21,6 +22,9 @@
 #   SCENARIOS       Space-separated subset: mainstream heavy_prefill heavy_decode.
 #   CAPTURE_ITERS   Number of prompts passed to capture_trace.sh. Default: 5.
 #   BATCH_SIZE      Offline batch size. Default: 1.
+#   FORCE_CUSTOM_AR_PATCH=1
+#                   Prepend the local force_custom_ar_4gpu sitecustomize patch
+#                   and set the small-packet vLLM custom AR debug envs.
 #   Extra vLLM debug envs are inherited, including VLLM_FORCE_CUSTOM_AR_*.
 
 set -euo pipefail
@@ -45,6 +49,24 @@ elif [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
 fi
 
 export TP_SIZE="$TP"
+
+USE_FORCE_CUSTOM_AR_PATCH="${FORCE_CUSTOM_AR_PATCH:-${VLLM_FORCE_CUSTOM_AR_4GPU:-0}}"
+if [ "$USE_FORCE_CUSTOM_AR_PATCH" = "1" ]; then
+    CUSTOM_AR_PATCH_DIR="$DIR/../vllm_patches/force_custom_ar_4gpu"
+    if [ ! -f "$CUSTOM_AR_PATCH_DIR/sitecustomize.py" ]; then
+        echo "ERROR: custom AR patch not found: $CUSTOM_AR_PATCH_DIR/sitecustomize.py"
+        exit 1
+    fi
+
+    export PYTHONPATH="$CUSTOM_AR_PATCH_DIR:${PYTHONPATH:-}"
+    export VLLM_FORCE_CUSTOM_AR_4GPU="${VLLM_FORCE_CUSTOM_AR_4GPU:-1}"
+    export VLLM_FORCE_CUSTOM_AR_DEBUG="${VLLM_FORCE_CUSTOM_AR_DEBUG:-1}"
+    export VLLM_FORCE_CUSTOM_AR_MAX_WORLD="${VLLM_FORCE_CUSTOM_AR_MAX_WORLD:-4}"
+    export VLLM_FORCE_CUSTOM_AR_MAX_BYTES="${VLLM_FORCE_CUSTOM_AR_MAX_BYTES:-524288}"
+    export VLLM_ALLREDUCE_USE_SYMM_MEM="${VLLM_ALLREDUCE_USE_SYMM_MEM:-0}"
+    export VLLM_ALLREDUCE_USE_FLASHINFER="${VLLM_ALLREDUCE_USE_FLASHINFER:-0}"
+    export VLLM_SKIP_P2P_CHECK="${VLLM_SKIP_P2P_CHECK:-0}"
+fi
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -71,6 +93,10 @@ echo "  TP=$TP, GPUs=${CUDA_VISIBLE_DEVICES:-unset}, Platform=${PLATFORM:-ppu}"
 echo "  Output: $OUTPUT_DIR"
 echo "  Scenarios: $SELECTED_SCENARIOS"
 echo "  Capture iters=$CAPTURE_ITERS, batch=$BATCH_SIZE"
+echo "  Force custom AR patch: $USE_FORCE_CUSTOM_AR_PATCH"
+if [ "$USE_FORCE_CUSTOM_AR_PATCH" = "1" ]; then
+    echo "  Custom AR max bytes: $VLLM_FORCE_CUSTOM_AR_MAX_BYTES"
+fi
 echo "============================================"
 
 for scenario in "${SCENARIO_DEFS[@]}"; do

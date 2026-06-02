@@ -25,6 +25,10 @@ def _debug_enabled() -> bool:
     return os.getenv("VLLM_FORCE_CUSTOM_AR_DEBUG", "0") == "1"
 
 
+def _debug_attempt_limit() -> int:
+    return int(os.getenv("VLLM_FORCE_CUSTOM_AR_DEBUG_ATTEMPTS", "16"))
+
+
 def _install_patch() -> None:
     try:
         from vllm.distributed.device_communicators import custom_all_reduce as car
@@ -39,6 +43,64 @@ def _install_patch() -> None:
     orig_init = car.CustomAllreduce.__init__
     orig_should_custom_ar = car.CustomAllreduce.should_custom_ar
     orig_custom_all_reduce = car.CustomAllreduce.custom_all_reduce
+
+    def reject_reason(self, inp) -> str:
+        if getattr(self, "disabled", True):
+            return "disabled"
+
+        inp_size = inp.numel() * inp.element_size()
+        if inp_size % 16 != 0:
+            return "bytes_not_multiple_of_16"
+
+        if not car.is_weak_contiguous(inp):
+            return "not_weak_contiguous"
+
+        world_size = getattr(self, "world_size", None)
+        fully_connected = getattr(self, "fully_connected", False)
+        if not (world_size == 2 or fully_connected):
+            return f"topology world={world_size} fully_connected={fully_connected}"
+
+        max_size = getattr(self, "max_size", None)
+        if max_size is not None and inp_size >= max_size:
+            return f"size_ge_max_size {inp_size}>={max_size}"
+
+        return "unknown"
+
+    def log_should_decision(self, inp, ok: bool) -> None:
+        if not _debug_enabled():
+            return
+
+        limit = _debug_attempt_limit()
+        if limit <= 0:
+            return
+
+        inp_size = inp.numel() * inp.element_size()
+        reason = "ok" if ok else reject_reason(self, inp)
+        key = (
+            ok,
+            reason,
+            inp_size,
+            str(inp.dtype),
+            tuple(inp.shape),
+        )
+        seen = getattr(self, "_force_4gpu_should_seen", set())
+        count = getattr(self, "_force_4gpu_should_log_count", 0)
+        if key in seen or count >= limit:
+            return
+
+        seen.add(key)
+        self._force_4gpu_should_seen = seen
+        self._force_4gpu_should_log_count = count + 1
+        print(
+            f"[force_custom_ar_4gpu] should_custom_ar={ok}: "
+            f"rank={getattr(self, 'rank', '?')} "
+            f"world={getattr(self, 'world_size', '?')} "
+            f"bytes={inp_size} "
+            f"max_size={getattr(self, 'max_size', '?')} "
+            f"reason={reason} "
+            f"dtype={inp.dtype} shape={tuple(inp.shape)}",
+            flush=True,
+        )
 
     def patched_init(self, group, device, max_size=8192 * 1024, symm_mem_enabled=False):
         # Keep the override scoped to small packets. For larger tensors,
@@ -79,16 +141,7 @@ def _install_patch() -> None:
 
     def patched_should_custom_ar(self, inp):
         ok = orig_should_custom_ar(self, inp)
-        if ok and _debug_enabled() and not getattr(self, "_force_4gpu_should_logged", False):
-            self._force_4gpu_should_logged = True
-            print(
-                "[force_custom_ar_4gpu] should_custom_ar=True: "
-                f"rank={getattr(self, 'rank', '?')} "
-                f"world={getattr(self, 'world_size', '?')} "
-                f"bytes={inp.numel() * inp.element_size()} "
-                f"dtype={inp.dtype} shape={tuple(inp.shape)}",
-                flush=True,
-            )
+        log_should_decision(self, inp, ok)
         return ok
 
     def patched_custom_all_reduce(self, input):
