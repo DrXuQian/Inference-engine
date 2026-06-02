@@ -162,6 +162,9 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1,
     """Compute total bytes read per decode step: weights + KV cache.
 
     Weights: read once per step, shared across batch (no duplication).
+    LM head is counted in logical TP form (vocab-parallel, /tp). The local
+    split/pruned rank model may keep a full lm_head only to remain runnable
+    under MIG simulation; compensated timing divides lm_head by TP.
     KV cache: each request has its own KV → total = batch × per_request_KV.
     KV cache: for each full-attention layer, read K and V of all seq_len tokens
               KV per layer = 2 × n_kv_heads × head_dim × seq_len × 2 (bf16)
@@ -232,8 +235,9 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1,
     weight_full = attn_bytes_full + ffn_bytes + norm_bytes
     weight_lin = attn_bytes_lin + ffn_bytes + norm_bytes
     total_weight = n_full_layers * weight_full + n_lin_layers * weight_lin
-    # LM head (replicated, not split)
-    total_weight += V * H * bpp_f
+    # LM head is logically vocab-parallel in TP, even if the local MIG
+    # simulation keeps a replicated tensor so rank_0 can run standalone.
+    total_weight += V * H * bpp_f / max(tp_size, 1)
     total_weight += H * 2  # final norm
 
     # --- KV cache ---

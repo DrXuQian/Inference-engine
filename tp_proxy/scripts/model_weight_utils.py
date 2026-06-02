@@ -102,7 +102,7 @@ def decode_weight_bytes(path_or_name: str, tp: int = 1,
     """Compute per-GPU weight bytes read per decode step.
 
     For MoE: only top-k active experts counted (weight READ, not storage).
-    TP: col/row split attention + experts, replicate lm_head (or /tp if split).
+    TP: col/row split attention + experts, vocab-parallel lm_head (/tp).
 
     Args:
         path_or_name: model config path, directory, or known model name

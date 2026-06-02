@@ -169,7 +169,9 @@ def compute_active_weights(cfg: dict, tp_size: int = 1) -> dict:
     total_layers = n_full_attn * per_layer_full + n_linear_attn * per_layer_linear
 
     # === Base (per decode step) ===
-    lm_head_bytes = V * H * bpp_embed  # always bf16, NOT split by TP (replicated)
+    # Logical TP timing uses vocab-parallel lm_head (/tp). The local
+    # split/pruned model may keep full lm_head only to run standalone on MIG.
+    lm_head_bytes = V * H * bpp_embed / max(tp_size, 1)
     final_norm_bytes = H * 2
 
     total_active = total_layers + lm_head_bytes + final_norm_bytes

@@ -194,8 +194,9 @@ def main():
     add("layer_norm (×2)", H * 2, bpp_f, N)
 
     # === LM head + final norm ===
-    # LM head is replicated (not split by TP)
-    rows.append(("lm_head", V * H, V * H * bpp_f, bpp_f, 1))  # not /tp
+    # Logical TP timing uses vocab-parallel lm_head (/tp). The local
+    # split/pruned model may keep full lm_head only to run standalone on MIG.
+    add("lm_head", V * H, bpp_f, 1)
     add("final_norm", H, bpp_f, 1)
 
     # Print table

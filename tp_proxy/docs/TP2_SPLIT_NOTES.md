@@ -1,6 +1,6 @@
 # Qwen3.5-35B-A3B-GPTQ-Int4 TP=2 Split Notes
 
-## Config Changes (7 fields)
+## Config Changes (6 fields)
 
 | Field | Original | After Split |
 |---|---|---|
@@ -10,35 +10,38 @@
 | `linear_num_value_heads` | 32 | 16 |
 | `moe_intermediate_size` | 512 | 256 |
 | `shared_expert_intermediate_size` | 512 | 256 |
-| `vocab_size` | 248320 | 124160 |
 
-All other fields unchanged (hidden_size, head_dim, num_experts, vision_config, etc.).
+All other fields unchanged (hidden_size, head_dim, num_experts, vocab_size,
+vision_config, etc.). In the MIG simulation rank directory, `embed_tokens` and
+`lm_head` stay physically replicated so rank_0 can be loaded and run as a
+standalone model.
 
 ## Weight Size Breakdown
 
-| | Size |
-|---|---|
-| Original model | 24.40 GB |
-| Each rank | 12.76 GB (52.3% of original) |
-| Two ranks total | 25.52 GB |
-| Redundancy (replicated) | 1.12 GB |
+Use the generated rank directory metadata for exact physical size. The MIG
+simulation layout intentionally keeps some tensors full-size so each rank can
+run standalone; it is not identical to logical distributed TP storage.
 
-Remaining replicated weights (~0.70 GB):
+Remaining replicated weights include:
 
 | Replicated Component | Size | Reason |
 |---|---|---|
+| embed/lm_head | model-dependent | Kept full so a single rank can run on MIG |
 | visual encoder | 0.9 GB | Vision model replicated entirely |
 | GPTQ g_idx | 0.17 GB | g_idx replicated for column-parallel gate/up_proj |
 | MoE router + norms + misc | 0.05 GB | Routing weights and layer norms not split |
 
-`embed_tokens` and `lm_head` are now vocab-parallel split (dim 0), halving vocab_size per rank. This is correct for perf testing but means each rank alone cannot produce valid token predictions.
+Performance compensation still models `lm_head` as logical vocab-parallel
+(`/TP`) when estimating tail time and decode bandwidth. That is separate from
+the physical MIG simulation layout above.
 
 ## Splitting Strategy Per Component
 
-### Embeddings / LM Head — bf16, vocab-parallel
+### Embeddings / LM Head — bf16, physical MIG layout
 
-- `embed_tokens.weight` [248320, 2048] → [124160, 2048]: column-parallel (dim 0)
-- `lm_head.weight` [248320, 2048] → [124160, 2048]: column-parallel (dim 0)
+- `embed_tokens.weight` [248320, 2048] → [248320, 2048]: replicated
+- `lm_head.weight` [248320, 2048] → [248320, 2048]: replicated
+- Logical TP timing/bandwidth accounting uses `lm_head / TP`.
 
 ### Full Attention (self_attn) — bf16, not GPTQ-quantized
 
