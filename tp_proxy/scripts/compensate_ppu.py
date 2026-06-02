@@ -367,109 +367,6 @@ def measure_tail_from_trace(sqlite_path: str,
 
 
 # ---------------------------------------------------------------------------
-# Communication from trace
-# ---------------------------------------------------------------------------
-
-def extract_comm_from_trace(sqlite_path: str, num_layers: int) -> dict:
-    """Extract AllReduce latency from a TP>1 trace's CUDA Graph decode step.
-
-    Finds AR kernels (ncclKernel, pcclKernel, custom_ar, allreduce) in one
-    decode step and computes per-step total comm time.
-    """
-    import re as _re
-    conn = sqlite3.connect(sqlite_path)
-    c = conn.cursor()
-
-    c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    kt = [r[0] for r in c.fetchall() if 'KERNEL' in r[0].upper() and 'ACTIVITY' in r[0].upper()]
-    if not kt:
-        conn.close()
-        return {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "trace_empty"}
-    kt = kt[0]
-
-    c.execute(f'PRAGMA table_info("{kt}")')
-    has_graph = "graphNodeId" in [col[1] for col in c.fetchall()]
-
-    c.execute(f'''
-        SELECT k.start, k."end" - k.start AS dur, s.value AS name
-               {', k.graphNodeId' if has_graph else ''}
-        FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
-        ORDER BY k.start
-    ''')
-    evts = c.fetchall()
-    conn.close()
-
-    if not evts:
-        return {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "trace_empty"}
-
-    # AR kernel patterns
-    ar_re = _re.compile(r"nccl|pccl|allreduce|all_reduce|custom_ar|one_shot", _re.IGNORECASE)
-
-    if has_graph:
-        # Find CUDA Graph decode step (graph segment)
-        from collections import Counter
-        segs = []
-        ct = "graph" if (evts[0][3] if len(evts[0]) > 3 else 0) > 0 else "gap"
-        ce = [evts[0]]
-        gid_idx = 3
-        for e in evts[1:]:
-            t = "graph" if (e[gid_idx] if len(e) > gid_idx else 0) > 0 else "gap"
-            if t == ct:
-                ce.append(e)
-            else:
-                segs.append((ct, ce))
-                ct, ce = t, [e]
-        segs.append((ct, ce))
-
-        # Find mode graph kernel count
-        graph_counts = Counter(len(s[1]) for s in segs if s[0] == "graph")
-        if not graph_counts:
-            return {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "no_graph"}
-        mode = graph_counts.most_common(1)[0][0]
-
-        # Get last graph segment with mode count
-        graph_kernels = []
-        for stype, sevts in segs:
-            if stype == "graph" and len(sevts) == mode:
-                graph_kernels = sevts
-
-        # Count AR kernels in the graph
-        ar_ns = 0
-        n_ar = 0
-        for evt in graph_kernels:
-            name = evt[2]
-            dur = evt[1]
-            if ar_re.search(name):
-                ar_ns += dur
-                n_ar += 1
-    else:
-        # No graph info, scan all kernels
-        ar_ns = 0
-        n_ar = 0
-        for evt in evts:
-            name = evt[2]
-            dur = evt[1]
-            if ar_re.search(name):
-                ar_ns += dur
-                n_ar += 1
-
-    ar_total_ms = ar_ns / 1e6
-    # Expected: 2 AR per layer (after attn + after FFN)
-    expected_ar = num_layers * 2
-
-    return {
-        "decode_comm_ms": ar_total_ms,
-        "prefill_comm_ms": ar_total_ms,  # same for prefill (same AR count)
-        "decode_total_per_step_ms": ar_total_ms,
-        "prefill_total_per_step_ms": ar_total_ms,
-        "ar_total_ms": ar_total_ms,
-        "n_ar_per_step": n_ar,
-        "expected_ar": expected_ar,
-        "method": "trace",
-    }
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -481,8 +378,6 @@ def main():
     ap.add_argument("--output-len", type=int, default=None)
     ap.add_argument("--comm-json", default=None,
                     help="comm.json from comm_bench.sh (AR/AG latency)")
-    ap.add_argument("--comm-trace", default=None,
-                    help="Trace sqlite with TP>1 to extract AR latency from CUDA Graph decode step")
     ap.add_argument("--asys-sqlite", default=None,
                     help="asys trace sqlite for tail extraction")
     ap.add_argument("--pruned-layers", type=int, default=None)
@@ -538,16 +433,7 @@ def main():
     print()
 
     # === a) Communication ===
-    if args.comm_trace:
-        # Extract AR latency from TP>1 trace (CUDA Graph decode step)
-        comm = extract_comm_from_trace(args.comm_trace, original)
-        decode_comm = comm.get("decode_comm_ms", 0)
-        prefill_comm = comm.get("prefill_comm_ms", decode_comm)
-        print(f"=== a) Communication (from trace: {args.comm_trace}) ===")
-        print(f"  AR kernels: {comm.get('n_ar_per_step', 0)} per step")
-        print(f"  AR total:   {comm.get('ar_total_ms', 0):.3f} ms/step")
-        print(f"  Decode:     {decode_comm:.3f} ms/step")
-    elif args.comm_json:
+    if args.comm_json:
         with open(args.comm_json) as f:
             comm = json.load(f)
         decode_comm = comm.get("decode_total_per_step_ms", comm.get("total_per_step_ms", 0))
@@ -558,7 +444,7 @@ def main():
         print(f"  Decode:  {decode_comm:.3f} ms/step")
         print(f"  Prefill: {prefill_comm:.3f} ms/step")
     elif tp_size > 1:
-        print("=== a) Communication: no --comm-json/--comm-trace, using 0 ===")
+        print("=== a) Communication: no --comm-json, using 0 ===")
         print("    Run comm_scenarios first to measure AR/AG latency")
         comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
     else:
