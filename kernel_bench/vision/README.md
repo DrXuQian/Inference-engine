@@ -1,8 +1,10 @@
 # Vision Benchmarks
 
-This directory contains PyTorch vision-model benchmarks with optional
-`torch.jit.trace` and CUDA Graph replay. It mirrors the VLA benchmark style but
-uses a cleaner per-domain layout under `kernel_bench/vision`.
+This directory contains PyTorch vision-model benchmarks. Timing follows
+`vla/vla_bench.py`: eager warmup, optional CUDA Graph capture, per-iteration
+`torch.cuda.synchronize()` around `time.perf_counter()`, sorted samples, and
+middle-element median. Profiler traces are collected by `run_vision_bench.sh`,
+not by `vision_bench.py` itself.
 
 ## Workloads
 
@@ -34,18 +36,25 @@ cd /root/autodl-tmp/Inference-engine
 python3 kernel_bench/vision/vision_bench.py \
   --component vit \
   --dtype bf16 \
-  --torch-trace \
-  --cuda-graph \
   --warmup 10 \
-  --iters 50
+  --iters 30
 
 python3 kernel_bench/vision/vision_bench.py \
   --component clipdino \
   --dtype bf16 \
-  --torch-trace \
+  --warmup 10 \
+  --iters 30
+```
+
+Optional CUDA Graph replay, matching `vla_bench.py --cuda-graph`:
+
+```bash
+python3 kernel_bench/vision/vision_bench.py \
+  --component vit \
+  --dtype bf16 \
   --cuda-graph \
   --warmup 10 \
-  --iters 50
+  --iters 30
 ```
 
 ## Profiled Runs
@@ -60,16 +69,16 @@ bash kernel_bench/vision/run_vision_bench.sh ./results/vision clipdino
 bash kernel_bench/vision/run_vision_bench.sh ./results/vision all
 ```
 
-CUDA systems use `nsys` with CUDA Graph node tracing:
-
-```bash
-PLATFORM=cuda bash kernel_bench/vision/run_vision_bench.sh ./results/vision all
-```
-
-PPU systems use `asys`:
+PPU systems use `asys` by default:
 
 ```bash
 PLATFORM=ppu bash kernel_bench/vision/run_vision_bench.sh ./results/vision all
+```
+
+CUDA systems use `nsys` with CUDA Graph node tracing enabled in the profiler:
+
+```bash
+PLATFORM=cuda bash kernel_bench/vision/run_vision_bench.sh ./results/vision all
 ```
 
 Useful environment overrides:
@@ -78,6 +87,6 @@ Useful environment overrides:
 DTYPE=fp16
 WARMUP=5
 ITERS=20
-CUDA_GRAPH=0
-TORCH_TRACE=0
+CUDA_GRAPH=1
+TORCH_TRACE=1
 ```

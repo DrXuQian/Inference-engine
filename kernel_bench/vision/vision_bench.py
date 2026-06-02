@@ -17,16 +17,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 import time
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    import nvtx
+    has_nvtx = True
+except ImportError:
+    has_nvtx = False
 
 
 CLIP_VIT_B16_CONFIG = {
@@ -41,25 +44,6 @@ CLIP_VIT_B16_CONFIG = {
     "hidden_act": "quick_gelu",
     "layer_norm_eps": 1e-5,
 }
-
-
-@dataclass
-class BenchResult:
-    name: str
-    mode: str
-    batch: int
-    image_size: int
-    patch_size: int
-    tokens: int
-    params_m: float
-    warmup: int
-    iters: int
-    median_ms: float
-    mean_ms: float
-    p10_ms: float
-    p90_ms: float
-    min_ms: float
-    max_ms: float
 
 
 class QuickGELU(nn.Module):
@@ -235,103 +219,70 @@ class ClipDinoVision(nn.Module):
         return clip, dino
 
 
-@contextmanager
-def nvtx_range(name: str, enabled: bool):
-    if enabled and torch.cuda.is_available():
-        torch.cuda.nvtx.range_push(name)
-        try:
-            yield
-        finally:
-            torch.cuda.nvtx.range_pop()
-    else:
-        yield
-
-
-def percentile(sorted_values: list[float], pct: float) -> float:
-    if not sorted_values:
-        return 0.0
-    idx = min(len(sorted_values) - 1, max(0, int(round((len(sorted_values) - 1) * pct))))
-    return sorted_values[idx]
-
-
-def capture_cuda_graph(run_fn: Callable[[], object], warmup: int) -> torch.cuda.CUDAGraph:
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        for _ in range(max(warmup, 1)):
-            run_fn()
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
+def capture_cuda_graph(fn: Callable[[], object], warmup: int = 3,
+                       stream=None) -> torch.cuda.CUDAGraph:
+    """Same CUDA Graph capture flow as vla/vla_bench.py."""
+    s = stream or torch.cuda.Stream()
+    with torch.cuda.stream(s):
+        for _ in range(warmup):
+            fn()
+    torch.cuda.current_stream().wait_stream(s)
 
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        run_fn()
-    torch.cuda.synchronize()
+    with torch.cuda.graph(graph, stream=s):
+        fn()
+    torch.cuda.current_stream().wait_stream(s)
     return graph
 
 
-def bench_callable(
+def bench_component(
     name: str,
-    run_fn: Callable[[], object],
-    batch: int,
-    image_size: int,
-    patch_size: int,
-    tokens: int,
-    params_m: float,
-    warmup: int,
-    iters: int,
-    use_cuda_graph: bool,
-    nvtx: bool,
-) -> BenchResult:
-    torch.cuda.synchronize()
-    with torch.inference_mode(), nvtx_range(f"{name}_warmup", nvtx):
+    fn: Callable[[], object],
+    warmup: int = 10,
+    iters: int = 50,
+    use_cuda_graph: bool = False,
+) -> float:
+    """Benchmark a callable using the same timing method as vla/vla_bench.py."""
+    if has_nvtx:
+        rng = nvtx.start_range(f"{name}_warmup", color="red")
+    with torch.no_grad():
         for _ in range(warmup):
-            run_fn()
+            fn()
     torch.cuda.synchronize()
+    if has_nvtx:
+        nvtx.end_range(rng)
 
-    mode = "eager"
+    graph = None
     if use_cuda_graph:
-        with torch.inference_mode():
-            graph = capture_cuda_graph(run_fn, warmup=3)
-        run_fn = graph.replay
-        mode = "cudagraph"
+        try:
+            graph = capture_cuda_graph(fn)
+            print(f"  [{name}] CUDA Graph captured")
+        except Exception as e:
+            print(f"  [{name}] CUDA Graph capture failed ({e}), using eager")
 
-    times: list[float] = []
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    run_fn = graph.replay if graph else fn
 
-    with torch.inference_mode():
+    times = []
+    with torch.no_grad():
         for i in range(iters):
-            with nvtx_range(f"{name}_{mode}_{i}", nvtx):
-                start.record()
-                run_fn()
-                end.record()
-                end.synchronize()
-            times.append(start.elapsed_time(end))
+            if has_nvtx:
+                rng = nvtx.start_range(f"{name}_{i}", color="green")
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            run_fn()
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            times.append((t1 - t0) * 1000)
+            if has_nvtx:
+                nvtx.end_range(rng)
 
-    ordered = sorted(times)
-    result = BenchResult(
-        name=name,
-        mode=mode,
-        batch=batch,
-        image_size=image_size,
-        patch_size=patch_size,
-        tokens=tokens,
-        params_m=params_m,
-        warmup=warmup,
-        iters=iters,
-        median_ms=statistics.median(ordered),
-        mean_ms=statistics.fmean(ordered),
-        p10_ms=percentile(ordered, 0.10),
-        p90_ms=percentile(ordered, 0.90),
-        min_ms=ordered[0],
-        max_ms=ordered[-1],
-    )
-    print(
-        f"{name:12s} {mode:10s} batch={batch:<2d} tokens={tokens:<5d} "
-        f"median={result.median_ms:.3f} ms mean={result.mean_ms:.3f} ms "
-        f"p10={result.p10_ms:.3f} p90={result.p90_ms:.3f}"
-    )
-    return result
+    times.sort()
+    median = times[len(times) // 2]
+    p10 = times[len(times) // 10] if len(times) >= 10 else times[0]
+    p90 = times[len(times) * 9 // 10] if len(times) >= 10 else times[-1]
+    mode = "cudagraph" if graph else "eager"
+    print(f"  [{name}] ({mode}) median={median:.2f}ms  p10={p10:.2f}ms  p90={p90:.2f}ms")
+    return median
 
 
 def maybe_trace_model(
@@ -394,7 +345,7 @@ def make_clipdino(args: argparse.Namespace, dtype: torch.dtype, device: str):
 
 
 def add_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Vision PyTorch trace + CUDA Graph benchmark")
+    parser = argparse.ArgumentParser(description="Vision benchmark using VLA-compatible timing")
     parser.add_argument("--component", choices=["vit", "clipdino", "all"], default="all")
     parser.add_argument("--dtype", choices=["fp32", "fp16", "bf16"], default="bf16")
     parser.add_argument("--device", default="cuda:0")
@@ -402,7 +353,6 @@ def add_args() -> argparse.Namespace:
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--torch-trace", action="store_true", help="Run torch.jit.trace before benchmarking")
     parser.add_argument("--cuda-graph", action="store_true", help="Capture and replay the forward with CUDA Graph")
-    parser.add_argument("--no-nvtx", action="store_true", help="Disable NVTX ranges around timed iterations")
     parser.add_argument("--output-json", default=None)
 
     parser.add_argument("--vit-batch", type=int, default=4)
@@ -438,9 +388,10 @@ def main() -> None:
     torch.set_float32_matmul_precision("high")
 
     print("=" * 80)
-    print("Vision Benchmark: PyTorch trace + CUDA Graph")
+    print("Vision Benchmark (VIT + CLIP-DINO)")
     print(f"component={args.component} dtype={args.dtype} device={args.device}")
     print(f"torch_trace={args.torch_trace} cuda_graph={args.cuda_graph}")
+    print("timing=VLA-compatible sync + time.perf_counter median")
     print(
         "CLIP config source: "
         f"{CLIP_VIT_B16_CONFIG['source']} "
@@ -448,8 +399,8 @@ def main() -> None:
     )
     print("=" * 80)
 
-    results: list[BenchResult] = []
-    nvtx_enabled = not args.no_nvtx
+    results = {}
+    config = {"vit": None, "clipdino": None}
 
     if args.component in ("vit", "all"):
         model, example = make_vit(args, dtype, args.device)
@@ -467,21 +418,19 @@ def main() -> None:
             f"patch={args.vit_patch_size} tokens={tokens} "
             f"layers={args.vit_layers} hidden={args.vit_hidden} params={params_m:.1f}M"
         )
-        results.append(
-            bench_callable(
-                "vit",
-                run_vit,
-                args.vit_batch,
-                args.vit_image_size,
-                args.vit_patch_size,
-                tokens,
-                params_m,
-                args.warmup,
-                args.iters,
-                args.cuda_graph,
-                nvtx_enabled,
-            )
-        )
+        results["vit_ms"] = bench_component(
+            "VIT", run_vit, args.warmup, args.iters, args.cuda_graph)
+        config["vit"] = {
+            "batch": args.vit_batch,
+            "image_size": args.vit_image_size,
+            "patch_size": args.vit_patch_size,
+            "tokens": tokens,
+            "hidden": args.vit_hidden,
+            "layers": args.vit_layers,
+            "heads": args.vit_heads,
+            "mlp_dim": args.vit_mlp_dim,
+            "params_m": params_m,
+        }
         del model, example, holder
         torch.cuda.empty_cache()
 
@@ -502,37 +451,37 @@ def main() -> None:
             f"layers={CLIP_VIT_B16_CONFIG['num_hidden_layers']} "
             f"hidden={CLIP_VIT_B16_CONFIG['hidden_size']} params={params_m:.1f}M"
         )
-        results.append(
-            bench_callable(
-                "clipdino",
-                run_clipdino,
-                args.clipdino_batch,
-                args.clipdino_image_size,
-                CLIP_VIT_B16_CONFIG["patch_size"],
-                tokens,
-                params_m,
-                args.warmup,
-                args.iters,
-                args.cuda_graph,
-                nvtx_enabled,
-            )
-        )
+        results["clipdino_ms"] = bench_component(
+            "CLIPDINO", run_clipdino, args.warmup, args.iters, args.cuda_graph)
+        config["clipdino"] = {
+            "batch": args.clipdino_batch,
+            "image_size": args.clipdino_image_size,
+            "patch_size": CLIP_VIT_B16_CONFIG["patch_size"],
+            "tokens": tokens,
+            "hidden": CLIP_VIT_B16_CONFIG["hidden_size"],
+            "layers": CLIP_VIT_B16_CONFIG["num_hidden_layers"],
+            "heads": CLIP_VIT_B16_CONFIG["num_attention_heads"],
+            "mlp_dim": CLIP_VIT_B16_CONFIG["intermediate_size"],
+            "params_m": params_m,
+        }
         del model, example, holder
         torch.cuda.empty_cache()
 
-    print("\nResults")
-    print("-" * 80)
-    for result in results:
-        print(
-            f"{result.name:12s} mode={result.mode:10s} "
-            f"median={result.median_ms:.3f} ms mean={result.mean_ms:.3f} ms"
-        )
+    print(f"\n{'=' * 80}")
+    print("Results")
+    print("-" * 40)
+    for key, value in results.items():
+        print(f"  {key:25s}: {value:8.2f} ms")
+    print("=" * 80)
 
     if args.output_json:
         output = {
-            "args": vars(args),
+            "component_results": results,
+            "config": {k: v for k, v in config.items() if v is not None},
+            "dtype": args.dtype,
+            "timing": "sync_perf_counter_median",
             "clip_vit_b16_config": CLIP_VIT_B16_CONFIG,
-            "results": [asdict(r) for r in results],
+            "args": vars(args),
         }
         path = Path(args.output_json)
         path.parent.mkdir(parents=True, exist_ok=True)

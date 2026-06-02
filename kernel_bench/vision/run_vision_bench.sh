@@ -10,23 +10,23 @@
 #   all       run both components serially
 #
 # Environment:
-#   PLATFORM=cuda|ppu   default: cuda
+#   PLATFORM=ppu|cuda   default: ppu
 #   DTYPE=bf16          fp32|fp16|bf16
 #   WARMUP=10
-#   ITERS=50
-#   CUDA_GRAPH=1
-#   TORCH_TRACE=1
+#   ITERS=30
+#   CUDA_GRAPH=0       set to 1 to match vla_bench.py --cuda-graph
+#   TORCH_TRACE=0      optional torch.jit.trace, off by default
 
 set -euo pipefail
 
 OUT_ROOT="${1:-./results/vision_bench}"
 COMPONENT="${2:-all}"
-PLATFORM="${PLATFORM:-cuda}"
+PLATFORM="${PLATFORM:-ppu}"
 DTYPE="${DTYPE:-bf16}"
 WARMUP="${WARMUP:-10}"
-ITERS="${ITERS:-50}"
-CUDA_GRAPH="${CUDA_GRAPH:-1}"
-TORCH_TRACE="${TORCH_TRACE:-1}"
+ITERS="${ITERS:-30}"
+CUDA_GRAPH="${CUDA_GRAPH:-0}"
+TORCH_TRACE="${TORCH_TRACE:-0}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
