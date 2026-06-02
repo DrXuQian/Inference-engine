@@ -14,7 +14,7 @@
 #   DTYPE=bf16          fp32|fp16|bf16
 #   WARMUP=10
 #   ITERS=30
-#   CUDA_GRAPH=0       set to 1 to match vla_bench.py --cuda-graph
+#   CUDA_GRAPH=1       set to 0 for eager mode
 #   TORCH_TRACE=0      optional torch.jit.trace, off by default
 
 set -euo pipefail
@@ -25,7 +25,7 @@ PLATFORM="${PLATFORM:-ppu}"
 DTYPE="${DTYPE:-bf16}"
 WARMUP="${WARMUP:-10}"
 ITERS="${ITERS:-30}"
-CUDA_GRAPH="${CUDA_GRAPH:-0}"
+CUDA_GRAPH="${CUDA_GRAPH:-1}"
 TORCH_TRACE="${TORCH_TRACE:-0}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 

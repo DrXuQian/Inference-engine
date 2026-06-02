@@ -50,7 +50,7 @@ python3 kernel_bench/vision/vision_bench.py \
   --iters 30
 ```
 
-Optional CUDA Graph replay, matching `vla_bench.py --cuda-graph`:
+For direct Python runs, pass `--cuda-graph` to use CUDA Graph replay:
 
 ```bash
 python3 kernel_bench/vision/vision_bench.py \
@@ -103,7 +103,7 @@ Useful environment overrides:
 DTYPE=fp16
 WARMUP=5
 ITERS=20
-CUDA_GRAPH=1
+CUDA_GRAPH=0
 TORCH_TRACE=1
 ```
 
