@@ -1,0 +1,377 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 2100" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#e11d48"/>
+    </marker>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff7ed"/>
+      <stop offset="100%" stop-color="#fed7aa"/>
+    </linearGradient>
+    <linearGradient id="header-bg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#c2410c"/>
+      <stop offset="100%" stop-color="#f97316"/>
+    </linearGradient>
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.15"/>
+    </filter>
+    <filter id="shadow-sm" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="2" flood-opacity="0.1"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="2100" fill="url(#bg)" rx="12"/>
+
+  <!-- ==================== Title ==================== -->
+  <rect x="30" y="20" width="1140" height="50" rx="8" fill="url(#header-bg)"/>
+  <text x="600" y="52" text-anchor="middle" font-size="22" font-weight="bold" fill="white">SpatioTemporalVIT - VLA Vision Encoder</text>
+
+  <!-- ==================== TOP: Input Section ==================== -->
+  <rect x="40" y="90" width="1120" height="245" rx="10" fill="white" stroke="#fb923c" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="40" y="90" width="1120" height="34" rx="10" fill="#9a3412"/>
+  <rect x="40" y="114" width="1120" height="10" fill="#9a3412"/>
+  <text x="600" y="112" text-anchor="middle" font-size="15" font-weight="bold" fill="white">Inputs</text>
+
+  <!-- 6 Camera Icons -->
+  <!-- Target cameras (0-2) -->
+  <text x="120" y="152" text-anchor="middle" font-size="11" font-weight="bold" fill="#6b7280">Target Cameras (cam 0-2)</text>
+  <rect x="60" y="160" width="56" height="42" rx="4" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="1.2"/>
+  <text x="88" y="176" text-anchor="middle" font-size="8" font-weight="600" fill="#0369a1">CAM 0</text>
+  <text x="88" y="195" text-anchor="middle" font-size="7" fill="#0369a1">900 pat</text>
+  <rect x="122" y="160" width="56" height="42" rx="4" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="1.2"/>
+  <text x="150" y="176" text-anchor="middle" font-size="8" font-weight="600" fill="#0369a1">CAM 1</text>
+  <text x="150" y="195" text-anchor="middle" font-size="7" fill="#0369a1">900 pat</text>
+  <rect x="184" y="160" width="56" height="42" rx="4" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="1.2"/>
+  <text x="212" y="176" text-anchor="middle" font-size="8" font-weight="600" fill="#0369a1">CAM 2</text>
+  <text x="212" y="195" text-anchor="middle" font-size="7" fill="#0369a1">900 pat</text>
+
+  <!-- Current cameras (3-5) - with temporal -->
+  <text x="410" y="152" text-anchor="middle" font-size="11" font-weight="bold" fill="#e11d48">Current Cameras (cam 3-5) -- with history</text>
+  <rect x="310" y="160" width="56" height="42" rx="4" fill="#ffe4e6" stroke="#e11d48" stroke-width="1.5"/>
+  <text x="338" y="176" text-anchor="middle" font-size="8" font-weight="600" fill="#be123c">CAM 3</text>
+  <text x="338" y="195" text-anchor="middle" font-size="7" fill="#be123c">900 pat</text>
+  <rect x="372" y="160" width="56" height="42" rx="4" fill="#ffe4e6" stroke="#e11d48" stroke-width="1.5"/>
+  <text x="400" y="176" text-anchor="middle" font-size="8" font-weight="600" fill="#be123c">CAM 4</text>
+  <text x="400" y="195" text-anchor="middle" font-size="7" fill="#be123c">900 pat</text>
+  <rect x="434" y="160" width="56" height="42" rx="4" fill="#ffe4e6" stroke="#e11d48" stroke-width="1.5"/>
+  <text x="462" y="176" text-anchor="middle" font-size="8" font-weight="600" fill="#be123c">CAM 5</text>
+  <text x="462" y="195" text-anchor="middle" font-size="7" fill="#be123c">900 pat</text>
+
+  <!-- Concat arrow -->
+  <text x="290" y="225" font-size="10" fill="#64748b">concat all 6 cams</text>
+  <rect x="60" y="235" width="440" height="32" rx="6" fill="#fff7ed" stroke="#f97316" stroke-width="1.5"/>
+  <text x="280" y="256" text-anchor="middle" font-size="12" font-weight="bold" fill="#c2410c">x: (B, 5400, 1024)</text>
+  <text x="280" y="230" text-anchor="middle" font-size="9" fill="#9a3412">6 cams x 225 positions x 4 patches = 5400 tokens</text>
+
+  <!-- History input -->
+  <rect x="600" y="140" width="520" height="170" rx="8" fill="#fdf2f8" stroke="#e11d48" stroke-width="1.2"/>
+  <text x="860" y="162" text-anchor="middle" font-size="12" font-weight="bold" fill="#9f1239">History Frames (3 current cams only)</text>
+
+  <!-- History timeline visualization -->
+  <text x="630" y="185" font-size="9" fill="#6b7280">CAM 3:</text>
+  <rect x="685" y="175" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="692" y="186" text-anchor="middle" font-size="6" fill="#9f1239">t-17</text>
+  <rect x="702" y="175" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <rect x="719" y="175" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="740" y="186" font-size="7" fill="#9f1239">...</text>
+  <rect x="750" y="175" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="757" y="186" text-anchor="middle" font-size="6" fill="#9f1239">t-1</text>
+
+  <text x="630" y="205" font-size="9" fill="#6b7280">CAM 4:</text>
+  <rect x="685" y="195" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <rect x="702" y="195" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <rect x="719" y="195" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="740" y="206" font-size="7" fill="#9f1239">...</text>
+  <rect x="750" y="195" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+
+  <text x="630" y="225" font-size="9" fill="#6b7280">CAM 5:</text>
+  <rect x="685" y="215" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <rect x="702" y="215" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <rect x="719" y="215" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="740" y="226" font-size="7" fill="#9f1239">...</text>
+  <rect x="750" y="215" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+
+  <text x="800" y="196" font-size="9" fill="#6b7280">17 frames</text>
+  <text x="800" y="208" font-size="9" fill="#6b7280">x 225 tok/frame</text>
+
+  <rect x="620" y="245" width="480" height="32" rx="6" fill="#fdf2f8" stroke="#e11d48" stroke-width="1.5"/>
+  <text x="860" y="266" text-anchor="middle" font-size="12" font-weight="bold" fill="#9f1239">history: (B, 11475, 1024)</text>
+  <text x="860" y="240" text-anchor="middle" font-size="9" fill="#9f1239">3 cams x 17 frames x 225 tokens = 11475</text>
+
+  <!-- ==================== MAIN: Layer Loop ==================== -->
+  <rect x="40" y="355" width="1120" height="1230" rx="10" fill="white" stroke="#fb923c" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="40" y="355" width="1120" height="34" rx="10" fill="#9a3412"/>
+  <rect x="40" y="379" width="1120" height="10" fill="#9a3412"/>
+  <text x="600" y="377" text-anchor="middle" font-size="15" font-weight="bold" fill="white">Main Loop: 24 Layers (depth=24)</text>
+
+  <!-- Reshape annotation -->
+  <rect x="70" y="400" width="380" height="28" rx="5" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="260" y="419" text-anchor="middle" font-size="11" fill="#475569">Reshape: (B, 5400, 1024) --> (B*6, 900, 1024)   per-camera</text>
+
+  <!-- ====== VITBlock (Spatial) ====== -->
+  <rect x="70" y="445" width="520" height="310" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="70" y="445" width="520" height="34" rx="10" fill="#1d4ed8"/>
+  <rect x="70" y="469" width="520" height="10" fill="#1d4ed8"/>
+  <text x="330" y="467" text-anchor="middle" font-size="14" font-weight="bold" fill="white">VITBlock[i] -- Spatial Self-Attention (all 6 cams)</text>
+
+  <!-- Shape badge -->
+  <rect x="460" y="488" width="115" height="20" rx="4" fill="#dbeafe" stroke="#60a5fa" stroke-width="1"/>
+  <text x="517" y="502" text-anchor="middle" font-size="9" font-weight="600" fill="#1e40af">(B*6, 900, 1024)</text>
+
+  <!-- Self-Attention sub-block -->
+  <rect x="100" y="490" width="340" height="105" rx="8" fill="#dbeafe" stroke="#93c5fd" stroke-width="1.2"/>
+  <text x="120" y="510" font-size="11" font-weight="bold" fill="#1e40af">Self-Attention (per camera, 900 tokens)</text>
+
+  <rect x="120" y="518" width="140" height="22" rx="4" fill="#bfdbfe" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="190" y="533" text-anchor="middle" font-size="10" fill="#1e40af">LayerNorm</text>
+
+  <rect x="272" y="518" width="150" height="22" rx="4" fill="#bfdbfe" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="347" y="533" text-anchor="middle" font-size="10" fill="#1e40af">QKV(3x1024)</text>
+
+  <rect x="120" y="548" width="302" height="22" rx="4" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="271" y="563" text-anchor="middle" font-size="10" font-weight="600" fill="white">SDPA (16 heads, 64 dim/head) + Residual</text>
+
+  <rect x="120" y="578" width="302" height="22" rx="4" fill="#bfdbfe" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="271" y="593" text-anchor="middle" font-size="10" fill="#1e40af">out_proj Linear(1024)</text>
+
+  <!-- FFN sub-block -->
+  <rect x="100" y="610" width="340" height="80" rx="8" fill="#d1fae5" stroke="#6ee7b7" stroke-width="1.2"/>
+  <text x="120" y="630" font-size="11" font-weight="bold" fill="#065f46">FFN (Feed-Forward)</text>
+
+  <rect x="120" y="638" width="300" height="22" rx="4" fill="#a7f3d0" stroke="#34d399" stroke-width="0.8"/>
+  <text x="270" y="653" text-anchor="middle" font-size="10" fill="#065f46">LayerNorm --> Linear(4096) --> GELU --> Linear(1024)</text>
+
+  <rect x="120" y="666" width="130" height="18" rx="4" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <text x="185" y="679" text-anchor="middle" font-size="9" font-weight="600" fill="#065f46">+ Residual</text>
+
+  <!-- Layer counter annotation -->
+  <rect x="460" y="700" width="115" height="42" rx="6" fill="#fef9c3" stroke="#eab308" stroke-width="1.2"/>
+  <text x="517" y="716" text-anchor="middle" font-size="10" font-weight="bold" fill="#854d0e">Every layer</text>
+  <text x="517" y="732" text-anchor="middle" font-size="9" fill="#a16207">i = 0,1,...,23</text>
+
+  <!-- Arrow from VITBlock down -->
+  <line x1="330" y1="755" x2="330" y2="790" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Condition check -->
+  <polygon points="330,790 430,830 330,870 230,830" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="330" y="826" text-anchor="middle" font-size="11" font-weight="bold" fill="#92400e">(i+1) % 4</text>
+  <text x="330" y="842" text-anchor="middle" font-size="11" font-weight="bold" fill="#92400e">== 0 ?</text>
+
+  <!-- No path (skip temporal) -->
+  <line x1="230" y1="830" x2="140" y2="830" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="140" y1="830" x2="140" y2="1530" stroke="#64748b" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="118" y="828" font-size="11" font-weight="bold" fill="#64748b">No</text>
+  <text x="110" y="1080" font-size="9" fill="#64748b" transform="rotate(-90, 110, 1080)">skip temporal, next layer</text>
+
+  <!-- Yes path (do temporal) -->
+  <line x1="330" y1="870" x2="330" y2="900" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="340" y="888" font-size="11" font-weight="bold" fill="#059669">Yes</text>
+  <text x="405" y="888" font-size="9" fill="#64748b">at layer 4, 8, 12, 16, 20, 24</text>
+
+  <!-- ====== Temporal Cross-Attention (only 3 current cams) ====== -->
+  <rect x="70" y="905" width="1070" height="620" rx="10" fill="#fdf2f8" stroke="#e11d48" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="70" y="905" width="1070" height="34" rx="10" fill="#9f1239"/>
+  <rect x="70" y="929" width="1070" height="10" fill="#9f1239"/>
+  <text x="605" y="927" text-anchor="middle" font-size="14" font-weight="bold" fill="white">Temporal Cross-Attention (only 3 current cameras, 6 layers total)</text>
+
+  <!-- Reshape step -->
+  <rect x="100" y="950" width="500" height="26" rx="5" fill="#ffe4e6" stroke="#fda4af" stroke-width="1"/>
+  <text x="350" y="968" text-anchor="middle" font-size="10" fill="#9f1239">Reshape x: (B*6, 900, C) --> (B, 6, 225, 4, C)  then select cam 3-5</text>
+
+  <!-- Q preparation -->
+  <rect x="100" y="995" width="460" height="120" rx="8" fill="#fff1f2" stroke="#fda4af" stroke-width="1.2"/>
+  <text x="120" y="1015" font-size="12" font-weight="bold" fill="#9f1239">Q: Current Frame (3 current cameras)</text>
+
+  <rect x="120" y="1025" width="420" height="22" rx="4" fill="#ffe4e6" stroke="#fda4af" stroke-width="0.8"/>
+  <text x="330" y="1040" text-anchor="middle" font-size="10" fill="#9f1239">x_curr = x_all[:, 3:6, :, :, :]   (B, 3, 225, 4, C)</text>
+
+  <rect x="120" y="1053" width="420" height="22" rx="4" fill="#ffe4e6" stroke="#fda4af" stroke-width="0.8"/>
+  <text x="330" y="1068" text-anchor="middle" font-size="10" fill="#9f1239">q_in = reshape to (B*2700, 1, 1024)  -- each patch is a query</text>
+
+  <rect x="120" y="1082" width="200" height="22" rx="4" fill="#fda4af" stroke="#e11d48" stroke-width="1"/>
+  <text x="220" y="1097" text-anchor="middle" font-size="10" font-weight="600" fill="white">batch=2700, Q_seq=1</text>
+
+  <text x="340" y="1097" font-size="9" fill="#9f1239">3 cams x 225 pos x 4 patches = 2700</text>
+
+  <!-- KV preparation -->
+  <rect x="590" y="995" width="530" height="120" rx="8" fill="#fff1f2" stroke="#fda4af" stroke-width="1.2"/>
+  <text x="610" y="1015" font-size="12" font-weight="bold" fill="#9f1239">KV: History + Current (18 timesteps)</text>
+
+  <rect x="610" y="1025" width="490" height="22" rx="4" fill="#ffe4e6" stroke="#fda4af" stroke-width="0.8"/>
+  <text x="855" y="1040" text-anchor="middle" font-size="10" fill="#9f1239">history (B, 3, 17, 225, C) --> expand patches --> (B*2700, 17, C)</text>
+
+  <rect x="610" y="1053" width="490" height="22" rx="4" fill="#ffe4e6" stroke="#fda4af" stroke-width="0.8"/>
+  <text x="855" y="1068" text-anchor="middle" font-size="10" fill="#9f1239">cat[history, current] --> kv_in (B*2700, 18, C)  -- 17 hist + 1 curr</text>
+
+  <rect x="610" y="1082" width="220" height="22" rx="4" fill="#fda4af" stroke="#e11d48" stroke-width="1"/>
+  <text x="720" y="1097" text-anchor="middle" font-size="10" font-weight="600" fill="white">batch=2700, KV_seq=18</text>
+
+  <!-- KV timeline visualization -->
+  <rect x="860" y="1080" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="867" y="1091" text-anchor="middle" font-size="6" fill="#9f1239">t-17</text>
+  <rect x="876" y="1080" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <rect x="892" y="1080" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="912" y="1091" font-size="7" fill="#9f1239">...</text>
+  <rect x="920" y="1080" width="14" height="14" rx="2" fill="#fecdd3" stroke="#e11d48" stroke-width="0.6"/>
+  <text x="927" y="1091" text-anchor="middle" font-size="6" fill="#9f1239">t-1</text>
+  <rect x="936" y="1080" width="14" height="14" rx="2" fill="#fb7185" stroke="#e11d48" stroke-width="1"/>
+  <text x="943" y="1091" text-anchor="middle" font-size="6" fill="white">now</text>
+
+  <!-- Projection + SDPA -->
+  <line x1="330" y1="1115" x2="330" y2="1145" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="855" y1="1115" x2="855" y2="1145" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Q projection -->
+  <rect x="140" y="1148" width="200" height="50" rx="6" fill="#ffe4e6" stroke="#fda4af" stroke-width="1.2"/>
+  <text x="240" y="1168" text-anchor="middle" font-size="11" font-weight="600" fill="#9f1239">Q Projection</text>
+  <text x="240" y="1184" text-anchor="middle" font-size="9" fill="#e11d48">LN(q_in) --> temporal_q</text>
+  <text x="240" y="1194" text-anchor="middle" font-size="9" fill="#e11d48">(2700, 1, 16H, 64D)</text>
+
+  <!-- K projection -->
+  <rect x="660" y="1148" width="160" height="50" rx="6" fill="#ffe4e6" stroke="#fda4af" stroke-width="1.2"/>
+  <text x="740" y="1168" text-anchor="middle" font-size="11" font-weight="600" fill="#9f1239">K Projection</text>
+  <text x="740" y="1184" text-anchor="middle" font-size="9" fill="#e11d48">temporal_k(kv_in)</text>
+  <text x="740" y="1194" text-anchor="middle" font-size="9" fill="#e11d48">(2700, 18, 16H, 64D)</text>
+
+  <!-- V projection -->
+  <rect x="850" y="1148" width="160" height="50" rx="6" fill="#ffe4e6" stroke="#fda4af" stroke-width="1.2"/>
+  <text x="930" y="1168" text-anchor="middle" font-size="11" font-weight="600" fill="#9f1239">V Projection</text>
+  <text x="930" y="1184" text-anchor="middle" font-size="9" fill="#e11d48">temporal_v(kv_in)</text>
+  <text x="930" y="1194" text-anchor="middle" font-size="9" fill="#e11d48">(2700, 18, 16H, 64D)</text>
+
+  <!-- Arrows to SDPA -->
+  <line x1="240" y1="1198" x2="240" y2="1220" stroke="#333" stroke-width="1.5"/>
+  <line x1="240" y1="1220" x2="550" y2="1240" stroke="#333" stroke-width="1.5"/>
+  <line x1="740" y1="1198" x2="740" y2="1220" stroke="#333" stroke-width="1.5"/>
+  <line x1="740" y1="1220" x2="600" y2="1240" stroke="#333" stroke-width="1.5"/>
+  <line x1="930" y1="1198" x2="930" y2="1220" stroke="#333" stroke-width="1.5"/>
+  <line x1="930" y1="1220" x2="650" y2="1240" stroke="#333" stroke-width="1.5"/>
+
+  <!-- SDPA temporal -->
+  <rect x="430" y="1240" width="340" height="40" rx="8" fill="#e11d48" stroke="#9f1239" stroke-width="1.5"/>
+  <text x="600" y="1258" text-anchor="middle" font-size="13" font-weight="bold" fill="white">Scaled Dot-Product Attention</text>
+  <text x="600" y="1274" text-anchor="middle" font-size="9" fill="#ffe4e6">Q(2700,1) x KV(2700,18) -- each patch attends to 18 timesteps</text>
+
+  <line x1="600" y1="1280" x2="600" y2="1310" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- temporal_out -->
+  <rect x="480" y="1312" width="240" height="30" rx="5" fill="#ffe4e6" stroke="#fda4af" stroke-width="1.2"/>
+  <text x="600" y="1332" text-anchor="middle" font-size="11" fill="#9f1239">temporal_out Linear(1024)</text>
+
+  <line x1="600" y1="1342" x2="600" y2="1365" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Residual add to current cameras only -->
+  <rect x="350" y="1367" width="500" height="55" rx="8" fill="#fff1f2" stroke="#e11d48" stroke-width="1.5"/>
+  <text x="600" y="1388" text-anchor="middle" font-size="12" font-weight="bold" fill="#9f1239">Residual Add (only 3 current cameras)</text>
+  <text x="600" y="1406" text-anchor="middle" font-size="10" fill="#e11d48">x_all[:, 3:6] = x_all[:, 3:6] + temporal_output</text>
+  <text x="600" y="1418" text-anchor="middle" font-size="9" fill="#9f1239">Target cameras (0-2) remain unchanged</text>
+
+  <!-- Reshape back -->
+  <rect x="350" y="1440" width="500" height="26" rx="5" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="600" y="1458" text-anchor="middle" font-size="10" fill="#475569">Reshape back: (B, 6, 225, 4, C) --> (B*6, 900, C)  continue to next layer</text>
+
+  <!-- Temporal layer badge -->
+  <rect x="970" y="1440" width="150" height="50" rx="6" fill="#fef9c3" stroke="#eab308" stroke-width="1.2"/>
+  <text x="1045" y="1458" text-anchor="middle" font-size="10" font-weight="bold" fill="#854d0e">6 temporal layers</text>
+  <text x="1045" y="1476" text-anchor="middle" font-size="9" fill="#a16207">at L4,8,12,16,20,24</text>
+
+  <!-- Loop back arrow -->
+  <line x1="140" y1="1530" x2="140" y2="1545" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="140" y1="1545" x2="330" y2="1545" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="600" y1="1466" x2="600" y2="1545" stroke="#64748b" stroke-width="1.5"/>
+  <path d="M 330 1545 L 600 1545 L 600 1560 Q 600 1575 580 1575 L 160 1575 Q 140 1575 140 1560 L 140 1545" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="380" y="1572" text-anchor="middle" font-size="10" fill="#64748b">loop back to next VITBlock[i+1]</text>
+
+  <!-- ==================== BOTTOM: Post-processing ==================== -->
+  <rect x="40" y="1610" width="1120" height="240" rx="10" fill="white" stroke="#fb923c" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="40" y="1610" width="1120" height="34" rx="10" fill="#9a3412"/>
+  <rect x="40" y="1634" width="1120" height="10" fill="#9a3412"/>
+  <text x="600" y="1632" text-anchor="middle" font-size="15" font-weight="bold" fill="white">Post-Processing (after 24 layers)</text>
+
+  <!-- Patch merge -->
+  <rect x="80" y="1660" width="350" height="75" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="255" y="1682" text-anchor="middle" font-size="12" font-weight="bold" fill="#92400e">Patch Merge</text>
+  <text x="255" y="1700" text-anchor="middle" font-size="10" fill="#b45309">(B*6, 900, 1024) --> (B, 6, 225, 4, 1024)</text>
+  <text x="255" y="1716" text-anchor="middle" font-size="10" fill="#b45309">reshape to (B, 1350, 4096) --> Linear --> (B, 1350, 1024)</text>
+  <text x="255" y="1730" text-anchor="middle" font-size="9" fill="#92400e">Merge 4 patches per position into 1 token</text>
+
+  <!-- Arrow -->
+  <line x1="430" y1="1698" x2="480" y2="1698" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- LayerNorm + Projection -->
+  <rect x="485" y="1660" width="180" height="75" rx="8" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="575" y="1682" text-anchor="middle" font-size="12" font-weight="bold" fill="#4338ca">norm_out</text>
+  <text x="575" y="1700" text-anchor="middle" font-size="10" fill="#6366f1">LayerNorm</text>
+  <text x="575" y="1720" text-anchor="middle" font-size="10" fill="#6366f1">(B, 1350, 1024)</text>
+
+  <!-- Arrow -->
+  <line x1="665" y1="1698" x2="715" y2="1698" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- proj_out -->
+  <rect x="720" y="1660" width="200" height="75" rx="8" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="820" y="1682" text-anchor="middle" font-size="12" font-weight="bold" fill="#4338ca">proj_out</text>
+  <text x="820" y="1700" text-anchor="middle" font-size="10" fill="#6366f1">Linear(1024 --> 2560)</text>
+  <text x="820" y="1720" text-anchor="middle" font-size="10" fill="#6366f1">(B, 1350, 2560)</text>
+
+  <!-- Arrow -->
+  <line x1="920" y1="1698" x2="970" y2="1698" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Output -->
+  <rect x="975" y="1665" width="150" height="65" rx="8" fill="#dcfce7" stroke="#22c55e" stroke-width="2" filter="url(#shadow-sm)"/>
+  <text x="1050" y="1688" text-anchor="middle" font-size="13" font-weight="bold" fill="#166534">Output</text>
+  <text x="1050" y="1706" text-anchor="middle" font-size="11" fill="#166534">(B, 1350, 2560)</text>
+  <text x="1050" y="1722" text-anchor="middle" font-size="9" fill="#166534">--> to LLM</text>
+
+  <!-- Dimension flow summary -->
+  <rect x="80" y="1760" width="1050" height="70" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
+  <text x="100" y="1782" font-size="11" font-weight="bold" fill="#9a3412">Dimension Flow Summary:</text>
+  <text x="100" y="1800" font-size="10" fill="#78350f">(B, 5400, 1024)  -->  reshape (B*6, 900, 1024)  -->  24x VITBlock  -->  patch merge (B, 1350, 4*1024)  -->  Linear  -->  (B, 1350, 1024)  -->  proj (B, 1350, 2560)</text>
+  <text x="100" y="1818" font-size="10" fill="#78350f">6 cams x 225pos x 4pat     per-cam spatial attn           + 6x temporal attn         aggregate 4 patches/pos          project to LLM hidden dim</text>
+
+  <!-- ==================== Config Table ==================== -->
+  <rect x="40" y="1860" width="1120" height="210" rx="10" fill="white" stroke="#fb923c" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="40" y="1860" width="1120" height="32" rx="10" fill="#334155"/>
+  <rect x="40" y="1882" width="1120" height="10" fill="#334155"/>
+  <text x="600" y="1882" text-anchor="middle" font-size="14" font-weight="bold" fill="white">SpatioTemporalVIT Configuration</text>
+
+  <text x="80" y="1918" font-size="12" font-weight="bold" fill="#1e293b">Spatial</text>
+  <text x="460" y="1918" font-size="12" font-weight="bold" fill="#1e293b">Temporal</text>
+  <text x="830" y="1918" font-size="12" font-weight="bold" fill="#1e293b">I/O</text>
+  <line x1="60" y1="1926" x2="1140" y2="1926" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- Spatial config -->
+  <text x="80" y="1946" font-size="11" fill="#475569">Layers: 24</text>
+  <text x="80" y="1966" font-size="11" fill="#475569">Hidden: 1024</text>
+  <text x="80" y="1986" font-size="11" fill="#475569">Heads: 16 (64 dim/head)</text>
+  <text x="80" y="2006" font-size="11" fill="#475569">FFN: 4096 (GELU)</text>
+  <text x="80" y="2026" font-size="11" fill="#475569">Seq: 900 tokens/cam</text>
+  <text x="80" y="2046" font-size="11" fill="#475569">Batch: B*6 (per-camera)</text>
+
+  <!-- Temporal config -->
+  <text x="460" y="1946" font-size="11" fill="#475569">Layers: 6 (every 4 spatial)</text>
+  <text x="460" y="1966" font-size="11" fill="#475569">Hidden: 1024</text>
+  <text x="460" y="1986" font-size="11" fill="#475569">Heads: 16 (shared)</text>
+  <text x="460" y="2006" font-size="11" fill="#475569">No FFN (proj only)</text>
+  <text x="460" y="2026" font-size="11" fill="#475569">Q: 1 token, KV: 18 timesteps</text>
+  <text x="460" y="2046" font-size="11" fill="#475569">Batch: 2700 (3cam x 225 x 4)</text>
+
+  <!-- I/O config -->
+  <text x="830" y="1946" font-size="11" fill="#475569">Cameras: 6 total</text>
+  <text x="830" y="1966" font-size="11" fill="#475569">  3 target + 3 current</text>
+  <text x="830" y="1986" font-size="11" fill="#475569">Tokens/cam: 225 x 4 patches</text>
+  <text x="830" y="2006" font-size="11" fill="#475569">History: 17 frames</text>
+  <text x="830" y="2026" font-size="11" fill="#475569">Input: (B, 5400, 1024)</text>
+  <text x="830" y="2046" font-size="11" fill="#475569">Output: (B, 1350, 2560)</text>
+
+  <line x1="440" y1="1900" x2="440" y2="2055" stroke="#e2e8f0" stroke-width="1"/>
+  <line x1="810" y1="1900" x2="810" y2="2055" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- Source -->
+  <text x="600" y="2088" text-anchor="middle" font-size="10" fill="#94a3b8">Source: vla/vla_bench.py @ branch tp2-split-qwen3.5</text>
+</svg>
