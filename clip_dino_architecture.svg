@@ -1,0 +1,380 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1650" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#faf5ff"/>
+      <stop offset="100%" stop-color="#ede9fe"/>
+    </linearGradient>
+    <linearGradient id="header-bg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#6d28d9"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="vitblock-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f5f3ff"/>
+      <stop offset="100%" stop-color="#ede9fe"/>
+    </linearGradient>
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.15"/>
+    </filter>
+    <filter id="shadow-sm" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="2" flood-opacity="0.1"/>
+    </filter>
+
+    <!-- Grid pattern for image -->
+    <pattern id="grid" width="12" height="12" patternUnits="userSpaceOnUse">
+      <path d="M 12 0 L 0 0 0 12" fill="none" stroke="#c4b5fd" stroke-width="0.5"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="1650" fill="url(#bg)" rx="12"/>
+
+  <!-- ==================== Title ==================== -->
+  <rect x="30" y="20" width="1040" height="50" rx="8" fill="url(#header-bg)"/>
+  <text x="550" y="52" text-anchor="middle" font-size="22" font-weight="bold" fill="white">ClipDinoVision - CLIP ViT-L/14 Vision Encoder</text>
+
+  <!-- ==================== LEFT: Full Pipeline ==================== -->
+  <rect x="40" y="90" width="500" height="1270" rx="10" fill="white" stroke="#a78bfa" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="40" y="90" width="500" height="36" rx="10" fill="#5b21b6"/>
+  <rect x="40" y="116" width="500" height="10" fill="#5b21b6"/>
+  <text x="290" y="114" text-anchor="middle" font-size="16" font-weight="bold" fill="white">VisionTransformer Pipeline</text>
+
+  <!-- ====== Input Image ====== -->
+  <rect x="160" y="150" width="100" height="75" rx="4" fill="url(#grid)" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="160" y="150" width="100" height="75" rx="4" fill="rgba(139,92,246,0.08)"/>
+  <!-- Camera icon -->
+  <text x="210" y="195" text-anchor="middle" font-size="28" fill="#7c3aed">&#x1F4F7;</text>
+  <text x="290" y="175" font-size="12" font-weight="600" fill="#5b21b6">Input Image</text>
+  <text x="290" y="193" font-size="11" fill="#7c3aed">(B, 3, 480, 480)</text>
+  <text x="290" y="208" font-size="10" fill="#9ca3af">480x480 RGB</text>
+
+  <!-- Arrow -->
+  <line x1="210" y1="225" x2="210" y2="258" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ====== Patch Embedding (Conv2d) ====== -->
+  <rect x="100" y="260" width="340" height="65" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="270" y="282" text-anchor="middle" font-size="13" font-weight="bold" fill="#92400e">Patch Embedding (Conv2d)</text>
+  <text x="270" y="298" text-anchor="middle" font-size="11" fill="#b45309">kernel=14, stride=14, out_channels=1024</text>
+  <text x="270" y="314" text-anchor="middle" font-size="10" fill="#92400e">480/14 = 34 grid  -->  34x34 = 1156 patches</text>
+
+  <!-- Patch visualization -->
+  <rect x="390" y="148" width="100" height="75" rx="4" fill="white" stroke="#f59e0b" stroke-width="1"/>
+  <!-- 4x4 grid inside to show patches -->
+  <line x1="415" y1="148" x2="415" y2="223" stroke="#fbbf24" stroke-width="0.8"/>
+  <line x1="440" y1="148" x2="440" y2="223" stroke="#fbbf24" stroke-width="0.8"/>
+  <line x1="465" y1="148" x2="465" y2="223" stroke="#fbbf24" stroke-width="0.8"/>
+  <line x1="390" y1="167" x2="490" y2="167" stroke="#fbbf24" stroke-width="0.8"/>
+  <line x1="390" y1="186" x2="490" y2="186" stroke="#fbbf24" stroke-width="0.8"/>
+  <line x1="390" y1="205" x2="490" y2="205" stroke="#fbbf24" stroke-width="0.8"/>
+  <text x="440" y="240" text-anchor="middle" font-size="9" fill="#92400e">14x14 patches</text>
+  <text x="440" y="252" text-anchor="middle" font-size="9" fill="#92400e">34x34 grid</text>
+
+  <!-- Arrow -->
+  <line x1="270" y1="325" x2="270" y2="348" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="350" y="342" font-size="10" fill="#64748b">(B, 1156, 1024)</text>
+
+  <!-- ====== CLS Token Prepend ====== -->
+  <rect x="130" y="350" width="280" height="40" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="270" y="370" text-anchor="middle" font-size="12" font-weight="600" fill="#1e40af">[CLS] Token Prepend</text>
+  <text x="270" y="384" text-anchor="middle" font-size="10" fill="#3b82f6">learnable (1, 1, 1024) + patch tokens</text>
+
+  <!-- Arrow -->
+  <line x1="270" y1="390" x2="270" y2="413" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="350" y="407" font-size="10" fill="#64748b">(B, 1157, 1024)</text>
+
+  <!-- ====== Position Embedding ====== -->
+  <rect x="130" y="415" width="280" height="40" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="270" y="435" text-anchor="middle" font-size="12" font-weight="600" fill="#1e40af">+ Position Embedding</text>
+  <text x="270" y="449" text-anchor="middle" font-size="10" fill="#3b82f6">learnable (1, 1157, 1024)</text>
+
+  <!-- Arrow -->
+  <line x1="270" y1="455" x2="270" y2="478" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ====== Pre-LayerNorm ====== -->
+  <rect x="170" y="480" width="200" height="32" rx="6" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.2" filter="url(#shadow-sm)"/>
+  <text x="270" y="501" text-anchor="middle" font-size="12" font-weight="600" fill="#4338ca">Pre-LayerNorm</text>
+
+  <!-- Arrow -->
+  <line x1="270" y1="512" x2="270" y2="538" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ====== ViTBlock x24 ====== -->
+  <!-- Shadow blocks -->
+  <rect x="108" y="548" width="360" height="200" rx="10" fill="#c4b5fd" stroke="#8b5cf6" stroke-width="1" opacity="0.35"/>
+  <rect x="102" y="554" width="360" height="200" rx="10" fill="#c4b5fd" stroke="#8b5cf6" stroke-width="1" opacity="0.25"/>
+
+  <!-- Main block -->
+  <rect x="96" y="560" width="360" height="200" rx="10" fill="url(#vitblock-bg)" stroke="#8b5cf6" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="96" y="560" width="360" height="32" rx="10" fill="#7c3aed"/>
+  <rect x="96" y="582" width="360" height="10" fill="#7c3aed"/>
+  <text x="276" y="582" text-anchor="middle" font-size="14" font-weight="bold" fill="white">ViTBlock x 24</text>
+
+  <!-- Self-Attention -->
+  <rect x="116" y="602" width="316" height="50" rx="6" fill="#ede9fe" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="274" y="620" text-anchor="middle" font-size="12" font-weight="600" fill="#5b21b6">Self-Attention (Bidirectional)</text>
+  <text x="274" y="636" text-anchor="middle" font-size="9" fill="#7c3aed">LayerNorm → QKV(3x1024) → SDPA(16H, 64D) → Out Proj</text>
+  <text x="274" y="648" text-anchor="middle" font-size="9" fill="#7c3aed">+ Residual</text>
+
+  <!-- FFN / MLP -->
+  <rect x="116" y="660" width="316" height="50" rx="6" fill="#d1fae5" stroke="#34d399" stroke-width="1.2"/>
+  <text x="274" y="678" text-anchor="middle" font-size="12" font-weight="600" fill="#065f46">MLP (Feed-Forward)</text>
+  <text x="274" y="694" text-anchor="middle" font-size="9" fill="#059669">LayerNorm → Linear(4096) → QuickGELU → Linear(1024)</text>
+  <text x="274" y="706" text-anchor="middle" font-size="9" fill="#059669">+ Residual</text>
+
+  <!-- Residual arrows on left side -->
+  <path d="M 108 598 L 108 650 M 108 598 L 115 598" fill="none" stroke="#7c3aed" stroke-width="1.2" stroke-dasharray="3,2"/>
+  <path d="M 108 656 L 108 708 M 108 656 L 115 656" fill="none" stroke="#059669" stroke-width="1.2" stroke-dasharray="3,2"/>
+
+  <!-- Arrow: after blocks -->
+  <line x1="276" y1="760" x2="276" y2="790" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="356" y="780" font-size="10" fill="#64748b">(B, 1157, 1024)</text>
+
+  <!-- ====== Final LayerNorm ====== -->
+  <rect x="176" y="792" width="200" height="32" rx="6" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.2" filter="url(#shadow-sm)"/>
+  <text x="276" y="813" text-anchor="middle" font-size="12" font-weight="600" fill="#4338ca">Final LayerNorm</text>
+
+  <!-- Arrow -->
+  <line x1="276" y1="824" x2="276" y2="850" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ====== CLS Pooling ====== -->
+  <rect x="130" y="852" width="290" height="55" rx="8" fill="#fce7f3" stroke="#ec4899" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="275" y="874" text-anchor="middle" font-size="12" font-weight="bold" fill="#9d174d">CLS Token Pooling</text>
+  <text x="275" y="892" text-anchor="middle" font-size="10" fill="#db2777">tokens[:, 0] --> extract [CLS] embedding</text>
+
+  <!-- Visual: token sequence -->
+  <rect x="145" y="916" width="30" height="20" rx="3" fill="#ec4899" stroke="#be185d" stroke-width="1"/>
+  <text x="160" y="930" text-anchor="middle" font-size="8" font-weight="bold" fill="white">CLS</text>
+  <rect x="180" y="916" width="22" height="20" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.8"/>
+  <text x="191" y="930" text-anchor="middle" font-size="7" fill="#64748b">P1</text>
+  <rect x="206" y="916" width="22" height="20" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.8"/>
+  <text x="217" y="930" text-anchor="middle" font-size="7" fill="#64748b">P2</text>
+  <rect x="232" y="916" width="22" height="20" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.8"/>
+  <text x="243" y="930" text-anchor="middle" font-size="7" fill="#64748b">P3</text>
+  <text x="268" y="930" font-size="11" fill="#64748b">...</text>
+  <rect x="290" y="916" width="32" height="20" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.8"/>
+  <text x="306" y="930" text-anchor="middle" font-size="7" fill="#64748b">P1156</text>
+
+  <!-- Arrow from CLS -->
+  <line x1="160" y1="936" x2="160" y2="955" stroke="#ec4899" stroke-width="1.5"/>
+  <line x1="160" y1="955" x2="275" y2="955" stroke="#ec4899" stroke-width="1.5"/>
+  <line x1="275" y1="955" x2="275" y2="968" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="350" y="960" font-size="10" fill="#64748b">(B, 1024)</text>
+
+  <!-- ====== Projection ====== -->
+  <rect x="155" y="970" width="240" height="40" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="275" y="988" text-anchor="middle" font-size="12" font-weight="bold" fill="#92400e">Linear Projection</text>
+  <text x="275" y="1003" text-anchor="middle" font-size="10" fill="#b45309">1024 --> 768 (no bias)</text>
+
+  <!-- Arrow -->
+  <line x1="275" y1="1010" x2="275" y2="1040" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ====== Output ====== -->
+  <rect x="175" y="1042" width="200" height="50" rx="8" fill="#dcfce7" stroke="#22c55e" stroke-width="1.5" filter="url(#shadow-sm)"/>
+  <text x="275" y="1062" text-anchor="middle" font-size="13" font-weight="bold" fill="#166534">Image Embedding</text>
+  <text x="275" y="1080" text-anchor="middle" font-size="11" fill="#166534">(B, 768)</text>
+
+  <!-- Dim annotations on right -->
+  <rect x="435" y="530" width="90" height="230" rx="4" fill="none" stroke="#c4b5fd" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="480" y="555" text-anchor="middle" font-size="9" fill="#7c3aed" transform="rotate(90, 480, 640)">1157 tokens x 1024 dim</text>
+
+  <!-- Note box -->
+  <rect x="70" y="1108" width="440" height="70" rx="6" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="90" y="1128" font-size="11" font-weight="bold" fill="#5b21b6">Note: CLIP ViT-L/14 config</text>
+  <text x="90" y="1146" font-size="10" fill="#6b7280">- Config image_size=224, but benchmark uses 480x480</text>
+  <text x="90" y="1162" font-size="10" fill="#6b7280">- Last 4 pixels per axis not covered by full 14x14 patches</text>
+
+  <!-- ==================== RIGHT: ViTBlock Detail ==================== -->
+  <rect x="570" y="90" width="490" height="840" rx="10" fill="white" stroke="#a78bfa" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="570" y="90" width="490" height="36" rx="10" fill="#7c3aed"/>
+  <rect x="570" y="116" width="490" height="10" fill="#7c3aed"/>
+  <text x="815" y="114" text-anchor="middle" font-size="16" font-weight="bold" fill="white">ViTBlock Detail (Single Block)</text>
+
+  <!-- Input -->
+  <rect x="725" y="145" width="180" height="32" rx="6" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="815" y="166" text-anchor="middle" font-size="12" font-weight="600" fill="#475569">x (B, 1157, 1024)</text>
+
+  <line x1="815" y1="177" x2="815" y2="198" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ====== Self-Attention Section ====== -->
+  <rect x="600" y="200" width="430" height="310" rx="8" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.2"/>
+  <text x="620" y="218" font-size="12" font-weight="bold" fill="#5b21b6">1. Self-Attention</text>
+
+  <!-- LayerNorm1 -->
+  <rect x="735" y="228" width="160" height="26" rx="5" fill="#ddd6fe" stroke="#a78bfa" stroke-width="1"/>
+  <text x="815" y="246" text-anchor="middle" font-size="11" fill="#5b21b6">LayerNorm (norm1)</text>
+
+  <line x1="815" y1="254" x2="815" y2="270" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- QKV -->
+  <rect x="725" y="272" width="180" height="26" rx="5" fill="#ddd6fe" stroke="#a78bfa" stroke-width="1"/>
+  <text x="815" y="290" text-anchor="middle" font-size="11" fill="#5b21b6">QKV Linear (3 x 1024)</text>
+
+  <line x1="815" y1="298" x2="815" y2="316" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Split Q K V -->
+  <rect x="660" y="318" width="70" height="32" rx="5" fill="#ede9fe" stroke="#a78bfa" stroke-width="1"/>
+  <text x="695" y="330" text-anchor="middle" font-size="11" font-weight="600" fill="#5b21b6">Q</text>
+  <text x="695" y="344" text-anchor="middle" font-size="8" fill="#7c3aed">1157x1024</text>
+
+  <rect x="740" y="318" width="70" height="32" rx="5" fill="#ede9fe" stroke="#a78bfa" stroke-width="1"/>
+  <text x="775" y="330" text-anchor="middle" font-size="11" font-weight="600" fill="#5b21b6">K</text>
+  <text x="775" y="344" text-anchor="middle" font-size="8" fill="#7c3aed">1157x1024</text>
+
+  <rect x="820" y="318" width="70" height="32" rx="5" fill="#ede9fe" stroke="#a78bfa" stroke-width="1"/>
+  <text x="855" y="330" text-anchor="middle" font-size="11" font-weight="600" fill="#5b21b6">V</text>
+  <text x="855" y="344" text-anchor="middle" font-size="8" fill="#7c3aed">1157x1024</text>
+
+  <!-- Reshape annotation -->
+  <text x="910" y="330" font-size="9" fill="#64748b">reshape to</text>
+  <text x="910" y="342" font-size="9" fill="#64748b">16H x 64D</text>
+
+  <line x1="775" y1="350" x2="775" y2="370" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- SDPA -->
+  <rect x="700" y="372" width="230" height="34" rx="6" fill="#8b5cf6" stroke="#6d28d9" stroke-width="1.2"/>
+  <text x="815" y="393" text-anchor="middle" font-size="12" font-weight="bold" fill="white">Scaled Dot-Product Attention</text>
+
+  <!-- FlashAttention note -->
+  <text x="815" y="420" text-anchor="middle" font-size="9" fill="#7c3aed">uses FlashAttention via PyTorch SDPA</text>
+  <text x="815" y="432" text-anchor="middle" font-size="9" fill="#7c3aed">no dropout (inference)</text>
+
+  <line x1="815" y1="436" x2="815" y2="452" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Out Proj -->
+  <rect x="735" y="454" width="160" height="26" rx="5" fill="#ddd6fe" stroke="#a78bfa" stroke-width="1"/>
+  <text x="815" y="472" text-anchor="middle" font-size="11" fill="#5b21b6">out_proj Linear (1024)</text>
+
+  <!-- Residual 1 -->
+  <line x1="630" y1="195" x2="630" y2="492" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <circle cx="630" cy="492" r="11" fill="white" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="630" y="496" text-anchor="middle" font-size="15" font-weight="bold" fill="#7c3aed">+</text>
+  <line x1="735" y1="480" x2="643" y2="492" stroke="#333" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="618" y="515" text-anchor="middle" font-size="9" fill="#7c3aed">residual</text>
+
+  <!-- ====== MLP / FFN Section ====== -->
+  <rect x="600" y="530" width="430" height="280" rx="8" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.2"/>
+  <text x="620" y="548" font-size="12" font-weight="bold" fill="#065f46">2. MLP (Feed-Forward Network)</text>
+
+  <!-- LayerNorm2 -->
+  <rect x="735" y="560" width="160" height="26" rx="5" fill="#a7f3d0" stroke="#34d399" stroke-width="1"/>
+  <text x="815" y="578" text-anchor="middle" font-size="11" fill="#065f46">LayerNorm (norm2)</text>
+
+  <line x1="815" y1="586" x2="815" y2="604" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Linear Up -->
+  <rect x="720" y="606" width="190" height="26" rx="5" fill="#a7f3d0" stroke="#34d399" stroke-width="1"/>
+  <text x="815" y="624" text-anchor="middle" font-size="11" fill="#065f46">Linear (1024 --> 4096)</text>
+
+  <line x1="815" y1="632" x2="815" y2="650" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- QuickGELU -->
+  <rect x="745" y="652" width="140" height="30" rx="6" fill="#34d399" stroke="#059669" stroke-width="1.2"/>
+  <text x="815" y="672" text-anchor="middle" font-size="12" font-weight="bold" fill="white">QuickGELU</text>
+
+  <!-- QuickGELU formula -->
+  <text x="815" y="698" text-anchor="middle" font-size="10" fill="#059669">x * sigmoid(1.702 * x)</text>
+
+  <line x1="815" y1="704" x2="815" y2="722" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Linear Down -->
+  <rect x="720" y="724" width="190" height="26" rx="5" fill="#a7f3d0" stroke="#34d399" stroke-width="1"/>
+  <text x="815" y="742" text-anchor="middle" font-size="11" fill="#065f46">Linear (4096 --> 1024)</text>
+
+  <!-- Residual 2 -->
+  <line x1="630" y1="503" x2="630" y2="772" stroke="#059669" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <circle cx="630" cy="772" r="11" fill="white" stroke="#059669" stroke-width="1.5"/>
+  <text x="630" y="776" text-anchor="middle" font-size="15" font-weight="bold" fill="#059669">+</text>
+  <line x1="720" y1="750" x2="643" y2="772" stroke="#333" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="618" y="795" text-anchor="middle" font-size="9" fill="#059669">residual</text>
+
+  <!-- Output of block -->
+  <line x1="630" y1="783" x2="815" y2="870" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="725" y="858" width="180" height="32" rx="6" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="815" y="879" text-anchor="middle" font-size="12" font-weight="600" fill="#475569">x (B, 1157, 1024)</text>
+
+  <!-- ==================== BOTTOM: Config Table ==================== -->
+  <rect x="40" y="1200" width="1020" height="200" rx="10" fill="white" stroke="#a78bfa" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="40" y="1200" width="1020" height="32" rx="10" fill="#334155"/>
+  <rect x="40" y="1222" width="1020" height="10" fill="#334155"/>
+  <text x="550" y="1222" text-anchor="middle" font-size="14" font-weight="bold" fill="white">CLIP ViT-L/14 Configuration</text>
+
+  <!-- Table -->
+  <text x="80" y="1258" font-size="12" font-weight="bold" fill="#1e293b">Parameter</text>
+  <text x="280" y="1258" font-size="12" font-weight="bold" fill="#1e293b">Value</text>
+  <text x="540" y="1258" font-size="12" font-weight="bold" fill="#1e293b">Parameter</text>
+  <text x="780" y="1258" font-size="12" font-weight="bold" fill="#1e293b">Value</text>
+
+  <line x1="60" y1="1266" x2="1040" y2="1266" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- Left column -->
+  <text x="80" y="1286" font-size="11" fill="#475569">Image Size (bench)</text>
+  <text x="280" y="1286" font-size="11" font-weight="600" fill="#1e293b">480 x 480</text>
+  <text x="80" y="1306" font-size="11" fill="#475569">Patch Size</text>
+  <text x="280" y="1306" font-size="11" font-weight="600" fill="#1e293b">14 x 14</text>
+  <text x="80" y="1326" font-size="11" fill="#475569">Grid Size</text>
+  <text x="280" y="1326" font-size="11" font-weight="600" fill="#1e293b">34 x 34 = 1156 patches</text>
+  <text x="80" y="1346" font-size="11" fill="#475569">Sequence Length</text>
+  <text x="280" y="1346" font-size="11" font-weight="600" fill="#1e293b">1157 (1156 + CLS)</text>
+  <text x="80" y="1366" font-size="11" fill="#475569">Hidden Dim</text>
+  <text x="280" y="1366" font-size="11" font-weight="600" fill="#1e293b">1024</text>
+  <text x="80" y="1386" font-size="11" fill="#475569">Layers</text>
+  <text x="280" y="1386" font-size="11" font-weight="600" fill="#1e293b">24</text>
+
+  <!-- Right column -->
+  <text x="540" y="1286" font-size="11" fill="#475569">Attention Heads</text>
+  <text x="780" y="1286" font-size="11" font-weight="600" fill="#1e293b">16 (head_dim=64)</text>
+  <text x="540" y="1306" font-size="11" fill="#475569">FFN / MLP Dim</text>
+  <text x="780" y="1306" font-size="11" font-weight="600" fill="#1e293b">4096</text>
+  <text x="540" y="1326" font-size="11" fill="#475569">Activation</text>
+  <text x="780" y="1326" font-size="11" font-weight="600" fill="#1e293b">QuickGELU</text>
+  <text x="540" y="1346" font-size="11" fill="#475569">Projection Dim</text>
+  <text x="780" y="1346" font-size="11" font-weight="600" fill="#1e293b">768</text>
+  <text x="540" y="1366" font-size="11" fill="#475569">Pooling</text>
+  <text x="780" y="1366" font-size="11" font-weight="600" fill="#1e293b">CLS token</text>
+  <text x="540" y="1386" font-size="11" fill="#475569">Normalization</text>
+  <text x="780" y="1386" font-size="11" font-weight="600" fill="#1e293b">Pre-LayerNorm</text>
+
+  <line x1="510" y1="1245" x2="510" y2="1390" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- ==================== BOTTOM: Comparison with VLA VIT ==================== -->
+  <rect x="40" y="1420" width="1020" height="200" rx="10" fill="white" stroke="#a78bfa" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="40" y="1420" width="1020" height="32" rx="10" fill="#0f766e"/>
+  <rect x="40" y="1442" width="1020" height="10" fill="#0f766e"/>
+  <text x="550" y="1442" text-anchor="middle" font-size="14" font-weight="bold" fill="white">ClipDinoVision vs VLA SpatioTemporalVIT</text>
+
+  <!-- Headers -->
+  <text x="80" y="1480" font-size="12" font-weight="bold" fill="#1e293b">Aspect</text>
+  <text x="380" y="1480" font-size="12" font-weight="bold" fill="#7c3aed">ClipDinoVision</text>
+  <text x="730" y="1480" font-size="12" font-weight="bold" fill="#ea580c">SpatioTemporalVIT (VLA)</text>
+  <line x1="60" y1="1488" x2="1040" y2="1488" stroke="#e2e8f0" stroke-width="1"/>
+
+  <text x="80" y="1508" font-size="11" fill="#475569">Architecture</text>
+  <text x="380" y="1508" font-size="11" fill="#1e293b">Standard ViT (CLIP ViT-L/14)</text>
+  <text x="730" y="1508" font-size="11" fill="#1e293b">Spatial + Temporal attention</text>
+
+  <text x="80" y="1528" font-size="11" fill="#475569">Input</text>
+  <text x="380" y="1528" font-size="11" fill="#1e293b">1 image, 480x480</text>
+  <text x="730" y="1528" font-size="11" fill="#1e293b">6 cams x 225 tokens x 4 patches</text>
+
+  <text x="80" y="1548" font-size="11" fill="#475569">Attention</text>
+  <text x="380" y="1548" font-size="11" fill="#1e293b">Self-attention only</text>
+  <text x="730" y="1548" font-size="11" fill="#1e293b">Self + Temporal cross (every 4L)</text>
+
+  <text x="80" y="1568" font-size="11" fill="#475569">History</text>
+  <text x="380" y="1568" font-size="11" fill="#1e293b">None (single frame)</text>
+  <text x="730" y="1568" font-size="11" fill="#1e293b">17 frames history (11475 tokens)</text>
+
+  <text x="80" y="1588" font-size="11" fill="#475569">Output</text>
+  <text x="380" y="1588" font-size="11" fill="#1e293b">CLS pooled → 768D vector</text>
+  <text x="730" y="1588" font-size="11" fill="#1e293b">1350 tokens → 2560D (to LLM)</text>
+
+  <line x1="360" y1="1460" x2="360" y2="1600" stroke="#e2e8f0" stroke-width="1"/>
+  <line x1="710" y1="1460" x2="710" y2="1600" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- Source -->
+  <text x="550" y="1638" text-anchor="middle" font-size="10" fill="#94a3b8">Source: kernel_bench/vision/vision_bench.py @ branch tp2-split-qwen3.5</text>
+</svg>
