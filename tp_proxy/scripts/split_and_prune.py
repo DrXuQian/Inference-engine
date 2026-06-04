@@ -70,7 +70,8 @@ def estimate_layer_size(model_dir: str, num_layers: int) -> tuple[float, float]:
             continue
         with safe_open(shard_path, framework="numpy") as f:
             for key in f.keys():
-                nbytes = f.get_tensor(key).nbytes
+                offsets = f.get_tensor_info(key)["data_offsets"]
+                nbytes = offsets[1] - offsets[0]
                 m = layer_pattern.match(key)
                 if m:
                     total_layer += nbytes
@@ -212,10 +213,6 @@ def main():
 
     # Step 1: Estimate sizes
     print("\nEstimating layer sizes...")
-    try:
-        import ml_dtypes  # noqa
-    except ImportError:
-        pass
     per_layer, base = estimate_layer_size(args.model_dir, num_layers)
     print(f"  Per-layer: {per_layer / 1e6:.1f} MB")
     print(f"  Base (non-layer): {base / 1e6:.1f} MB")
