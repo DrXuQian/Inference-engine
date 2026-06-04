@@ -19,9 +19,19 @@ import argparse
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _read_safetensors_header(path: str) -> dict:
+    """Parse the safetensors header to get tensor metadata without loading data."""
+    with open(path, "rb") as f:
+        header_size = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_size))
+    header.pop("__metadata__", None)
+    return header
 
 
 def load_config(model_dir: str) -> dict:
@@ -44,22 +54,7 @@ def estimate_layer_size(model_dir: str, num_layers: int) -> tuple[float, float]:
     base_bytes = 0
     layer_pattern = re.compile(r"model\.language_model\.layers\.(\d+)\.")
 
-    # Use weight_map to categorize without loading tensors
-    from safetensors import safe_open
-
-    shard_sizes = {}  # cache per-shard measurements
-    for tensor_name, shard_file in index["weight_map"].items():
-        if shard_file not in shard_sizes:
-            shard_sizes[shard_file] = {}
-
-        m = layer_pattern.match(tensor_name)
-        if m:
-            layer_id = int(m.group(1))
-            shard_sizes[shard_file].setdefault("layer", set()).add(layer_id)
-        else:
-            shard_sizes[shard_file].setdefault("base", []).append(tensor_name)
-
-    # Measure actual tensor sizes from all shards
+    # Measure actual tensor sizes by parsing safetensors headers (no tensor loading)
     total_layer = 0
     total_base = 0
     counted_layers = set()
@@ -68,16 +63,16 @@ def estimate_layer_size(model_dir: str, num_layers: int) -> tuple[float, float]:
         shard_path = os.path.join(model_dir, shard_file)
         if not os.path.exists(shard_path):
             continue
-        with safe_open(shard_path, framework="numpy") as f:
-            for key in f.keys():
-                offsets = f.get_tensor_info(key)["data_offsets"]
-                nbytes = offsets[1] - offsets[0]
-                m = layer_pattern.match(key)
-                if m:
-                    total_layer += nbytes
-                    counted_layers.add(int(m.group(1)))
-                else:
-                    total_base += nbytes
+        header = _read_safetensors_header(shard_path)
+        for key, info in header.items():
+            offsets = info["data_offsets"]
+            nbytes = offsets[1] - offsets[0]
+            m = layer_pattern.match(key)
+            if m:
+                total_layer += nbytes
+                counted_layers.add(int(m.group(1)))
+            else:
+                total_base += nbytes
 
     if not counted_layers:
         # Fallback: use metadata total_size
