@@ -217,20 +217,35 @@ def extract_decode_from_nvtx(sqlite_path: str,
         else:
             break
 
-    enc_evts = dec_evts[first_graph_idx:last_graph_idx + 1]
+    graph_evts = dec_evts[first_graph_idx:last_graph_idx + 1]
     tail_evts = dec_evts[last_graph_idx + 1:]
     print(f"  Last CUDA graph: kernels [{first_graph_idx}..{last_graph_idx}] "
-          f"({len(enc_evts)} kernels)")
+          f"({len(graph_evts)} kernels)")
     print(f"  Tail (after graph): {len(tail_evts)} kernels")
 
-    # Split tail into lm_head + sampling
+    # lm_head may be inside or outside the CUDA graph.
+    # Split graph into encoder + lm_head by finding the last lm_head kernel.
     lm_dur = 0
-    samp_evts = []
+    # Check tail first
     for e in tail_evts:
         if lm_head_kernel in e[3]:
             lm_dur += e[1]
-        else:
-            samp_evts.append(e)
+    # Also check inside graph (lm_head can be part of CUDA graph)
+    last_lm_in_graph = None
+    for i in range(len(graph_evts) - 1, -1, -1):
+        if lm_head_kernel in graph_evts[i][3]:
+            last_lm_in_graph = i
+            break
+
+    if last_lm_in_graph is not None:
+        enc_evts = graph_evts[:last_lm_in_graph]
+        lm_dur += graph_evts[last_lm_in_graph][1]
+        print(f"  lm_head found INSIDE graph at position {last_lm_in_graph}")
+    else:
+        enc_evts = graph_evts
+
+    # Sampling = tail kernels that are NOT lm_head
+    samp_evts = [e for e in tail_evts if lm_head_kernel not in e[3]]
 
     encoder_ns = sum(e[1] for e in enc_evts)
     sampling_ns = sum(e[1] for e in samp_evts)
