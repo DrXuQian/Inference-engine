@@ -39,12 +39,12 @@ def load_config(model_dir: str) -> dict:
     tc = cfg.get("text_config", cfg)
     qc = cfg.get("quantization_config", {})
     return {
-        "hidden_size": tc.get("hidden_size", 2048),
-        "head_dim": tc.get("head_dim", 256),
-        "num_attention_heads": tc.get("num_attention_heads", 16),
-        "num_key_value_heads": tc.get("num_key_value_heads", 2),
-        "num_hidden_layers": tc.get("num_hidden_layers", 40),
-        "vocab_size": tc.get("vocab_size", 248320),
+        "hidden_size": tc["hidden_size"],
+        "head_dim": tc["head_dim"],
+        "num_attention_heads": tc["num_attention_heads"],
+        "num_key_value_heads": tc["num_key_value_heads"],
+        "num_hidden_layers": tc["num_hidden_layers"],
+        "vocab_size": tc["vocab_size"],
         "num_experts": tc.get("num_experts", 0),
         "num_experts_per_tok": tc.get("num_experts_per_tok", 0),
         "moe_intermediate_size": tc.get("moe_intermediate_size", 0),

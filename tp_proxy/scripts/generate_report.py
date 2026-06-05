@@ -55,12 +55,12 @@ def load_model_config(model_dir: str) -> dict | None:
             tc = cfg.get("text_config", cfg)
             qc = cfg.get("quantization_config", {})
             return {
-                "hidden_size": tc.get("hidden_size", 2048),
-                "num_hidden_layers": tc.get("num_hidden_layers", 24),
-                "num_attention_heads": tc.get("num_attention_heads", 16),
-                "num_key_value_heads": tc.get("num_key_value_heads", 2),
-                "head_dim": tc.get("head_dim", 256),
-                "vocab_size": tc.get("vocab_size", 248320),
+                "hidden_size": tc["hidden_size"],
+                "num_hidden_layers": tc["num_hidden_layers"],
+                "num_attention_heads": tc["num_attention_heads"],
+                "num_key_value_heads": tc["num_key_value_heads"],
+                "head_dim": tc["head_dim"],
+                "vocab_size": tc["vocab_size"],
                 "num_experts": tc.get("num_experts", 0),
                 "num_experts_per_tok": tc.get("num_experts_per_tok", 0),
                 "moe_intermediate_size": tc.get("moe_intermediate_size", 0),
@@ -132,8 +132,12 @@ def compute_prefill_flops(cfg: dict, seq_len: int, tp_size: int = 1,
         lin_proj_flops += 2 * S * H * lin_v_dim  # z proj
         lin_proj_flops += 2 * S * lin_v_dim * H  # out proj
         lin_attn_flops = lin_proj_flops
+    elif n_lin_layers > 0:
+        print(f"ERROR: model has {n_lin_layers} linear attention layers but "
+              f"no linear attention config (linear_num_key_heads=0)")
+        sys.exit(1)
     else:
-        lin_attn_flops = full_attn_flops  # fallback
+        lin_attn_flops = 0
 
     # --- MoE / FFN FLOPs per layer ---
     if n_experts > 0 and n_active > 0:
@@ -218,8 +222,12 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1,
     if lin_k > 0:
         lin_params = (lin_k * 2 + lin_v) * H + lin_v * H + lin_v * H  # qkv + z + out
         attn_bytes_lin = lin_params * bpp_attn / tp_size
+    elif n_lin_layers > 0:
+        print(f"ERROR: model has {n_lin_layers} linear attention layers but "
+              f"no linear attention config (linear_num_key_heads=0)")
+        sys.exit(1)
     else:
-        attn_bytes_lin = attn_bytes_full
+        attn_bytes_lin = 0
 
     # MoE / FFN
     if n_experts > 0 and n_active > 0:
@@ -275,20 +283,24 @@ def apply_comm_model(data: dict, bw_gbps: float, lat_us: float,
         return
 
     tp = data["tp_size"]
-    original_layers = data.get("original_layers", 1)
-    layer_scale = data.get("layer_scale", 1)
-    hidden = data.get("hidden_size", 0)
-    tail = data.get("tail", {})
+    for key in ("original_layers", "layer_scale", "hidden_size", "tail"):
+        if key not in data:
+            print(f"  ERROR: '{key}' missing in compensated.json, re-run compensate_ppu.py")
+            sys.exit(1)
 
-    if not hidden:
-        print(f"  ERROR: no hidden_size in compensated.json, re-run compensate_ppu.py")
-        return
-    if not tail.get("encoder_ms"):
-        return
+    original_layers = data["original_layers"]
+    layer_scale = data["layer_scale"]
+    hidden = data["hidden_size"]
+    tail = data["tail"]
+
+    for key in ("encoder_ms", "lm_head_ms", "sampling_ms"):
+        if key not in tail:
+            print(f"  ERROR: tail.{key} missing in compensated.json, re-run compensate_ppu.py")
+            sys.exit(1)
 
     encoder_ms = tail["encoder_ms"]
-    lm_head_ms = tail.get("lm_head_ms", 0)
-    sampling_ms = tail.get("sampling_ms", 0)
+    lm_head_ms = tail["lm_head_ms"]
+    sampling_ms = tail["sampling_ms"]
     lm_head_final = lm_head_ms / tp
 
     n_ops = original_layers * 2

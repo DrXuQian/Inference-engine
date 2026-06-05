@@ -86,10 +86,10 @@ def estimate_layer_size(model_dir: str, num_layers: int) -> tuple[float, float]:
 def _estimate_from_config(model_dir: str, num_layers: int) -> tuple[float, float]:
     """Rough estimate from config when safetensors aren't available."""
     tc, _ = load_config(model_dir)
-    hidden = tc.get("hidden_size", 2048)
-    vocab = tc.get("vocab_size", 248320)
-    n_experts = tc.get("num_experts", 256)
-    moe_inter = tc.get("moe_intermediate_size", 512)
+    hidden = tc["hidden_size"]
+    vocab = tc["vocab_size"]
+    n_experts = tc["num_experts"]
+    moe_inter = tc["moe_intermediate_size"]
 
     # Per-layer: attention (4 projections) + MoE experts + shared expert + norms
     attn_bytes = 4 * hidden * hidden * 2  # bf16
@@ -133,13 +133,13 @@ def estimate_kv_cache(model_dir: str, num_layers: int, tp_size: int,
     n_linear_attn = num_layers - n_full_attn
 
     # Full attention KV cache: 2 (K+V) × n_kv_heads/tp × head_dim × 2 bytes × seq_len
-    n_kv_heads = tc.get("num_key_value_heads", 2)
-    head_dim = tc.get("head_dim", 256)
+    n_kv_heads = tc["num_key_value_heads"]
+    head_dim = tc["head_dim"]
     kv_per_token_per_layer = 2 * (n_kv_heads // max(tp_size, 1)) * head_dim * 2  # bf16
 
     # Linear attention state cache: much smaller (fixed per layer, not per token)
     # Mamba state: d_model × d_state × 2 bytes ≈ hidden × 16 × 2
-    hidden = tc.get("hidden_size", 2048)
+    hidden = tc["hidden_size"]
     lin_state_per_layer = hidden * 16 * 2  # approximate
 
     kv_total = (n_full_attn * kv_per_token_per_layer * max_seq_len +

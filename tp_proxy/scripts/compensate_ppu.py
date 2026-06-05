@@ -43,18 +43,20 @@ def load_model_config(model_dir: str) -> dict:
         "hidden_size": tc["hidden_size"],
         "vocab_size": tc["vocab_size"],
         "num_hidden_layers": n_layers,
-        "num_key_value_heads": tc.get("num_key_value_heads", 2),
-        "head_dim": tc.get("head_dim", 256),
+        "num_key_value_heads": tc["num_key_value_heads"],
+        "head_dim": tc["head_dim"],
         "n_full_attn_layers": n_full,
     }
 
 
 def load_meta(model_dir: str) -> dict | None:
-    for d in [model_dir, os.path.dirname(model_dir)]:
+    d = model_dir
+    for _ in range(3):
         p = os.path.join(d, "split_meta.json")
         if os.path.exists(p):
             with open(p) as f:
                 return json.load(f)
+        d = os.path.dirname(d)
     return None
 
 
@@ -365,9 +367,21 @@ def main():
     hidden = cfg["hidden_size"]
     vocab = cfg["vocab_size"]
 
-    tp_size = args.tp_size or (meta and meta.get("tp_size")) or 1
-    pruned = args.pruned_layers or (meta and meta.get("pruned_layers")) or cfg["num_hidden_layers"]
-    original = args.original_layers or (meta and meta.get("original_layers")) or pruned
+    tp_size = args.tp_size or (meta and meta.get("tp_size"))
+    pruned = args.pruned_layers or (meta and meta.get("pruned_layers"))
+    original = args.original_layers or (meta and meta.get("original_layers"))
+
+    if not tp_size or not pruned or not original:
+        missing = []
+        if not tp_size: missing.append("tp_size")
+        if not pruned: missing.append("pruned_layers")
+        if not original: missing.append("original_layers")
+        print(f"ERROR: missing {', '.join(missing)} — "
+              f"no split_meta.json found near {args.model_dir}")
+        print(f"  Either pass --tp-size/--pruned-layers/--original-layers explicitly,")
+        print(f"  or ensure split_meta.json exists in the model directory tree.")
+        sys.exit(1)
+
     layer_scale = original / pruned if pruned > 0 else 1
 
     output_len = args.output_len
@@ -381,22 +395,37 @@ def main():
     if args.comm_json:
         with open(args.comm_json) as f:
             comm = json.load(f)
-        # Prefer kernel time from trace (if available), fallback to wall clock
-        decode_comm = comm.get("decode_total_kernel_ms",
-                               comm.get("decode_total_per_step_ms",
-                                        comm.get("total_per_step_ms", 0)))
-        prefill_comm = comm.get("prefill_total_kernel_ms",
-                                comm.get("prefill_total_per_step_ms", decode_comm))
+        if "decode_total_kernel_ms" in comm:
+            decode_comm = comm["decode_total_kernel_ms"]
+            source = "kernel"
+        elif "decode_total_per_step_ms" in comm:
+            decode_comm = comm["decode_total_per_step_ms"]
+            source = "wall"
+        elif "total_per_step_ms" in comm:
+            decode_comm = comm["total_per_step_ms"]
+            source = "wall"
+        else:
+            print(f"ERROR: comm.json missing decode timing keys "
+                  f"(decode_total_kernel_ms / decode_total_per_step_ms / total_per_step_ms)")
+            print(f"  Keys found: {list(comm.keys())}")
+            sys.exit(1)
+
+        if "prefill_total_kernel_ms" in comm:
+            prefill_comm = comm["prefill_total_kernel_ms"]
+        elif "prefill_total_per_step_ms" in comm:
+            prefill_comm = comm["prefill_total_per_step_ms"]
+        else:
+            prefill_comm = decode_comm
+
         comm["decode_comm_ms"] = decode_comm
         comm["prefill_comm_ms"] = prefill_comm
-        source = "kernel" if "decode_total_kernel_ms" in comm else "wall"
         print(f"=== a) Communication (from {args.comm_json}, {source}) ===")
         print(f"  Decode:  {decode_comm:.3f} ms/step")
         print(f"  Prefill: {prefill_comm:.3f} ms/step")
     elif tp_size > 1:
-        print("=== a) Communication: no --comm-json, using 0 ===")
-        print("    Run comm_scenarios first to measure AR/AG latency")
-        comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
+        print(f"ERROR: TP={tp_size} requires --comm-json for communication overhead.")
+        print(f"  Run comm_scenarios first to measure AR/AG latency.")
+        sys.exit(1)
     else:
         print("=== a) Communication: TP=1, skip ===")
         comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
@@ -412,12 +441,12 @@ def main():
     print(f"  lm_head: {tail['lm_head_ms']:.4f} ms, "
           f"sampling: {tail['sampling_ms']:.4f} ms")
 
-    lm_head_ms = tail.get("lm_head_ms", 0)
-    sampling_ms = tail.get("sampling_ms", 0)
-    encoder_ms = tail.get("encoder_ms", 0)
-    overhead_ms = tail.get("overhead_ms", 0)
+    lm_head_ms = tail["lm_head_ms"]
+    sampling_ms = tail["sampling_ms"]
+    encoder_ms = tail["encoder_ms"]
+    overhead_ms = tail["overhead_ms"]
     batch = args.batch_size
-    actual_bs = tail.get("actual_decode_bs", 0)
+    actual_bs = tail["actual_decode_bs"]
     if actual_bs > 0 and actual_bs != batch:
         print(f"ERROR: requested batch={batch} but trace shows actual decode bs={actual_bs}")
         print(f"  vLLM scheduler could not batch — likely insufficient KV cache memory.")
@@ -481,8 +510,8 @@ def main():
     print("-" * 65)
 
     # Create results from trace data
-    trace_ttft = tail.get("ttft_ms", 0)
-    trace_tpot = tail.get("tpot_ms", 0)
+    trace_ttft = tail["ttft_ms"]
+    trace_tpot = tail["tpot_ms"]
     print(f"  (trace: TTFT={trace_ttft:.2f}ms, TPOT={trace_tpot:.4f}ms)")
     results_list = [{
         "input_len": args.input_len,
@@ -499,8 +528,8 @@ def main():
         il = r.get("input_len", 0)
         output_tokens = r.get("output_tokens", output_len)
 
-        raw_tpot = tail.get("tpot_ms", 0)
-        raw_ttft = tail.get("ttft_ms", 0)
+        raw_tpot = tail["tpot_ms"]
+        raw_ttft = tail["ttft_ms"]
 
         # comp_TPOT = encoder × scale + lm_head/tp + sampling + comm
         comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + decode_comm
