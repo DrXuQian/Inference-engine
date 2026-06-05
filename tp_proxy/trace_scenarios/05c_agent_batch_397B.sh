@@ -8,7 +8,7 @@ INPUT_LEN=${INPUT_LEN:-102400}
 OUTPUT_LEN=${OUTPUT_LEN:-3072}
 BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
 
-for TP in 2; do
+for TP in 2 4; do
     echo "--- TP=$TP ---"
     TP_DIR="$OUT/tp${TP}"
 

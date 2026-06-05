@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 BASE=./results/05b_agent_hit_397B
 
-for TP in 2; do
+for TP in 2 4; do
     echo "--- TP=$TP ---"
     MODEL=${MODEL:-$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE/tp${TP}/model" 2>/dev/null || echo "")}
     if [ -z "$MODEL" ]; then

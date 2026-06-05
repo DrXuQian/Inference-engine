@@ -8,7 +8,7 @@ OUT=./results/05c_agent_batch_397B
 
 echo "=== Split/Prune: Agent Batch Sweep: Qwen3.5-397B-A17B ==="
 
-for TP in 2; do
+for TP in 2 4; do
     echo ""
     echo "--- TP=$TP ---"
     TP_DIR="$OUT/tp${TP}"
