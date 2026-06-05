@@ -247,11 +247,11 @@ def measure_tail_from_trace(sqlite_path: str,
         print(f"  WARNING: '{lm_head_kernel}' not found in gaps")
         selected = filtered
 
-    s = selected[-1]
+    s = selected[len(selected) // 2]
     encoder_ms = s["encoder_wall"] / 1e6
     tail_ms = s["tail_wall"] / 1e6
     lm_head_ms = s["lm_head_dur"] / 1e6
-    sampling_ms = max(tail_ms - lm_head_ms, 0)
+    sampling_ms_wall = max(tail_ms - lm_head_ms, 0)
     tpot_ms = s["step_wall"] / 1e6
 
     # Prefill: extract from NVTX "prefill" marker if available,
@@ -339,9 +339,18 @@ def measure_tail_from_trace(sqlite_path: str,
         "tail_other_ms": round(gap_other_ns / 1e6, 4),     # sampling etc
     }
 
+    # Use kernel duration for sampling (not wall clock) to avoid
+    # inflated values from CPU scheduling, post-inference cleanup, etc.
+    sampling_ms_kernel = kernel_breakdown["tail_other_ms"]
+    if sampling_ms_wall > 10 * max(sampling_ms_kernel, 0.01):
+        print(f"\n  WARNING: tail wall={sampling_ms_wall:.2f}ms >> kernel={sampling_ms_kernel:.4f}ms"
+              f" (wall includes CPU overhead / cleanup, using kernel time)")
+    sampling_ms = sampling_ms_kernel
+
     gf = kernel_breakdown["enc_gemm_frac"]
     print(f"\n  encoder (graph wall): {encoder_ms:.4f} ms")
-    print(f"  tail (to next graph): {tail_ms:.4f} ms")
+    print(f"  tail wall clock:      {tail_ms:.4f} ms")
+    print(f"  tail kernel time:     {(sampling_ms + lm_head_ms):.4f} ms")
     print(f"  TPOT (step wall):     {tpot_ms:.4f} ms")
     print(f"  TTFT (prefill):       {ttft_ms:.2f} ms")
     print(f"  Encoder kernel breakdown (×layer_scale):")
@@ -350,7 +359,7 @@ def measure_tail_from_trace(sqlite_path: str,
     print(f"    other:                {kernel_breakdown['enc_other_ms']:.4f} ms")
     print(f"  Tail breakdown (no layer_scale):")
     print(f"    lm_head (BF16):       {kernel_breakdown['tail_lmhead_ms']:.4f} ms")
-    print(f"    other (sampling):     {kernel_breakdown['tail_other_ms']:.4f} ms")
+    print(f"    sampling (kernel):    {sampling_ms:.4f} ms")
 
     return {
         "encoder_ms": round(encoder_ms, 4),
