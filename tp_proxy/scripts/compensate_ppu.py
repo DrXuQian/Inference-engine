@@ -33,18 +33,34 @@ import sys
 # ---------------------------------------------------------------------------
 
 def load_model_config(model_dir: str) -> dict:
-    with open(os.path.join(model_dir, "config.json")) as f:
+    cfg_path = os.path.join(model_dir, "config.json")
+    with open(cfg_path) as f:
         cfg = json.load(f)
     tc = cfg.get("text_config", cfg)
+
+    # Required fields — error loudly if absent (no silent magic-number defaults).
+    required = ["hidden_size", "vocab_size", "num_hidden_layers", "num_attention_heads"]
+    missing = [k for k in required if k not in tc]
+    if missing:
+        raise KeyError(f"{cfg_path}: missing required config field(s): {', '.join(missing)}")
+
     layer_types = tc.get("layer_types", [])
     n_layers = tc["num_hidden_layers"]
     n_full = sum(1 for lt in layer_types[:n_layers] if lt == "full_attention") if layer_types else n_layers
+
+    # head_dim and num_key_value_heads have well-defined HF derivations when
+    # absent (head_dim = hidden/num_heads; KV heads = attn heads for MHA).
+    # These are CORRECT, not fallbacks — but never silently assume 256 / 2.
+    n_heads = tc["num_attention_heads"]
+    head_dim = tc.get("head_dim", tc["hidden_size"] // n_heads)
+    n_kv = tc.get("num_key_value_heads", n_heads)
+
     return {
         "hidden_size": tc["hidden_size"],
         "vocab_size": tc["vocab_size"],
         "num_hidden_layers": n_layers,
-        "num_key_value_heads": tc["num_key_value_heads"],
-        "head_dim": tc["head_dim"],
+        "num_key_value_heads": n_kv,
+        "head_dim": head_dim,
         "n_full_attn_layers": n_full,
     }
 
@@ -423,12 +439,15 @@ def main():
         print(f"  Decode:  {decode_comm:.3f} ms/step")
         print(f"  Prefill: {prefill_comm:.3f} ms/step")
     elif tp_size > 1:
-        print(f"ERROR: TP={tp_size} requires --comm-json for communication overhead.")
-        print(f"  Run comm_scenarios first to measure AR/AG latency.")
-        sys.exit(1)
-    else:
-        print("=== a) Communication: TP=1, skip ===")
+        print(f"=== a) Communication: TP={tp_size}, no --comm-json ===")
+        print(f"  WARNING: communication NOT included — comp_tpot/comp_ttft are INCOMPLETE.")
+        print(f"  Either run comm_scenarios to produce comm.json (measured AR/AG),")
+        print(f"  or pass --comm-bw/--comm-latency to generate_report.py (modeled).")
+        print(f"  Marked method='none'; generate_report.py will show N/A until comm is supplied.")
         comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
+    else:
+        print("=== a) Communication: TP=1, no comm needed ===")
+        comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "tp1"}
     print()
 
     # === b) Tail from trace (lm_head + sampling) ===
@@ -447,7 +466,14 @@ def main():
     overhead_ms = tail["overhead_ms"]
     batch = args.batch_size
     actual_bs = tail["actual_decode_bs"]
-    if actual_bs > 0 and actual_bs != batch:
+    if actual_bs == 0:
+        print(f"ERROR: could not read decode batch size from trace "
+              f"(no 'bs=' NVTX marker found in decode_0).")
+        print(f"  This means patch_vllm_batch_nvtx.py did not apply during capture,")
+        print(f"  so the actual decode batch cannot be verified against requested batch={batch}.")
+        print(f"  Re-capture the trace with the NVTX batch patch applied.")
+        sys.exit(1)
+    if actual_bs != batch:
         print(f"ERROR: requested batch={batch} but trace shows actual decode bs={actual_bs}")
         print(f"  vLLM scheduler could not batch — likely insufficient KV cache memory.")
         print(f"  Increase GPU memory or reduce max_seq_len to fit batch={batch}.")

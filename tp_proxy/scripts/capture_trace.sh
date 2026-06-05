@@ -34,12 +34,21 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 def main():
     # Apply NVTX batch size patch
     patch_path = os.environ.get("PATCH_NVTX", "")
-    if patch_path and os.path.exists(patch_path):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("patch_nvtx", patch_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        mod.apply()
+    if not patch_path or not os.path.exists(patch_path):
+        print(f"ERROR: PATCH_NVTX not set or not found: {patch_path!r}", file=sys.stderr)
+        print("  The batch-size NVTX marker is required to verify decode batching.",
+              file=sys.stderr)
+        sys.exit(1)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("patch_nvtx", patch_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if not mod.apply():
+        print("ERROR: failed to apply patch_vllm_batch_nvtx — no compatible "
+              "vLLM ModelRunner found.", file=sys.stderr)
+        print("  Trace would have no 'bs=' marker and decode batch could not be "
+              "verified. Aborting.", file=sys.stderr)
+        sys.exit(1)
 
     import torch
     try:

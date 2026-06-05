@@ -38,11 +38,16 @@ def load_config(model_dir: str) -> dict:
         cfg = json.load(f)
     tc = cfg.get("text_config", cfg)
     qc = cfg.get("quantization_config", {})
+    req = ["hidden_size", "num_attention_heads", "num_hidden_layers", "vocab_size"]
+    miss = [k for k in req if k not in tc]
+    if miss:
+        raise KeyError(f"{model_dir}/config.json: missing required field(s): {', '.join(miss)}")
+    n_heads = tc["num_attention_heads"]
     return {
         "hidden_size": tc["hidden_size"],
-        "head_dim": tc["head_dim"],
-        "num_attention_heads": tc["num_attention_heads"],
-        "num_key_value_heads": tc["num_key_value_heads"],
+        "head_dim": tc.get("head_dim", tc["hidden_size"] // n_heads),
+        "num_attention_heads": n_heads,
+        "num_key_value_heads": tc.get("num_key_value_heads", n_heads),
         "num_hidden_layers": tc["num_hidden_layers"],
         "vocab_size": tc["vocab_size"],
         "num_experts": tc.get("num_experts", 0),
