@@ -168,6 +168,15 @@ def extract_decode_from_nvtx(sqlite_path: str,
     c.execute(f'SELECT "{start_col}", "{end_col}", "{text_col}" FROM "{nvtx_table}" '
               f'WHERE "{text_col}" LIKE \'%prefill%\'')
     prefill_rows = c.fetchall()
+
+    # Find inner decode step markers (from patch_vllm_batch_nvtx.py)
+    # Pattern: "decode bs=N tok=N" (v1) or "bs=N" (v0)
+    c.execute(f'SELECT "{text_col}" FROM "{nvtx_table}" '
+              f'WHERE "{start_col}" >= ? AND "{end_col}" <= ? '
+              f'AND "{text_col}" LIKE \'%bs=%\' '
+              f'ORDER BY "{start_col}" DESC LIMIT 1',
+              (nvtx_start, nvtx_end))
+    bs_row = c.fetchone()
     conn.close()
 
     all_evts = _load_kernel_events(sqlite_path)
@@ -175,6 +184,14 @@ def extract_decode_from_nvtx(sqlite_path: str,
         return None
 
     print(f"  Total kernels: {len(all_evts)}")
+
+    # Parse actual decode batch size from NVTX marker
+    actual_decode_bs = 0
+    if bs_row:
+        bs_match = _re.search(r'bs=(\d+)', bs_row[0])
+        if bs_match:
+            actual_decode_bs = int(bs_match.group(1))
+            print(f"  Actual decode batch size (from NVTX): {actual_decode_bs}")
 
     # Prefill: use the standalone "prefill" marker (exact match), not inner "prefill bs=..." markers
     ttft_ms = 0.0
@@ -307,6 +324,7 @@ def extract_decode_from_nvtx(sqlite_path: str,
         "overhead_ms": 0,
         "tail_per_step_ms": round(lm_head_ms_v + sampling_ms_v, 4),
         "kernel_breakdown": kernel_breakdown,
+        "actual_decode_bs": actual_decode_bs,
     }
 
 
@@ -399,6 +417,12 @@ def main():
     encoder_ms = tail.get("encoder_ms", 0)
     overhead_ms = tail.get("overhead_ms", 0)
     batch = args.batch_size
+    actual_bs = tail.get("actual_decode_bs", 0)
+    if actual_bs > 0 and actual_bs != batch:
+        print(f"  WARNING: requested batch={batch} but trace shows actual decode bs={actual_bs}")
+        print(f"  (vLLM scheduler could not batch — likely insufficient KV cache memory)")
+        print(f"  Using actual_decode_bs={actual_bs} for compensation")
+        batch = actual_bs
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 
@@ -524,6 +548,7 @@ def main():
         "original_layers": original,
         "layer_scale": layer_scale,
         "hidden_size": hidden,
+        "batch_size": batch,
         "communication": comm,
         "tail": tail,
         "results": compensated,
