@@ -32,24 +32,11 @@ os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 def main():
-    # Apply NVTX batch size patch
-    patch_path = os.environ.get("PATCH_NVTX", "")
-    if not patch_path or not os.path.exists(patch_path):
-        print(f"ERROR: PATCH_NVTX not set or not found: {patch_path!r}", file=sys.stderr)
-        print("  The batch-size NVTX marker is required to verify decode batching.",
-              file=sys.stderr)
-        sys.exit(1)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("patch_nvtx", patch_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    if not mod.apply():
-        print("ERROR: failed to apply patch_vllm_batch_nvtx — no compatible "
-              "vLLM ModelRunner found.", file=sys.stderr)
-        print("  Trace would have no 'bs=' marker and decode batch could not be "
-              "verified. Aborting.", file=sys.stderr)
-        sys.exit(1)
-
+    # The NVTX batch-size patch is applied by _sitepatch/usercustomize.py, which
+    # this script puts on PYTHONPATH. Python's site machinery imports usercustomize
+    # at startup of EVERY interpreter — this main process AND the engine / TP worker
+    # processes vLLM spawns — so the patch reaches GPUModelRunner.execute_model
+    # wherever it actually runs (under vLLM V1 it runs in a spawned child, not here).
     import torch
     try:
         import nvtx
@@ -123,6 +110,9 @@ echo "============================================"
 echo "[1/3] Running offline bench under profiler..."
 PATCH_NVTX="$SCRIPT_DIR/patch_vllm_batch_nvtx.py"
 export PATCH_NVTX
+# usercustomize in _sitepatch auto-applies the patch in every interpreter,
+# including vLLM's spawned engine/TP-worker processes where execute_model runs.
+export PYTHONPATH="$SCRIPT_DIR/_sitepatch${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ "$PLATFORM" = "ppu" ]; then
     asys profile -o "$OUT_DIR/trace.report" -f true \
@@ -169,6 +159,21 @@ if [ "$PLATFORM" = "ppu" ]; then
 else
     nsys stats -r cuda_gpu_kern_sum --format csv --force-export=true \
         "$OUT_DIR/trace.nsys-rep" > /dev/null 2>&1
+fi
+
+# Verify the requested multi-batch decode ACTUALLY ran. Submitting N prompts does
+# not guarantee a batch=N decode — vLLM may split it under KV-cache pressure. For
+# batch>=2 the trace must show decode bs==BATCH_SIZE, else it is unusable.
+if [ "$BATCH_SIZE" -ge 2 ] && [ -f "$OUT_DIR/trace.sqlite" ]; then
+    echo ""
+    echo "[verify] confirming decode ran at batch=$BATCH_SIZE ..."
+    if ! python3 "$SCRIPT_DIR/inspect_nvtx.py" "$OUT_DIR/trace.sqlite" --expect "$BATCH_SIZE"; then
+        echo "ERROR: trace did NOT achieve decode batch=$BATCH_SIZE (see above)."
+        echo "  Either vLLM split the batch (raise gpu_memory_utilization / lower"
+        echo "  max_model_len / set max_num_seqs), or the NVTX patch did not load."
+        echo "  This trace must NOT be compensated as batch=$BATCH_SIZE."
+        exit 1
+    fi
 fi
 
 echo ""
