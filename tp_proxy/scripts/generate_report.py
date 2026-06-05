@@ -384,10 +384,10 @@ def main():
                     help="Source platform peak BW GB/s (for rescaling decode)")
     ap.add_argument("--tgt-bw", type=float, default=0,
                     help="Target platform peak BW GB/s")
-    ap.add_argument("--comm-bw", type=float, default=0,
-                    help="Target interconnect bandwidth GB/s (overrides measured comm)")
-    ap.add_argument("--comm-latency", type=float, default=0,
-                    help="Fixed per-operation latency in microseconds")
+    ap.add_argument("--comm-bw", type=str, default="",
+                    help="Interconnect BW in GB/s. Single value or per-TP: '2:100,4:50'")
+    ap.add_argument("--comm-latency", type=str, default="",
+                    help="Fixed per-op latency in us. Single value or per-TP: '2:3,4:5'")
     ap.add_argument("--label", choices=["ai_station", "vla"], default=None,
                     help="Filter scenarios: ai_station=01-06 only, vla=07 only")
     args = ap.parse_args()
@@ -395,16 +395,39 @@ def main():
     fmt = args.format
     show_ai = args.label != "vla"
     show_vla = args.label != "ai_station"
-    comm_override = args.comm_bw > 0
+
+    def _parse_tp_param(s: str) -> dict[int, float]:
+        if not s:
+            return {}
+        try:
+            return {0: float(s)}
+        except ValueError:
+            return {int(k): float(v) for k, v in
+                    (p.split(":") for p in s.split(","))}
+
+    comm_bw_map = _parse_tp_param(args.comm_bw)
+    comm_lat_map = _parse_tp_param(args.comm_latency)
+    comm_override = bool(comm_bw_map)
 
     def _load(path, input_len=0, batch=1):
         d = load_json(path)
         if d and comm_override:
-            apply_comm_model(d, args.comm_bw, args.comm_latency, input_len, batch)
+            tp = d.get("tp_size", 1)
+            bw = comm_bw_map.get(tp, comm_bw_map.get(0, 0))
+            lat = comm_lat_map.get(tp, comm_lat_map.get(0, 0))
+            if bw > 0:
+                apply_comm_model(d, bw, lat, input_len, batch)
         return d
 
     if comm_override and fmt == "markdown":
-        print(f"\n> **Communication model**: latency = {args.comm_latency}us + data / {args.comm_bw} GB/s  ")
+        parts = []
+        for tp in sorted(k for k in comm_bw_map if k > 0):
+            bw = comm_bw_map.get(tp, 0)
+            lat = comm_lat_map.get(tp, 0)
+            parts.append(f"TP={tp}: {lat}us + data/{bw}GB/s")
+        if 0 in comm_bw_map:
+            parts.append(f"default: {comm_lat_map.get(0,0)}us + data/{comm_bw_map[0]}GB/s")
+        print(f"\n> **Communication model**: {'; '.join(parts)}  ")
         print(f"> (2 AllReduce per layer, bf16 activations)\n")
 
     if fmt == "csv":
