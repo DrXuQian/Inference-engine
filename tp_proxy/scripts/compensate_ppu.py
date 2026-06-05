@@ -221,6 +221,8 @@ def measure_tail_from_trace(sqlite_path: str,
                 "step_wall": gap_end - g_start,
                 "lm_head_dur": lm_dur,
                 "graph_kernels": len(g),
+                "_graph_evts": g,
+                "_gap_evts": gap,
             })
 
     if not steps:
@@ -288,24 +290,13 @@ def measure_tail_from_trace(sqlite_path: str,
         else:
             print(f"\n  WARNING: no mode-count graph found for prefill")
 
-    # Kernel classification for the selected decode step
-    # gemm_int4: weight-bound GEMM that can be quantized to INT4 (attn proj, MoE FFN)
-    # lm_head: gemvt (lm_head stays BF16, not quantized)
-    # fa: FlashAttention (reads KV cache, not weight)
-    # other: layernorm, softmax, elementwise (compute, not weight)
+    # Kernel classification for the SELECTED decode step (same as s above)
     import re as _re
     gemm_re = _re.compile(r"deep_gemm|GemmKernel|gemm_ktype|cutlass|cublas|cublasLt|marlin|moe_wna16|moe.*gemm|xmma|batched_gemvt", _re.IGNORECASE)
-    lmhead_re = _re.compile(r"gemvt_op", _re.IGNORECASE)  # specific: not matching batched_gemvt
     fa_re = _re.compile(r"flash_fwd|flash_bwd|fmha|FlashAttn", _re.IGNORECASE)
 
-    # Collect kernels from last consistent decode step, split graph vs gap
-    graph_kernels = []
-    gap_kernels = []
-    for si in range(len(segs) - 1):
-        if segs[si][0] == "graph" and segs[si+1][0] == "gap":
-            if len(segs[si][1]) == mode:
-                graph_kernels = segs[si][1]
-                gap_kernels = segs[si+1][1]
+    graph_kernels = s["_graph_evts"]
+    gap_kernels = s["_gap_evts"]
 
     # Classify encoder (graph) kernels
     enc_gemm_ns = enc_fa_ns = enc_other_ns = 0
@@ -318,11 +309,11 @@ def measure_tail_from_trace(sqlite_path: str,
         else:
             enc_other_ns += dur
 
-    # Classify gap (tail) kernels
+    # Classify gap (tail) kernels — use lm_head_kernel from CLI (not hardcoded regex)
     gap_lmhead_ns = gap_other_ns = 0
     for evt in gap_kernels:
         name, dur = evt[3], evt[1]
-        if lmhead_re.search(name):
+        if lm_head_kernel in name:
             gap_lmhead_ns += dur
         else:
             gap_other_ns += dur
