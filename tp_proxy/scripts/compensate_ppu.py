@@ -466,18 +466,30 @@ def main():
     overhead_ms = tail["overhead_ms"]
     batch = args.batch_size
     actual_bs = tail["actual_decode_bs"]
-    if actual_bs == 0:
+    if actual_bs > 0:
+        # Marker present — verify it matches the requested batch.
+        if actual_bs != batch:
+            print(f"ERROR: requested batch={batch} but trace shows actual decode bs={actual_bs}")
+            print(f"  vLLM scheduler could not batch — likely insufficient KV cache memory.")
+            print(f"  Increase GPU memory or reduce max_seq_len to fit batch={batch}.")
+            sys.exit(1)
+        print(f"  Verified decode batch = {actual_bs} (matches requested batch={batch})")
+    elif batch >= 2:
+        # batch>=2 REQUIRES verification: submitting N prompts does not guarantee
+        # a batch=N decode (KV cache memory may force the scheduler to split).
+        # No marker => cannot confirm batching actually happened => error.
         print(f"ERROR: could not read decode batch size from trace "
-              f"(no 'bs=' NVTX marker found in decode_0).")
-        print(f"  This means patch_vllm_batch_nvtx.py did not apply during capture,")
-        print(f"  so the actual decode batch cannot be verified against requested batch={batch}.")
-        print(f"  Re-capture the trace with the NVTX batch patch applied.")
+              f"(no 'bs=' NVTX marker in decode_0), but batch={batch} was requested.")
+        print(f"  Batching is NOT guaranteed — vLLM may split into smaller batches.")
+        print(f"  The NVTX batch marker is required to verify batch={batch} actually ran.")
+        print(f"  Re-capture with patch_vllm_batch_nvtx.py applied "
+              f"(run scripts/inspect_nvtx.py on the trace to check).")
         sys.exit(1)
-    if actual_bs != batch:
-        print(f"ERROR: requested batch={batch} but trace shows actual decode bs={actual_bs}")
-        print(f"  vLLM scheduler could not batch — likely insufficient KV cache memory.")
-        print(f"  Increase GPU memory or reduce max_seq_len to fit batch={batch}.")
-        sys.exit(1)
+    else:
+        # batch==1: capture_trace.sh submits exactly 1 prompt per generate() round,
+        # so the decode batch is structurally 1 regardless of the marker. Not a
+        # fallback — there is no larger batch a single request could decode at.
+        print(f"  No NVTX bs marker; batch=1 is structural (1 prompt/round) — proceeding.")
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 
