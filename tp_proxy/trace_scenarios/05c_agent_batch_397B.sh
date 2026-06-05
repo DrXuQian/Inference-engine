@@ -8,7 +8,6 @@ INPUT_LEN=${INPUT_LEN:-102400}
 OUTPUT_LEN=${OUTPUT_LEN:-3072}
 BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
 
-FAILED=""
 for TP in 2 4; do
     echo "--- TP=$TP ---"
     TP_DIR="$OUT/tp${TP}"
@@ -26,19 +25,7 @@ for TP in 2 4; do
         echo "  [TP=$TP batch=$B] Capturing trace..."
         TRACE_DIR="$TP_DIR/trace_batch${B}"
         NUM_PROMPTS=$((B * 3 + 2))
-        # 6th arg = batch_size; capture_trace.sh verifies decode bs==B for B>=2.
-        # Continue the sweep on failure so we still capture the batches that work.
-        if bash "$SCRIPT_DIR/capture_trace.sh" "$PRUNED" $INPUT_LEN $OUTPUT_LEN "$TRACE_DIR" $NUM_PROMPTS $B; then
-            echo "  [TP=$TP batch=$B] OK"
-        else
-            echo "  [TP=$TP batch=$B] FAILED — decode did not run at batch=$B (skipped)"
-            FAILED="$FAILED tp${TP}/b${B}"
-        fi
+        # 6th arg = batch_size
+        bash "$SCRIPT_DIR/capture_trace.sh" "$PRUNED" $INPUT_LEN $OUTPUT_LEN "$TRACE_DIR" $NUM_PROMPTS $B
     done
 done
-
-if [ -n "$FAILED" ]; then
-    echo ""
-    echo "Batches that did NOT achieve the requested decode batch:$FAILED"
-    echo "  (vLLM split them — raise gpu_memory_utilization / lower max_model_len / set max_num_seqs)"
-fi

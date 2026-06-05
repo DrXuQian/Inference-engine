@@ -54,19 +54,12 @@ def load_model_config(model_dir: str) -> dict | None:
                 cfg = json.load(f)
             tc = cfg.get("text_config", cfg)
             qc = cfg.get("quantization_config", {})
-            # Required — error loudly if absent (no silent magic-number defaults).
-            req = ["hidden_size", "num_hidden_layers", "num_attention_heads", "vocab_size"]
-            miss = [k for k in req if k not in tc]
-            if miss:
-                raise KeyError(f"{p}: missing required config field(s): {', '.join(miss)}")
-            # head_dim / num_key_value_heads have correct HF derivations when absent.
-            n_heads = tc["num_attention_heads"]
             return {
                 "hidden_size": tc["hidden_size"],
                 "num_hidden_layers": tc["num_hidden_layers"],
-                "num_attention_heads": n_heads,
-                "num_key_value_heads": tc.get("num_key_value_heads", n_heads),
-                "head_dim": tc.get("head_dim", tc["hidden_size"] // n_heads),
+                "num_attention_heads": tc["num_attention_heads"],
+                "num_key_value_heads": tc["num_key_value_heads"],
+                "head_dim": tc["head_dim"],
                 "vocab_size": tc["vocab_size"],
                 "num_experts": tc.get("num_experts", 0),
                 "num_experts_per_tok": tc.get("num_experts_per_tok", 0),
@@ -347,16 +340,6 @@ def apply_comm_model(data: dict, bw_gbps: float, lat_us: float,
 
 def get_metrics(data: dict) -> dict | None:
     """Extract comp_ttft, comp_tpot, tps, total from compensated json."""
-    # A TP>1 result whose communication was never supplied (neither a measured
-    # comm.json at compensate time nor a modeled --comm-bw at report time) has
-    # comm=0 baked into comp_tpot/comp_ttft — an INCOMPLETE number. Refuse to
-    # emit it as if it were real; show N/A instead (no silent wrong result).
-    if data.get("tp_size", 1) > 1 and data.get("communication", {}).get("method") == "none":
-        print(f"  WARNING: TP={data['tp_size']} result has no communication "
-              f"(method='none') — showing N/A. Supply comm.json at compensate time "
-              f"or --comm-bw/--comm-latency at report time.")
-        return None
-
     results = data.get("results", [])
     # Take first non-error result (or average if multiple input_lens)
     valid = [r for r in results if "error" not in r and "comp_tpot_ms" in r]

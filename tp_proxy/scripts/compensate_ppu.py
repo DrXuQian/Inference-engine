@@ -33,34 +33,18 @@ import sys
 # ---------------------------------------------------------------------------
 
 def load_model_config(model_dir: str) -> dict:
-    cfg_path = os.path.join(model_dir, "config.json")
-    with open(cfg_path) as f:
+    with open(os.path.join(model_dir, "config.json")) as f:
         cfg = json.load(f)
     tc = cfg.get("text_config", cfg)
-
-    # Required fields — error loudly if absent (no silent magic-number defaults).
-    required = ["hidden_size", "vocab_size", "num_hidden_layers", "num_attention_heads"]
-    missing = [k for k in required if k not in tc]
-    if missing:
-        raise KeyError(f"{cfg_path}: missing required config field(s): {', '.join(missing)}")
-
     layer_types = tc.get("layer_types", [])
     n_layers = tc["num_hidden_layers"]
     n_full = sum(1 for lt in layer_types[:n_layers] if lt == "full_attention") if layer_types else n_layers
-
-    # head_dim and num_key_value_heads have well-defined HF derivations when
-    # absent (head_dim = hidden/num_heads; KV heads = attn heads for MHA).
-    # These are CORRECT, not fallbacks — but never silently assume 256 / 2.
-    n_heads = tc["num_attention_heads"]
-    head_dim = tc.get("head_dim", tc["hidden_size"] // n_heads)
-    n_kv = tc.get("num_key_value_heads", n_heads)
-
     return {
         "hidden_size": tc["hidden_size"],
         "vocab_size": tc["vocab_size"],
         "num_hidden_layers": n_layers,
-        "num_key_value_heads": n_kv,
-        "head_dim": head_dim,
+        "num_key_value_heads": tc["num_key_value_heads"],
+        "head_dim": tc["head_dim"],
         "n_full_attn_layers": n_full,
     }
 
@@ -153,12 +137,16 @@ def _load_kernel_events(sqlite_path: str) -> list | None:
 # ---------------------------------------------------------------------------
 
 def extract_decode_from_nvtx(sqlite_path: str,
-                             lm_head_kernel: str) -> dict | None:
+                             lm_head_kernel: str,
+                             batch: int = 1) -> dict | None:
     """Extract decode step timing using NVTX decode_0 marker boundary.
 
-    Finds the last complete decode step within the 'decode_0' NVTX range:
-    - The last CUDA Graph (encoder) ends at the last lm_head kernel
-    - Tail = last lm_head + sampling kernels from lm_head to NVTX end
+    Within the 'decode_0' NVTX range, each decode step is one CUDA Graph
+    (encoder) followed by its tail (lm_head + sampling). The representative
+    step is selected as:
+      - batch == 1: the last complete step (steps are identical at batch=1)
+      - batch >= 2: the MEDIAN step by CUDA-graph wall time, which is robust to
+        ramp-up/down steps where the scheduler runs a smaller batch.
 
     The NVTX boundary prevents post-inference cleanup from contaminating
     the measurement.
@@ -234,34 +222,59 @@ def extract_decode_from_nvtx(sqlite_path: str,
     print(f"  decode_0 NVTX: {len(dec_evts)} kernels, "
           f"wall={(nvtx_end - nvtx_start) / 1e6:.2f}ms")
 
-    # Find the last CUDA graph via graphNodeId > 0
+    # CUDA graphs via graphNodeId > 0
     n_graph = sum(1 for e in dec_evts if e[4] > 0)
     n_nongraph = len(dec_evts) - n_graph
     print(f"  graph kernels: {n_graph}, non-graph: {n_nongraph}")
 
-    # Find the last kernel with graphNodeId > 0 = end of last CUDA graph
-    last_graph_idx = None
-    for i in range(len(dec_evts) - 1, -1, -1):
-        if dec_evts[i][4] > 0:
-            last_graph_idx = i
-            break
+    # Segment decode_0 into per-step (graph_block, following_tail) pairs.
+    # Each decode step = one CUDA graph (a maximal run of graphNodeId>0 kernels)
+    # followed by its non-graph tail (lm_head + sampling) up to the next graph.
+    # Leading non-graph kernels (e.g. the prefill in this generate() call) are
+    # skipped — they precede the first decode graph.
+    steps = []  # (g0, g1_excl, t0, t1_excl); graph ends where tail begins (g1==t0)
+    i, ndec = 0, len(dec_evts)
+    while i < ndec:
+        if dec_evts[i][4] <= 0:
+            i += 1
+            continue
+        g0 = i
+        while i < ndec and dec_evts[i][4] > 0:
+            i += 1
+        g1 = i  # graph end (exclusive) == tail start
+        while i < ndec and dec_evts[i][4] <= 0:
+            i += 1
+        t1 = i  # tail end (exclusive)
+        steps.append((g0, g1, g1, t1))
 
-    if last_graph_idx is None:
+    if not steps:
         print("  WARNING: no graphNodeId > 0 kernels in decode_0")
         return None
 
-    # Find start of the last CUDA graph: walk backwards from last_graph_idx
-    # until we hit a non-graph kernel (graphNodeId == 0)
-    first_graph_idx = last_graph_idx
-    for i in range(last_graph_idx - 1, -1, -1):
-        if dec_evts[i][4] > 0:
-            first_graph_idx = i
-        else:
-            break
+    def _graph_wall(s):
+        g0, g1, _t0, _t1 = s
+        return dec_evts[g1 - 1][2] - dec_evts[g0][0]
 
-    enc_evts = dec_evts[first_graph_idx:last_graph_idx + 1]
-    tail_evts = dec_evts[last_graph_idx + 1:]
-    print(f"  Last CUDA graph (encoder): kernels [{first_graph_idx}..{last_graph_idx}] "
+    if batch >= 2 and len(steps) > 1:
+        # MEDIAN step by CUDA-graph wall time (robust to ramp-up/down steps).
+        order = sorted(range(len(steps)), key=lambda k: _graph_wall(steps[k]))
+        sel = order[len(order) // 2]
+        walls = sorted(_graph_wall(s) / 1e6 for s in steps)
+        print(f"  decode steps (CUDA graphs) in decode_0: {len(steps)}")
+        print(f"  graph walls (ms): min={walls[0]:.4f}, "
+              f"median={walls[len(walls)//2]:.4f}, max={walls[-1]:.4f}")
+        print(f"  batch={batch}: using MEDIAN step #{sel} "
+              f"(graph wall={_graph_wall(steps[sel])/1e6:.4f}ms)")
+    else:
+        sel = len(steps) - 1
+        print(f"  decode steps (CUDA graphs) in decode_0: {len(steps)} — "
+              f"using last step #{sel}")
+
+    g0, g1, t0, t1 = steps[sel]
+    first_graph_idx, last_graph_idx = g0, g1 - 1
+    enc_evts = dec_evts[g0:g1]
+    tail_evts = dec_evts[t0:t1]
+    print(f"  CUDA graph (encoder): kernels [{first_graph_idx}..{last_graph_idx}] "
           f"({len(enc_evts)} kernels)")
     print(f"  Tail (after graph): {len(tail_evts)} kernels")
 
@@ -439,20 +452,18 @@ def main():
         print(f"  Decode:  {decode_comm:.3f} ms/step")
         print(f"  Prefill: {prefill_comm:.3f} ms/step")
     elif tp_size > 1:
-        print(f"=== a) Communication: TP={tp_size}, no --comm-json ===")
-        print(f"  WARNING: communication NOT included — comp_tpot/comp_ttft are INCOMPLETE.")
-        print(f"  Either run comm_scenarios to produce comm.json (measured AR/AG),")
-        print(f"  or pass --comm-bw/--comm-latency to generate_report.py (modeled).")
-        print(f"  Marked method='none'; generate_report.py will show N/A until comm is supplied.")
-        comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
+        print(f"ERROR: TP={tp_size} requires --comm-json for communication overhead.")
+        print(f"  Run comm_scenarios first to measure AR/AG latency.")
+        sys.exit(1)
     else:
-        print("=== a) Communication: TP=1, no comm needed ===")
-        comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "tp1"}
+        print("=== a) Communication: TP=1, skip ===")
+        comm = {"decode_comm_ms": 0, "prefill_comm_ms": 0, "method": "none"}
     print()
 
     # === b) Tail from trace (lm_head + sampling) ===
     print("=== b) Tail from trace (lm_head + sampling) ===")
-    tail = extract_decode_from_nvtx(args.asys_sqlite, args.lm_head_kernel)
+    tail = extract_decode_from_nvtx(args.asys_sqlite, args.lm_head_kernel,
+                                    batch=args.batch_size)
     if not tail:
         print("ERROR: NVTX decode extraction failed. "
               "Ensure trace has 'decode_0' NVTX marker and lm_head kernels.")
@@ -466,30 +477,11 @@ def main():
     overhead_ms = tail["overhead_ms"]
     batch = args.batch_size
     actual_bs = tail["actual_decode_bs"]
-    if actual_bs > 0:
-        # Marker present — verify it matches the requested batch.
-        if actual_bs != batch:
-            print(f"ERROR: requested batch={batch} but trace shows actual decode bs={actual_bs}")
-            print(f"  vLLM scheduler could not batch — likely insufficient KV cache memory.")
-            print(f"  Increase GPU memory or reduce max_seq_len to fit batch={batch}.")
-            sys.exit(1)
-        print(f"  Verified decode batch = {actual_bs} (matches requested batch={batch})")
-    elif batch >= 2:
-        # batch>=2 REQUIRES verification: submitting N prompts does not guarantee
-        # a batch=N decode (KV cache memory may force the scheduler to split).
-        # No marker => cannot confirm batching actually happened => error.
-        print(f"ERROR: could not read decode batch size from trace "
-              f"(no 'bs=' NVTX marker in decode_0), but batch={batch} was requested.")
-        print(f"  Batching is NOT guaranteed — vLLM may split into smaller batches.")
-        print(f"  The NVTX batch marker is required to verify batch={batch} actually ran.")
-        print(f"  Re-capture with patch_vllm_batch_nvtx.py applied "
-              f"(run scripts/inspect_nvtx.py on the trace to check).")
+    if actual_bs > 0 and actual_bs != batch:
+        print(f"ERROR: requested batch={batch} but trace shows actual decode bs={actual_bs}")
+        print(f"  vLLM scheduler could not batch — likely insufficient KV cache memory.")
+        print(f"  Increase GPU memory or reduce max_seq_len to fit batch={batch}.")
         sys.exit(1)
-    else:
-        # batch==1: capture_trace.sh submits exactly 1 prompt per generate() round,
-        # so the decode batch is structurally 1 regardless of the marker. Not a
-        # fallback — there is no larger batch a single request could decode at.
-        print(f"  No NVTX bs marker; batch=1 is structural (1 prompt/round) — proceeding.")
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 

@@ -84,17 +84,8 @@ def estimate_layer_size(model_dir: str, num_layers: int) -> tuple[float, float]:
 
 
 def _estimate_from_config(model_dir: str, num_layers: int) -> tuple[float, float]:
-    """Rough estimate from config when safetensors aren't available.
-
-    MoE-only estimator (no dense FFN term). Errors loudly if required fields
-    are absent rather than substituting magic numbers.
-    """
+    """Rough estimate from config when safetensors aren't available."""
     tc, _ = load_config(model_dir)
-    req = ["hidden_size", "vocab_size", "num_experts", "moe_intermediate_size"]
-    miss = [k for k in req if k not in tc]
-    if miss:
-        raise KeyError(f"{model_dir}/config.json: _estimate_from_config (MoE-only) "
-                       f"missing required field(s): {', '.join(miss)}")
     hidden = tc["hidden_size"]
     vocab = tc["vocab_size"]
     n_experts = tc["num_experts"]
@@ -142,11 +133,8 @@ def estimate_kv_cache(model_dir: str, num_layers: int, tp_size: int,
     n_linear_attn = num_layers - n_full_attn
 
     # Full attention KV cache: 2 (K+V) × n_kv_heads/tp × head_dim × 2 bytes × seq_len
-    if "num_attention_heads" not in tc or "hidden_size" not in tc:
-        raise KeyError(f"{model_dir}/config.json: missing num_attention_heads/hidden_size")
-    n_heads = tc["num_attention_heads"]
-    n_kv_heads = tc.get("num_key_value_heads", n_heads)
-    head_dim = tc.get("head_dim", tc["hidden_size"] // n_heads)
+    n_kv_heads = tc["num_key_value_heads"]
+    head_dim = tc["head_dim"]
     kv_per_token_per_layer = 2 * (n_kv_heads // max(tp_size, 1)) * head_dim * 2  # bf16
 
     # Linear attention state cache: much smaller (fixed per layer, not per token)
