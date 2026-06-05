@@ -267,32 +267,30 @@ def main():
             print(f"  Layers: {existing_meta['pruned_layers']} / {existing_meta['original_layers']}")
             return
 
-    # Step 3: Split (skip if TP=1)
+    # Split + prune in a single pass
     if args.tp_size > 1:
         split_dir = os.path.join(args.output_dir, "split")
-        print(f"\nStep 1/2: Splitting by TP={args.tp_size}...")
+        print(f"\nSplit TP={args.tp_size} + prune to {max_layers}L in one pass...")
         cmd = [sys.executable, os.path.join(script_dir, "split_tp2.py"),
                "--model-dir", args.model_dir,
                "--output-dir", split_dir,
-               "--tp-size", str(args.tp_size)]
+               "--tp-size", str(args.tp_size),
+               "--only-rank", "0"]
+        if max_layers < num_layers:
+            cmd += ["--num-layers", str(max_layers)]
         subprocess.run(cmd, check=True)
-        source_dir = os.path.join(split_dir, "rank_0")
-    else:
-        print(f"\nStep 1/2: TP=1, no splitting needed")
-        source_dir = args.model_dir
-
-    # Step 4: Prune
-    rank0_pruned = os.path.join(args.output_dir, f"rank_0_{max_layers}L")
-    if max_layers < num_layers:
-        print(f"\nStep 2/2: Pruning to {max_layers} layers...")
+        rank0_pruned = os.path.join(split_dir, "rank_0")
+    elif max_layers < num_layers:
+        rank0_pruned = os.path.join(args.output_dir, f"rank_0_{max_layers}L")
+        print(f"\nPruning to {max_layers} layers...")
         cmd = [sys.executable, os.path.join(script_dir, "prune_layers.py"),
-               "--rank-dir", source_dir,
+               "--rank-dir", args.model_dir,
                "--num-layers", str(max_layers),
                "--output-dir", rank0_pruned]
         subprocess.run(cmd, check=True)
     else:
-        print(f"\nStep 2/2: No pruning needed ({max_layers} == {num_layers})")
-        rank0_pruned = source_dir
+        print(f"\nNo split or prune needed (TP=1, {max_layers} == {num_layers})")
+        rank0_pruned = args.model_dir
 
     # Save metadata
     meta["output_dir"] = rank0_pruned

@@ -19,7 +19,9 @@ import argparse
 import copy
 import json
 import os
+import re
 import shutil
+import struct
 import sys
 import time
 from pathlib import Path
@@ -33,6 +35,16 @@ TP_SIZE = 2  # default, overridden by --tp-size
 GPTQ_BITS = 4
 GPTQ_GROUP_SIZE = 128
 GPTQ_PACK_FACTOR = 32 // GPTQ_BITS  # 8 for int4
+
+LAYER_RE = re.compile(r"(?:model\.)?(?:language_model\.)?layers\.(\d+)\.")
+
+
+def _read_safetensors_header(path: str) -> dict:
+    with open(path, "rb") as f:
+        header_size = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_size))
+    header.pop("__metadata__", None)
+    return header
 
 
 # ---------------------------------------------------------------------------
@@ -221,18 +233,27 @@ def modify_config(config: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def process_shard(shard_path: str, rank_dirs: list[str],
-                  num_kv_heads: int = 0) -> int:
-    """Read one safetensors shard, split every tensor, write both ranks."""
+                  num_kv_heads: int = 0,
+                  num_layers: int | None = None,
+                  ranks: list[int] | None = None) -> int:
+    """Read one safetensors shard, split every tensor, write to requested ranks."""
     shard_name = os.path.basename(shard_path)
+    if ranks is None:
+        ranks = list(range(TP_SIZE))
 
-    # Read all tensors once
     originals: dict[str, np.ndarray] = {}
     with safe_open(shard_path, framework="numpy") as f:
         for key in f.keys():
+            if num_layers is not None:
+                m = LAYER_RE.search(key)
+                if m and int(m.group(1)) >= num_layers:
+                    continue
             originals[key] = f.get_tensor(key)
 
-    # Split + save per rank
-    for rank in range(TP_SIZE):
+    if not originals:
+        return 0
+
+    for rank in ranks:
         rank_tensors: dict[str, np.ndarray] = {}
         for key, tensor in originals.items():
             strategy, _ = get_split_strategy(key, num_kv_heads)
@@ -257,6 +278,10 @@ def main():
     ap.add_argument("--model-dir", required=True, help="Original model directory")
     ap.add_argument("--output-dir", required=True, help="Output root (rank_0/, rank_1/, ... created inside)")
     ap.add_argument("--tp-size", type=int, default=2, help="Tensor parallel size (default: 2)")
+    ap.add_argument("--num-layers", type=int, default=None,
+                    help="Only keep first N layers (prune during split)")
+    ap.add_argument("--only-rank", type=int, default=None,
+                    help="Only produce output for this rank (skip others)")
     ap.add_argument("--delete-shards", action="store_true",
                     help="Delete each original shard after processing (saves disk)")
     args = ap.parse_args()
@@ -264,21 +289,32 @@ def main():
 
     model_dir = Path(args.model_dir)
     output_dir = Path(args.output_dir)
+    ranks = [args.only_rank] if args.only_rank is not None else list(range(TP_SIZE))
 
     # ---- rank dirs ----
-    rank_dirs = []
-    for r in range(TP_SIZE):
+    rank_dirs = {}
+    for r in ranks:
         d = output_dir / f"rank_{r}"
         d.mkdir(parents=True, exist_ok=True)
-        rank_dirs.append(str(d))
+        rank_dirs[r] = str(d)
 
     # ---- config ----
     with open(model_dir / "config.json") as f:
         orig_cfg = json.load(f)
     orig_tc = orig_cfg.get("text_config", orig_cfg)
     num_kv_heads = orig_tc.get("num_key_value_heads", 0)
+    orig_layers = orig_tc["num_hidden_layers"]
+    num_layers = args.num_layers
+
     mod_cfg = modify_config(orig_cfg)
-    for r in range(TP_SIZE):
+    if num_layers is not None:
+        mod_tc = mod_cfg.get("text_config", mod_cfg)
+        mod_tc["num_hidden_layers"] = num_layers
+        if "layer_types" in mod_tc:
+            mod_tc["layer_types"] = mod_tc["layer_types"][:num_layers]
+        print(f"Pruning: {orig_layers} -> {num_layers} layers")
+
+    for r in ranks:
         with open(os.path.join(rank_dirs[r], "config.json"), "w") as f:
             json.dump(mod_cfg, f, indent=4, ensure_ascii=False)
 
@@ -292,13 +328,12 @@ def main():
     for fname in aux:
         src = model_dir / fname
         if src.exists():
-            for r in range(TP_SIZE):
+            for r in ranks:
                 shutil.copy2(str(src), os.path.join(rank_dirs[r], fname))
 
-    # ---- copy generation_config.json ----
     gc_src = model_dir / "generation_config.json"
     if gc_src.exists():
-        for r in range(TP_SIZE):
+        for r in ranks:
             shutil.copy2(str(gc_src), os.path.join(rank_dirs[r], "generation_config.json"))
 
     # ---- load weight index ----
@@ -309,7 +344,6 @@ def main():
             index = json.load(f)
         shard_files = sorted(set(index["weight_map"].values()))
     elif single_file.exists():
-        # Single-file model: build index from tensor names
         with safe_open(str(single_file), framework="pt") as st:
             tensor_names = st.keys()
         weight_map = {name: "model.safetensors" for name in tensor_names}
@@ -327,15 +361,16 @@ def main():
         path = str(model_dir / sf)
         print(f"[{i+1}/{len(shard_files)}] {sf} …", flush=True)
         t0 = time.time()
-        n = process_shard(path, rank_dirs, num_kv_heads)
+        n = process_shard(path, rank_dirs, num_kv_heads,
+                          num_layers=num_layers, ranks=ranks)
         total_tensors += n
         print(f"       {n} tensors  ({time.time()-t0:.1f}s)", flush=True)
         if args.delete_shards:
             os.remove(path)
             print(f"       (deleted original)", flush=True)
 
-    # ---- write per-rank index.json (rebuild weight_map from actual saved files) ----
-    for r in range(TP_SIZE):
+    # ---- write per-rank index (fast header parse, no tensor loading) ----
+    for r in ranks:
         total_bytes = 0
         weight_map = {}
         rd = Path(rank_dirs[r])
@@ -343,17 +378,19 @@ def main():
             sf_path = rd / sf
             if not sf_path.exists():
                 continue
-            with safe_open(str(sf_path), framework="numpy") as f:
-                for key in f.keys():
-                    total_bytes += f.get_tensor(key).nbytes
-                    weight_map[key] = sf
+            header = _read_safetensors_header(str(sf_path))
+            for key, info in header.items():
+                total_bytes += info["data_offsets"][1] - info["data_offsets"][0]
+                weight_map[key] = sf
         ri = {"metadata": {"total_size": total_bytes}, "weight_map": weight_map}
         with open(rd / "model.safetensors.index.json", "w") as f:
             json.dump(ri, f, indent=2)
 
     elapsed = time.time() - t_start
-    print(f"\nDone in {elapsed:.0f}s — {total_tensors} tensors × {TP_SIZE} ranks")
-    for r in range(TP_SIZE):
+    rank_str = f"rank {args.only_rank}" if args.only_rank is not None else f"{TP_SIZE} ranks"
+    layer_str = f", {num_layers}/{orig_layers} layers" if num_layers else ""
+    print(f"\nDone in {elapsed:.0f}s — {total_tensors} tensors × {rank_str}{layer_str}")
+    for r in ranks:
         sz = sum(p.stat().st_size for p in Path(rank_dirs[r]).iterdir()) / (1024**3)
         print(f"  rank_{r}: {sz:.2f} GB")
 

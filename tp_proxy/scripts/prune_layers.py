@@ -12,6 +12,7 @@ import argparse
 import json
 import re
 import shutil
+import struct
 import time
 from pathlib import Path
 
@@ -49,9 +50,13 @@ def _copy_aux_files(rank_dir: Path, output_dir: Path) -> None:
 def _write_index(output_dir: Path, weight_map: dict) -> None:
     total_bytes = 0
     for sf in set(weight_map.values()):
-        with safe_open(str(output_dir / sf), framework="numpy") as f:
-            for key in f.keys():
-                total_bytes += f.get_tensor(key).nbytes
+        path = str(output_dir / sf)
+        with open(path, "rb") as f:
+            header_size = struct.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(header_size))
+        header.pop("__metadata__", None)
+        for info in header.values():
+            total_bytes += info["data_offsets"][1] - info["data_offsets"][0]
     index = {"metadata": {"total_size": total_bytes}, "weight_map": weight_map}
     with open(output_dir / "model.safetensors.index.json", "w") as f:
         json.dump(index, f, indent=2)
