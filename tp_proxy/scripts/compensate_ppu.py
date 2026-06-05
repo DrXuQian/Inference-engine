@@ -153,154 +153,154 @@ def extract_prefill_from_nvtx(sqlite_path: str, kernel_evts: list) -> dict | Non
 
 def measure_tail_from_trace(sqlite_path: str,
                             lm_head_kernel: str) -> dict | None:
-    """One decode step = CUDA Graph (encoder) + gap to next CUDA Graph (tail).
+    """Measure decode step timing by anchoring on lm_head kernel occurrences.
 
-    encoder = graph_end - graph_start  (wall clock)
-    tail    = graph_end → next gap_end (wall clock, = lm_head + sampling)
-    tpot    = encoder + tail
+    Does NOT depend on graphNodeId (unreliable on PPU).  Each decode step
+    has exactly one lm_head kernel.  Between consecutive lm_heads:
+        [sampling] → [encoder graph replay] → [lm_head]
+    The encoder/sampling split uses the largest inter-kernel gap as boundary.
     """
+    import re as _re
     from collections import Counter
 
     conn = sqlite3.connect(sqlite_path)
     c = conn.cursor()
 
     c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    kt = [r[0] for r in c.fetchall() if 'KERNEL' in r[0].upper() and 'ACTIVITY' in r[0].upper()]
+    tables = [r[0] for r in c.fetchall()]
+    kt = [t for t in tables if 'KERNEL' in t.upper() and 'ACTIVITY' in t.upper()]
     if not kt:
         conn.close(); return None
     kt = kt[0]
 
-    # Check graphNodeId
     c.execute(f'PRAGMA table_info("{kt}")')
-    if "graphNodeId" not in [col[1] for col in c.fetchall()]:
-        conn.close()
-        print("  WARNING: no graphNodeId column")
-        return None
+    cols = [col[1] for col in c.fetchall()]
+    has_gid = "graphNodeId" in cols
 
-    c.execute(f'''
-        SELECT k.start, k."end" - k.start AS dur, k."end",
-               s.value AS name, k.graphNodeId
-        FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
-        ORDER BY k.start
-    ''')
-    evts = [(r[0], r[1], r[2], r[3], r[4] or 0) for r in c.fetchall()]
+    if has_gid:
+        c.execute(f'''
+            SELECT k.start, k."end" - k.start AS dur, k."end",
+                   s.value AS name, k.graphNodeId
+            FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
+            ORDER BY k.start
+        ''')
+        evts = [(r[0], r[1], r[2], r[3], r[4] or 0) for r in c.fetchall()]
+    else:
+        c.execute(f'''
+            SELECT k.start, k."end" - k.start AS dur, k."end",
+                   s.value AS name
+            FROM "{kt}" k JOIN StringIds s ON k.demangledName = s.id
+            ORDER BY k.start
+        ''')
+        evts = [(r[0], r[1], r[2], r[3], 0) for r in c.fetchall()]
     conn.close()
 
     n_g = sum(1 for *_, g in evts if g > 0)
     print(f"  kernels: {len(evts)} ({n_g} graph, {len(evts)-n_g} non-graph)")
 
-    # Split into graph/gap segments
-    segs = []
-    ct = "graph" if evts[0][4] > 0 else "gap"
-    ce = [evts[0]]
-    for e in evts[1:]:
-        t = "graph" if e[4] > 0 else "gap"
-        if t == ct:
-            ce.append(e)
-        else:
-            segs.append((ct, ce))
-            ct, ce = t, [e]
-    segs.append((ct, ce))
+    # --- Prefill from NVTX ---
+    ttft_ms = 0
+    ttft_wall_ms = 0
+    prefill_info = extract_prefill_from_nvtx(sqlite_path, evts)
+    if prefill_info:
+        ttft_ms = prefill_info["kernel_ms"]
+        ttft_wall_ms = prefill_info["wall_ms"]
+        print(f"\n  Prefill (NVTX, {prefill_info['n_kernels']} kernels):")
+        print(f"    kernel: {ttft_ms:.2f} ms, wall: {ttft_wall_ms:.2f} ms")
 
-    # Each decode step: graph_seg → gap_seg
-    # encoder = graph wall, tail = graph_end to gap_end
+    # --- Decode steps: anchor on lm_head kernel ---
+    gemm_re = _re.compile(
+        r"deep_gemm|GemmKernel|gemm_ktype|cutlass|cublas|cublasLt|"
+        r"marlin|moe_wna16|moe.*gemm|xmma|batched_gemvt", _re.IGNORECASE)
+    fa_re = _re.compile(
+        r"flash_fwd|flash_bwd|fmha|FlashAttn", _re.IGNORECASE)
+
+    lm_indices = [i for i, evt in enumerate(evts) if lm_head_kernel in evt[3]]
+    print(f"  lm_head events ('{lm_head_kernel}'): {len(lm_indices)}")
+
+    if len(lm_indices) < 3:
+        print("  WARNING: too few lm_head events for step detection")
+        return None
+
+    # Build steps from consecutive lm_head events.
+    # Step j: from lm_head[j] to lm_head[j+1].
+    # Between them: [sampling after j] → [gap] → [encoder for j+1] → lm_head[j+1]
+    # Split encoder vs sampling by the largest inter-kernel gap.
     steps = []
-    for i in range(len(segs) - 1):
-        if segs[i][0] == "graph" and segs[i+1][0] == "gap":
-            g = segs[i][1]
-            gap = segs[i+1][1]
-            g_start, g_end = g[0][0], g[-1][2]
-            gap_end = gap[-1][2]
-            lm_dur = 0
-            for ev in gap:
-                if lm_head_kernel in ev[3]:
-                    lm_dur = ev[1]; break
-            steps.append({
-                "encoder_wall": g_end - g_start,
-                "tail_wall": gap_end - g_end,
-                "step_wall": gap_end - g_start,
-                "lm_head_dur": lm_dur,
-                "graph_kernels": len(g),
-                "_graph_evts": g,
-                "_gap_evts": gap,
-            })
+    for j in range(len(lm_indices) - 1):
+        idx_a = lm_indices[j]
+        idx_b = lm_indices[j + 1]
+        lm_evt = evts[idx_b]
+
+        step_wall = lm_evt[0] - evts[idx_a][0]
+
+        between = list(range(idx_a + 1, idx_b))
+        if len(between) >= 2:
+            max_gap = -1
+            split_at = 0
+            for k in range(len(between) - 1):
+                gap = evts[between[k + 1]][0] - evts[between[k]][2]
+                if gap > max_gap:
+                    max_gap = gap
+                    split_at = k + 1
+            samp_idx = between[:split_at]
+            enc_idx = between[split_at:]
+        elif between:
+            samp_idx = []
+            enc_idx = between
+        else:
+            samp_idx = []
+            enc_idx = []
+
+        enc_evts = [evts[k] for k in enc_idx]
+        samp_evts = [evts[k] for k in samp_idx]
+
+        steps.append({
+            "step_wall": step_wall,
+            "encoder_kernel": sum(e[1] for e in enc_evts),
+            "lm_head_dur": lm_evt[1],
+            "sampling_kernel": sum(e[1] for e in samp_evts),
+            "n_encoder_kernels": len(enc_evts),
+            "_graph_evts": enc_evts,
+            "_gap_evts": [lm_evt] + samp_evts,
+        })
 
     if not steps:
         print("  WARNING: no decode steps found")
         return None
-    print(f"  decode steps: {len(steps)}")
 
-    # Filter: consistent graph kernel count
-    counts = Counter(s["graph_kernels"] for s in steps)
-    mode = counts.most_common(1)[0][0]
-    filtered = [s for s in steps if s["graph_kernels"] == mode]
-    print(f"  graph kernel mode: {mode} ({len(filtered)}/{len(steps)} steps)")
+    # Filter outlier steps (prefill/warmup have much longer intervals)
+    walls = sorted(s["step_wall"] for s in steps)
+    median_wall = walls[len(walls) // 2]
+    decode_steps = [s for s in steps if s["step_wall"] < median_wall * 3]
+    print(f"  decode steps: {len(decode_steps)} / {len(steps)} "
+          f"(median wall={median_wall / 1e6:.3f} ms)")
 
-    # Filter: has matching lm_head, pick top 25% by duration (= largest batch)
-    matched = [s for s in filtered if s["lm_head_dur"] > 0]
-    if matched:
-        matched.sort(key=lambda s: s["lm_head_dur"])
-        thr = matched[len(matched) * 3 // 4]["lm_head_dur"] if len(matched) > 4 else matched[0]["lm_head_dur"]
-        top = [s for s in matched if s["lm_head_dur"] >= thr]
-        print(f"  lm_head: {matched[0]['lm_head_dur']/1e3:.1f}-{matched[-1]['lm_head_dur']/1e3:.1f}us, "
-              f"p75={thr/1e3:.1f}us, selected={len(top)}")
-        selected = top
-    else:
-        print(f"  WARNING: '{lm_head_kernel}' not found in gaps")
-        selected = filtered
+    if not decode_steps:
+        decode_steps = steps
 
-    s = selected[len(selected) // 2]
-    encoder_ms = s["encoder_wall"] / 1e6
-    tail_ms = s["tail_wall"] / 1e6
+    # Filter by encoder kernel count mode (consistent graph replays)
+    counts = Counter(s["n_encoder_kernels"] for s in decode_steps)
+    mode_count = counts.most_common(1)[0][0]
+    consistent = [s for s in decode_steps if s["n_encoder_kernels"] == mode_count]
+    print(f"  encoder kernel mode: {mode_count} "
+          f"({len(consistent)}/{len(decode_steps)} steps)")
+
+    if not consistent:
+        consistent = decode_steps
+
+    # Pick median step by step_wall
+    consistent.sort(key=lambda s: s["step_wall"])
+    s = consistent[len(consistent) // 2]
+
+    encoder_ms = s["encoder_kernel"] / 1e6
     lm_head_ms = s["lm_head_dur"] / 1e6
-    sampling_ms_wall = max(tail_ms - lm_head_ms, 0)
+    sampling_ms = s["sampling_kernel"] / 1e6
     tpot_ms = s["step_wall"] / 1e6
 
-    # Prefill: extract from NVTX "prefill" marker if available,
-    # otherwise fall back to gap-before-first-decode heuristic.
-    ttft_ms = 0
-    ttft_wall_ms = 0
-    prefill_from_nvtx = extract_prefill_from_nvtx(sqlite_path, evts)
-    if prefill_from_nvtx:
-        ttft_ms = prefill_from_nvtx["kernel_ms"]
-        ttft_wall_ms = prefill_from_nvtx["wall_ms"]
-        print(f"\n  Prefill (from NVTX 'prefill' marker, {prefill_from_nvtx['n_kernels']} kernels):")
-        print(f"    kernel time: {ttft_ms:.2f} ms")
-        print(f"    wall time:   {ttft_wall_ms:.2f} ms")
-    else:
-        # Fallback: find the last gap before first mode-count graph
-        first_mode_seg_idx = None
-        for si, (stype, sevts) in enumerate(segs):
-            if stype == "graph" and len(sevts) == mode:
-                first_mode_seg_idx = si
-                break
-
-        if first_mode_seg_idx and first_mode_seg_idx > 0:
-            prev_seg = segs[first_mode_seg_idx - 1]
-            if prev_seg[0] == "gap":
-                prefill_kernel_ns = sum(d for _, d, _, _, _ in prev_seg[1])
-                prefill_wall_ns = prev_seg[1][-1][2] - prev_seg[1][0][0]
-                ttft_ms = prefill_kernel_ns / 1e6
-                ttft_wall_ms = prefill_wall_ns / 1e6
-                print(f"\n  Prefill (fallback: gap before decode, {len(prev_seg[1])} kernels):")
-                print(f"    kernel time: {ttft_ms:.2f} ms")
-                print(f"    wall time:   {ttft_wall_ms:.2f} ms")
-            else:
-                print(f"\n  WARNING: no gap before first decode graph")
-        else:
-            print(f"\n  WARNING: no mode-count graph found for prefill")
-
-    # Kernel classification for the SELECTED decode step (same as s above)
-    import re as _re
-    gemm_re = _re.compile(r"deep_gemm|GemmKernel|gemm_ktype|cutlass|cublas|cublasLt|marlin|moe_wna16|moe.*gemm|xmma|batched_gemvt", _re.IGNORECASE)
-    fa_re = _re.compile(r"flash_fwd|flash_bwd|fmha|FlashAttn", _re.IGNORECASE)
-
-    graph_kernels = s["_graph_evts"]
-    gap_kernels = s["_gap_evts"]
-
-    # Classify encoder (graph) kernels
+    # --- Kernel breakdown for the selected step ---
     enc_gemm_ns = enc_fa_ns = enc_other_ns = 0
-    for evt in graph_kernels:
+    for evt in s["_graph_evts"]:
         name, dur = evt[3], evt[1]
         if fa_re.search(name):
             enc_fa_ns += dur
@@ -309,9 +309,8 @@ def measure_tail_from_trace(sqlite_path: str,
         else:
             enc_other_ns += dur
 
-    # Classify gap (tail) kernels — use lm_head_kernel from CLI (not hardcoded regex)
     gap_lmhead_ns = gap_other_ns = 0
-    for evt in gap_kernels:
+    for evt in s["_gap_evts"]:
         name, dur = evt[3], evt[1]
         if lm_head_kernel in name:
             gap_lmhead_ns += dur
@@ -320,37 +319,38 @@ def measure_tail_from_trace(sqlite_path: str,
 
     enc_total = enc_gemm_ns + enc_fa_ns + enc_other_ns
     kernel_breakdown = {
-        # Encoder (graph): these get ×layer_scale
-        "enc_gemm_ms": round(enc_gemm_ns / 1e6, 4),   # INT4-able ×0.25
-        "enc_fa_ms": round(enc_fa_ns / 1e6, 4),        # KV cache, BW-bound
-        "enc_other_ms": round(enc_other_ns / 1e6, 4),   # compute-bound
+        "enc_gemm_ms": round(enc_gemm_ns / 1e6, 4),
+        "enc_fa_ms": round(enc_fa_ns / 1e6, 4),
+        "enc_other_ms": round(enc_other_ns / 1e6, 4),
         "enc_gemm_frac": round(enc_gemm_ns / enc_total, 4) if enc_total > 0 else 0,
-        # Tail (gap): NO layer_scale, lm_head /tp
-        "tail_lmhead_ms": round(gap_lmhead_ns / 1e6, 4),  # BF16, /tp
-        "tail_other_ms": round(gap_other_ns / 1e6, 4),     # sampling etc
+        "tail_lmhead_ms": round(gap_lmhead_ns / 1e6, 4),
+        "tail_other_ms": round(gap_other_ns / 1e6, 4),
     }
 
-    # Use kernel duration for sampling (not wall clock) to avoid
-    # inflated values from CPU scheduling, post-inference cleanup, etc.
-    sampling_ms_kernel = kernel_breakdown["tail_other_ms"]
-    if sampling_ms_wall > 10 * max(sampling_ms_kernel, 0.01):
-        print(f"\n  WARNING: tail wall={sampling_ms_wall:.2f}ms >> kernel={sampling_ms_kernel:.4f}ms"
-              f" (wall includes CPU overhead / cleanup, using kernel time)")
-    sampling_ms = sampling_ms_kernel
-
     gf = kernel_breakdown["enc_gemm_frac"]
-    print(f"\n  encoder (graph wall): {encoder_ms:.4f} ms")
-    print(f"  tail wall clock:      {tail_ms:.4f} ms")
-    print(f"  tail kernel time:     {(sampling_ms + lm_head_ms):.4f} ms")
-    print(f"  TPOT (step wall):     {tpot_ms:.4f} ms")
-    print(f"  TTFT (prefill):       {ttft_ms:.2f} ms")
-    print(f"  Encoder kernel breakdown (×layer_scale):")
+    print(f"\n  Selected step (median of {len(consistent)} consistent):")
+    print(f"    encoder (kernel sum): {encoder_ms:.4f} ms ({s['n_encoder_kernels']} kernels)")
+    print(f"    lm_head:              {lm_head_ms:.4f} ms")
+    print(f"    sampling (kernel sum):{sampling_ms:.4f} ms")
+    print(f"    step wall (TPOT):     {tpot_ms:.4f} ms")
+    print(f"  Encoder breakdown (×layer_scale):")
     print(f"    gemm (INT4-able):     {kernel_breakdown['enc_gemm_ms']:.4f} ms ({gf*100:.0f}%)")
     print(f"    flash_attn:           {kernel_breakdown['enc_fa_ms']:.4f} ms")
-    print(f"    other:                {kernel_breakdown['enc_other_ms']:.4f} ms")
+    print(f"    other (norm etc):     {kernel_breakdown['enc_other_ms']:.4f} ms")
     print(f"  Tail breakdown (no layer_scale):")
     print(f"    lm_head (BF16):       {kernel_breakdown['tail_lmhead_ms']:.4f} ms")
-    print(f"    sampling (kernel):    {sampling_ms:.4f} ms")
+    print(f"    sampling:             {kernel_breakdown['tail_other_ms']:.4f} ms")
+    print(f"  TTFT (prefill):         {ttft_ms:.2f} ms")
+
+    # Prefill fallback: kernel time before first lm_head
+    if ttft_ms == 0 and lm_indices:
+        pf_kernel_ns = sum(evts[i][1] for i in range(lm_indices[0]))
+        pf_wall_ns = evts[lm_indices[0]][0] - evts[0][0] if lm_indices[0] > 0 else 0
+        if pf_kernel_ns > 0:
+            ttft_ms = pf_kernel_ns / 1e6
+            ttft_wall_ms = pf_wall_ns / 1e6
+            print(f"  Prefill (fallback: before first lm_head):")
+            print(f"    kernel: {ttft_ms:.2f} ms, wall: {ttft_wall_ms:.2f} ms")
 
     return {
         "encoder_ms": round(encoder_ms, 4),
@@ -361,7 +361,7 @@ def measure_tail_from_trace(sqlite_path: str,
         "ttft_wall_ms": round(ttft_wall_ms, 2),
         "ttft_ms": round(ttft_ms, 2),
         "overhead_ms": 0,
-        "tail_per_step_ms": round(tail_ms, 4),
+        "tail_per_step_ms": round(lm_head_ms + sampling_ms, 4),
         "kernel_breakdown": kernel_breakdown,
     }
 
