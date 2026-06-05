@@ -10,7 +10,7 @@ BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
 LM_HEAD_B1="gemvt_op"
 LM_HEAD_BN="gemm_ktype0_aiu1_mtype1_dtypeBF16xBF16xFP32xBF16xBF16"
 
-for TP in 2; do
+for TP in 2 4; do
     echo "--- TP=$TP ---"
     DIR="$OUT/tp${TP}"
     [ ! -d "$DIR" ] && echo "  Not found" && continue
