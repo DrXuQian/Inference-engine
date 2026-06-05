@@ -13,7 +13,6 @@ echo "=== Split/Prune: RAG仓库理解: Qwen3.5-35B-A3B, TP=1 ==="
 python3 "$SCRIPT_DIR/split_and_prune.py" \
     --model-dir "$MODEL" --tp-size 1 \
     --gpu-memory-gb "$GPU_MEM" --max-seq-len 825344 \
-    --replicate \
     --output-dir "$OUT/model"
 
 echo "Done: $OUT/model"

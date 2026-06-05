@@ -193,10 +193,6 @@ def main():
                     help="Max sequence length for KV cache estimation")
     ap.add_argument("--max-layers", type=int, default=None,
                     help="Override auto-computed layer count")
-    ap.add_argument("--replicate", action="store_true",
-                    help="Instead of pruning, replicate layer-0 weights to all "
-                         "layers. Full layer count but only 1 layer of unique "
-                         "weights. Good for compute benchmarking.")
     args = ap.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -285,28 +281,18 @@ def main():
         print(f"\nStep 1/2: TP=1, no splitting needed")
         source_dir = args.model_dir
 
-    # Step 4: Prune or replicate
-    if args.replicate:
-        rank0_pruned = os.path.join(args.output_dir, "rank_0_replicated")
-        print(f"\nStep 2/2: Replicating layer 0 to all {num_layers} layers...")
+    # Step 4: Prune
+    rank0_pruned = os.path.join(args.output_dir, f"rank_0_{max_layers}L")
+    if max_layers < num_layers:
+        print(f"\nStep 2/2: Pruning to {max_layers} layers...")
         cmd = [sys.executable, os.path.join(script_dir, "prune_layers.py"),
                "--rank-dir", source_dir,
-               "--replicate",
+               "--num-layers", str(max_layers),
                "--output-dir", rank0_pruned]
         subprocess.run(cmd, check=True)
-        max_layers = num_layers
     else:
-        rank0_pruned = os.path.join(args.output_dir, f"rank_0_{max_layers}L")
-        if max_layers < num_layers:
-            print(f"\nStep 2/2: Pruning to {max_layers} layers...")
-            cmd = [sys.executable, os.path.join(script_dir, "prune_layers.py"),
-                   "--rank-dir", source_dir,
-                   "--num-layers", str(max_layers),
-                   "--output-dir", rank0_pruned]
-            subprocess.run(cmd, check=True)
-        else:
-            print(f"\nStep 2/2: No pruning needed ({max_layers} == {num_layers})")
-            rank0_pruned = source_dir
+        print(f"\nStep 2/2: No pruning needed ({max_layers} == {num_layers})")
+        rank0_pruned = source_dir
 
     # Save metadata
     meta["output_dir"] = rank0_pruned
