@@ -137,13 +137,12 @@ def run_prune(rank_dir: Path, output_dir: Path, num_layers: int) -> None:
 # -----------------------------------------------------------------------
 
 def run_replicate(rank_dir: Path, output_dir: Path) -> None:
-    """Create model where all layers share layer-0's weight data.
+    """Create model where every layer has identical (layer-0) weights.
 
-    The safetensors file stores layer-0 data once; all other layers'
-    header entries point to the same byte offsets.  File size ≈ 1 layer.
+    All layers are present so vLLM sees the correct layer count for
+    benchmarking.  Memory during write: ~1 layer.  Disk: N × 1 layer
+    (safetensors requires non-overlapping offsets per tensor).
     """
-    import struct as _struct
-
     with open(rank_dir / "config.json") as f:
         cfg = json.load(f)
     tc = cfg.get("text_config", cfg)
@@ -151,7 +150,7 @@ def run_replicate(rank_dir: Path, output_dir: Path) -> None:
 
     with open(output_dir / "config.json", "w") as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
-    print(f"Replicate mode: {num_layers} layers, sharing layer-0 data")
+    print(f"Replicate mode: {num_layers} layers, all identical to layer 0")
 
     _copy_aux_files(rank_dir, output_dir)
 
@@ -159,7 +158,6 @@ def run_replicate(rank_dir: Path, output_dir: Path) -> None:
         index = json.load(f)
     shard_files = sorted(set(index["weight_map"].values()))
 
-    # Collect layer-0 tensors and non-layer tensors
     layer0_tensors: dict[str, tuple[str, np.ndarray]] = {}
     non_layer_tensors: dict[str, tuple[str, np.ndarray]] = {}
 
@@ -192,7 +190,6 @@ def run_replicate(rank_dir: Path, output_dir: Path) -> None:
     t_start = time.time()
     new_weight_map = {}
 
-    # Write non-layer tensors (unchanged)
     non_layer_by_shard: dict[str, dict[str, np.ndarray]] = {}
     for key, (sf, arr) in non_layer_tensors.items():
         non_layer_by_shard.setdefault(sf, {})[key] = arr
@@ -202,64 +199,20 @@ def run_replicate(rank_dir: Path, output_dir: Path) -> None:
             new_weight_map[key] = sf
     print(f"  wrote {len(non_layer_tensors)} non-layer tensors")
 
-    # Build shared-offset safetensors for replicated layers.
-    # Data section: layer-0 tensors written once.
-    # Header: all N layers' entries point to the same byte offsets.
-    DTYPE_MAP = {
-        np.dtype("float16"): "F16",
-        np.dtype("bfloat16"): "BF16",
-        np.dtype("float32"): "F32",
-        np.dtype("float64"): "F64",
-        np.dtype("int8"): "I8",
-        np.dtype("int16"): "I16",
-        np.dtype("int32"): "I32",
-        np.dtype("int64"): "I64",
-        np.dtype("uint8"): "U8",
-        np.dtype("bool"): "BOOL",
-    }
-
-    # Compute data layout for layer-0 tensors (sorted by suffix for determinism)
-    sorted_suffixes = sorted(layer0_tensors.keys())
-    data_chunks = []
-    offset = 0
-    # suffix -> (dtype_str, shape, begin, end)
-    tensor_layout: dict[str, tuple[str, list[int], int, int]] = {}
-    for suffix in sorted_suffixes:
-        _, arr = layer0_tensors[suffix]
-        raw = arr.tobytes()
-        dtype_str = DTYPE_MAP.get(arr.dtype)
-        if dtype_str is None:
-            dtype_str = DTYPE_MAP.get(np.dtype(str(arr.dtype).replace("ml_dtypes.", "")), "U8")
-        begin = offset
-        end = offset + len(raw)
-        tensor_layout[suffix] = (dtype_str, list(arr.shape), begin, end)
-        data_chunks.append(raw)
-        offset = end
-
-    # Build header: layer-0..N-1 all share same offsets
-    header_dict = {}
-    for layer_id in range(num_layers):
-        for suffix in sorted_suffixes:
-            dtype_str, shape, begin, end = tensor_layout[suffix]
-            key = f"{prefix}{layer_id}{suffix}"
-            header_dict[key] = {"dtype": dtype_str, "shape": shape, "data_offsets": [begin, end]}
-
-    header_json = json.dumps(header_dict, separators=(",", ":")).encode("utf-8")
-    data_blob = b"".join(data_chunks)
-
-    shard_name = "model-layers-replicated.safetensors"
-    shard_path = output_dir / shard_name
-    with open(shard_path, "wb") as f:
-        f.write(_struct.pack("<Q", len(header_json)))
-        f.write(header_json)
-        f.write(data_blob)
-
-    for layer_id in range(num_layers):
-        for suffix in sorted_suffixes:
-            key = f"{prefix}{layer_id}{suffix}"
+    LAYERS_PER_SHARD = 16
+    total_layer_tensors = 0
+    for shard_start in range(0, num_layers, LAYERS_PER_SHARD):
+        shard_end = min(shard_start + LAYERS_PER_SHARD, num_layers)
+        shard_name = f"model-layers-{shard_start:05d}-{shard_end:05d}.safetensors"
+        shard_tensors = {}
+        for layer_id in range(shard_start, shard_end):
+            for suffix, (_, arr) in layer0_tensors.items():
+                shard_tensors[f"{prefix}{layer_id}{suffix}"] = arr
+        np_save_file(shard_tensors, str(output_dir / shard_name))
+        for key in shard_tensors:
             new_weight_map[key] = shard_name
-
-    print(f"  wrote {shard_name}: {len(sorted_suffixes)} unique tensors × {num_layers} layers (shared offsets)")
+        total_layer_tensors += len(shard_tensors)
+        print(f"  shard {shard_name}: layers {shard_start}-{shard_end-1} ({len(shard_tensors)} tensors)")
 
     _write_index(output_dir, new_weight_map)
 
@@ -268,10 +221,9 @@ def run_replicate(rank_dir: Path, output_dir: Path) -> None:
     unique_bytes = sum(arr.nbytes for _, arr in layer0_tensors.values())
 
     print(f"\nDone in {elapsed:.1f}s")
-    print(f"  Layers:           {num_layers} (all sharing layer-0 data)")
+    print(f"  Layers:           {num_layers} (all identical to layer 0)")
     print(f"  Unique weights:   {unique_bytes / 1e6:.1f} MB (1 layer)")
     print(f"  Disk total:       {disk_gb:.2f} GB")
-    print(f"  Compression:      {num_layers}x vs full copy")
 
 
 # -----------------------------------------------------------------------
