@@ -192,39 +192,39 @@ def extract_decode_from_nvtx(sqlite_path: str,
     print(f"  decode_0 NVTX: {len(dec_evts)} kernels, "
           f"wall={(nvtx_end - nvtx_start) / 1e6:.2f}ms")
 
-    # Find all lm_head kernels within decode_0
+    # Find the LAST lm_head kernel within decode_0
     lm_indices = [i for i, e in enumerate(dec_evts) if lm_head_kernel in e[3]]
     print(f"  lm_head ('{lm_head_kernel}'): {len(lm_indices)} in decode_0")
 
-    if len(lm_indices) < 2:
-        print("  WARNING: need >= 2 lm_head events for NVTX step extraction")
+    if not lm_indices:
+        print("  WARNING: no lm_head events found in decode_0")
         return None
 
-    # Last two lm_heads bracket the last decode step:
-    #   [sampling_prev] -> [gap] -> [encoder_last] -> lm_head_last -> [sampling_last] -> NVTX end
-    idx_prev = lm_indices[-2]
-    idx_last = lm_indices[-1]
+    idx_last_lm = lm_indices[-1]
 
-    between = list(range(idx_prev + 1, idx_last))
-    if len(between) >= 2:
+    # Tail: last lm_head + everything after it within decode_0 = lm_head + sampling
+    tail_evts = dec_evts[idx_last_lm:]
+    lm_dur = dec_evts[idx_last_lm][1]
+    samp_evts = dec_evts[idx_last_lm + 1:]
+
+    # Encoder: the last CUDA graph = dense kernel burst before the last lm_head.
+    # Find it by locating the largest inter-kernel gap before lm_head.
+    pre_lm = dec_evts[:idx_last_lm]
+    if len(pre_lm) >= 2:
         max_gap = -1
         split_at = 0
-        for k in range(len(between) - 1):
-            gap = dec_evts[between[k + 1]][0] - dec_evts[between[k]][2]
+        for k in range(len(pre_lm) - 1):
+            gap = pre_lm[k + 1][0] - pre_lm[k][2]
             if gap > max_gap:
                 max_gap = gap
                 split_at = k + 1
-        enc_indices = between[split_at:]
-    elif between:
-        enc_indices = between
+        enc_evts = pre_lm[split_at:]
+        print(f"  Last CUDA graph: largest gap at kernel {split_at}/{len(pre_lm)}, "
+              f"gap={max_gap / 1e6:.4f}ms")
+    elif pre_lm:
+        enc_evts = pre_lm
     else:
-        enc_indices = []
-
-    enc_evts = [dec_evts[k] for k in enc_indices]
-
-    # Tail: last lm_head + everything after it within decode_0
-    lm_dur = dec_evts[idx_last][1]
-    samp_evts = dec_evts[idx_last + 1:]
+        enc_evts = []
 
     encoder_ns = sum(e[1] for e in enc_evts)
     sampling_ns = sum(e[1] for e in samp_evts)
