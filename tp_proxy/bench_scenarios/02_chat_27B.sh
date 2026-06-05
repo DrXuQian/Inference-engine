@@ -13,6 +13,7 @@ echo "=== Split/Prune: Chat问答: 27B FP16, TP=1 ==="
 python3 "$SCRIPT_DIR/split_and_prune.py" \
     --model-dir "$MODEL" --tp-size 1 \
     --gpu-memory-gb "$GPU_MEM" --max-seq-len 27648 \
+    --replicate \
     --output-dir "$OUT/model"
 
 echo "Done: $OUT/model"

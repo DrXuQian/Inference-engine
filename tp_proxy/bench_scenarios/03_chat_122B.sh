@@ -19,6 +19,7 @@ for TP in 1 2; do
     python3 "$SCRIPT_DIR/split_and_prune.py" \
         --model-dir "$MODEL" --tp-size $TP \
         --gpu-memory-gb "$GPU_MEM" --max-seq-len 27648 \
+        --replicate \
         --output-dir "$TP_DIR/model"
 done
 
