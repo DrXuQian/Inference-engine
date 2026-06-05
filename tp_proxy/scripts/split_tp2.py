@@ -39,9 +39,32 @@ GPTQ_PACK_FACTOR = 32 // GPTQ_BITS  # 8 for int4
 # Splitting strategy per tensor
 # ---------------------------------------------------------------------------
 
-def get_split_strategy(name: str) -> tuple[str, int | None]:
+def _is_gptq_tensor(name: str) -> bool:
+    return any(name.endswith(sfx) for sfx in (".qweight", ".qzeros", ".scales", ".g_idx"))
+
+
+def _col_strategy(name: str) -> tuple[str, int | None]:
+    """Column-parallel strategy, auto-detecting GPTQ vs bf16."""
+    if _is_gptq_tensor(name):
+        return ("replicate", None) if name.endswith(".g_idx") else ("gptq_col", None)
+    return "col", 0
+
+
+def _row_strategy(name: str) -> tuple[str, int | None]:
+    """Row-parallel strategy, auto-detecting GPTQ vs bf16."""
+    if _is_gptq_tensor(name):
+        return ("gptq_gidx", None) if name.endswith(".g_idx") else ("gptq_row", None)
+    return "row", 1
+
+
+def get_split_strategy(name: str, num_kv_heads: int = 0) -> tuple[str, int | None]:
     """
-    Determine how to split a tensor for TP=2.
+    Determine how to split a tensor for TP.
+
+    Args:
+        name: fully qualified tensor name
+        num_kv_heads: original (pre-split) num_key_value_heads from config.
+            Used to replicate k/v projections when num_kv_heads < TP_SIZE.
 
     Returns (strategy, split_dim).
     Strategies:
@@ -80,45 +103,45 @@ def get_split_strategy(name: str) -> tuple[str, int | None]:
     # via weight_loader() and fuses internally. Config moe_intermediate_size
     # is already divided by TP in modify_config().
     if ".experts." in n:
-        is_gptq = any(n.endswith(sfx) for sfx in (".qweight", ".qzeros", ".scales", ".g_idx"))
-        if is_gptq:
-            is_col = ".gate_proj." in n or ".up_proj." in n
-            is_row = ".down_proj." in n
-            if is_col:
-                return ("replicate", None) if n.endswith(".g_idx") else ("gptq_col", None)
-            if is_row:
-                return ("gptq_gidx", None) if n.endswith(".g_idx") else ("gptq_row", None)
-        else:
-            # BF16 expert: col split gate/up, row split down
-            if ".gate_proj." in n or ".up_proj." in n:
-                return "col", 0
-            if ".down_proj." in n:
-                return "row", 1
+        if ".gate_proj." in n or ".up_proj." in n:
+            return _col_strategy(n)
+        if ".down_proj." in n:
+            return _row_strategy(n)
 
     # ---- full attention (self_attn) ----
     if ".self_attn." in n:
-        if ".q_proj." in n or ".k_proj." in n or ".v_proj." in n:
-            return "col", 0
+        if ".q_proj." in n:
+            return _col_strategy(n)
+        if ".k_proj." in n or ".v_proj." in n:
+            if 0 < num_kv_heads < TP_SIZE:
+                return "replicate", None
+            return _col_strategy(n)
         if ".o_proj." in n:
-            return "row", 1
+            return _row_strategy(n)
 
     # ---- linear / Mamba2 attention ----
     if ".linear_attn." in n:
-        if any(p in n for p in (".in_proj_qkv.", ".in_proj_z.", ".in_proj_a.", ".in_proj_b.")):
-            return "col", 0
-        if ".out_proj." in n:
-            return "row", 1
+        if _is_gptq_tensor(n):
+            if any(p in n for p in (".in_proj_qkv.", ".in_proj_z.", ".in_proj_a.", ".in_proj_b.")):
+                return _col_strategy(n)
+            if ".out_proj." in n:
+                return _row_strategy(n)
+        else:
+            if any(p in n for p in (".in_proj_qkv.", ".in_proj_z.", ".in_proj_a.", ".in_proj_b.")):
+                return "col", 0
+            if ".out_proj." in n:
+                return "row", 1
         if ".conv1d." in n:
             return "col", 0
         if ".A_log" in n or ".dt_bias" in n:
             return "col_1d", 0
 
-    # ---- shared expert (bf16, not GPTQ) ----
+    # ---- shared expert (GPTQ or bf16) ----
     if ".shared_expert." in n:
         if ".gate_proj." in n or ".up_proj." in n:
-            return "col", 0
+            return _col_strategy(n)
         if ".down_proj." in n:
-            return "row", 1
+            return _row_strategy(n)
 
     # ---- fallback ----
     print(f"  WARNING: unrecognised tensor '{n}', replicating")
@@ -172,7 +195,7 @@ def split_tensor(tensor: np.ndarray, strategy: str, rank: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def modify_config(config: dict) -> dict:
-    """Return a config.json suitable for one TP=2 rank (served with TP=1)."""
+    """Return a config.json suitable for one TP rank (served with TP=1)."""
     cfg = copy.deepcopy(config)
     tc = cfg.get("text_config", cfg)
 
@@ -197,7 +220,8 @@ def modify_config(config: dict) -> dict:
 # Shard processing
 # ---------------------------------------------------------------------------
 
-def process_shard(shard_path: str, rank_dirs: list[str]) -> int:
+def process_shard(shard_path: str, rank_dirs: list[str],
+                  num_kv_heads: int = 0) -> int:
     """Read one safetensors shard, split every tensor, write both ranks."""
     shard_name = os.path.basename(shard_path)
 
@@ -211,7 +235,7 @@ def process_shard(shard_path: str, rank_dirs: list[str]) -> int:
     for rank in range(TP_SIZE):
         rank_tensors: dict[str, np.ndarray] = {}
         for key, tensor in originals.items():
-            strategy, _ = get_split_strategy(key)
+            strategy, _ = get_split_strategy(key, num_kv_heads)
             rank_tensors[key] = split_tensor(tensor, strategy, rank)
 
         out = os.path.join(rank_dirs[rank], shard_name)
@@ -251,6 +275,8 @@ def main():
     # ---- config ----
     with open(model_dir / "config.json") as f:
         orig_cfg = json.load(f)
+    orig_tc = orig_cfg.get("text_config", orig_cfg)
+    num_kv_heads = orig_tc.get("num_key_value_heads", 0)
     mod_cfg = modify_config(orig_cfg)
     for r in range(TP_SIZE):
         with open(os.path.join(rank_dirs[r], "config.json"), "w") as f:
@@ -301,7 +327,7 @@ def main():
         path = str(model_dir / sf)
         print(f"[{i+1}/{len(shard_files)}] {sf} …", flush=True)
         t0 = time.time()
-        n = process_shard(path, rank_dirs)
+        n = process_shard(path, rank_dirs, num_kv_heads)
         total_tensors += n
         print(f"       {n} tensors  ({time.time()-t0:.1f}s)", flush=True)
         if args.delete_shards:

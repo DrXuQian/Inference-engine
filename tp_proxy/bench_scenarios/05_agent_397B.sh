@@ -10,7 +10,7 @@ mkdir -p "$OUT"
 
 echo "=== Split/Prune: Agent长程调用: Qwen 397B-A17B, TP=2&4 ==="
 
-for TP in 2; do
+for TP in 2 4; do
     echo ""
     echo "--- TP=$TP ---"
     TP_DIR="$OUT/tp${TP}"
@@ -23,4 +23,4 @@ for TP in 2; do
 done
 
 echo ""
-echo "Done: $OUT/tp2/model"
+echo "Done: $OUT/tp2/model  $OUT/tp4/model"
