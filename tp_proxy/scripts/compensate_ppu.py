@@ -419,10 +419,10 @@ def main():
     batch = args.batch_size
     actual_bs = tail.get("actual_decode_bs", 0)
     if actual_bs > 0 and actual_bs != batch:
-        print(f"  WARNING: requested batch={batch} but trace shows actual decode bs={actual_bs}")
-        print(f"  (vLLM scheduler could not batch — likely insufficient KV cache memory)")
-        print(f"  Using actual_decode_bs={actual_bs} for compensation")
-        batch = actual_bs
+        print(f"ERROR: requested batch={batch} but trace shows actual decode bs={actual_bs}")
+        print(f"  vLLM scheduler could not batch — likely insufficient KV cache memory.")
+        print(f"  Increase GPU memory or reduce max_seq_len to fit batch={batch}.")
+        sys.exit(1)
     decode_comm = comm["decode_comm_ms"]
     prefill_comm = comm["prefill_comm_ms"]
 
