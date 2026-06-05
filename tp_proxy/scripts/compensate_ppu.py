@@ -192,50 +192,54 @@ def extract_decode_from_nvtx(sqlite_path: str,
     print(f"  decode_0 NVTX: {len(dec_evts)} kernels, "
           f"wall={(nvtx_end - nvtx_start) / 1e6:.2f}ms")
 
-    # Find the LAST lm_head kernel within decode_0
-    lm_indices = [i for i, e in enumerate(dec_evts) if lm_head_kernel in e[3]]
-    print(f"  lm_head ('{lm_head_kernel}'): {len(lm_indices)} in decode_0")
+    # Find the last CUDA graph via graphNodeId > 0
+    n_graph = sum(1 for e in dec_evts if e[4] > 0)
+    n_nongraph = len(dec_evts) - n_graph
+    print(f"  graph kernels: {n_graph}, non-graph: {n_nongraph}")
 
-    if not lm_indices:
-        print("  WARNING: no lm_head events found in decode_0")
+    # Find the last kernel with graphNodeId > 0 = end of last CUDA graph
+    last_graph_idx = None
+    for i in range(len(dec_evts) - 1, -1, -1):
+        if dec_evts[i][4] > 0:
+            last_graph_idx = i
+            break
+
+    if last_graph_idx is None:
+        print("  WARNING: no graphNodeId > 0 kernels in decode_0")
         return None
 
-    idx_last_lm = lm_indices[-1]
+    # Find start of the last CUDA graph: walk backwards from last_graph_idx
+    # until we hit a non-graph kernel (graphNodeId == 0)
+    first_graph_idx = last_graph_idx
+    for i in range(last_graph_idx - 1, -1, -1):
+        if dec_evts[i][4] > 0:
+            first_graph_idx = i
+        else:
+            break
 
-    # Tail: last lm_head + everything after it within decode_0 = lm_head + sampling
-    tail_evts = dec_evts[idx_last_lm:]
-    lm_dur = dec_evts[idx_last_lm][1]
-    samp_evts = dec_evts[idx_last_lm + 1:]
+    enc_evts = dec_evts[first_graph_idx:last_graph_idx + 1]
+    tail_evts = dec_evts[last_graph_idx + 1:]
+    print(f"  Last CUDA graph: kernels [{first_graph_idx}..{last_graph_idx}] "
+          f"({len(enc_evts)} kernels)")
+    print(f"  Tail (after graph): {len(tail_evts)} kernels")
 
-    # Encoder: the last CUDA graph = dense kernel burst before the last lm_head.
-    # Find it by locating the largest inter-kernel gap before lm_head.
-    pre_lm = dec_evts[:idx_last_lm]
-    if len(pre_lm) >= 2:
-        max_gap = -1
-        split_at = 0
-        for k in range(len(pre_lm) - 1):
-            gap = pre_lm[k + 1][0] - pre_lm[k][2]
-            if gap > max_gap:
-                max_gap = gap
-                split_at = k + 1
-        enc_evts = pre_lm[split_at:]
-        print(f"  Last CUDA graph: largest gap at kernel {split_at}/{len(pre_lm)}, "
-              f"gap={max_gap / 1e6:.4f}ms")
-    elif pre_lm:
-        enc_evts = pre_lm
-    else:
-        enc_evts = []
+    # Split tail into lm_head + sampling
+    lm_dur = 0
+    samp_evts = []
+    for e in tail_evts:
+        if lm_head_kernel in e[3]:
+            lm_dur += e[1]
+        else:
+            samp_evts.append(e)
 
     encoder_ns = sum(e[1] for e in enc_evts)
     sampling_ns = sum(e[1] for e in samp_evts)
 
-    # Step wall: from encoder start to last sampling kernel end
-    if enc_evts and samp_evts:
-        step_wall = samp_evts[-1][2] - enc_evts[0][0]
-    elif enc_evts:
-        step_wall = dec_evts[idx_last][2] - enc_evts[0][0]
+    # Step wall: from encoder start to last tail kernel end
+    if tail_evts:
+        step_wall = tail_evts[-1][2] - enc_evts[0][0]
     else:
-        step_wall = dec_evts[idx_last][2] - dec_evts[idx_last][0]
+        step_wall = enc_evts[-1][2] - enc_evts[0][0]
 
     # Kernel breakdown
     gemm_re = _re.compile(
@@ -270,10 +274,10 @@ def extract_decode_from_nvtx(sqlite_path: str,
     tpot_ms_v = step_wall / 1e6
 
     gf = kernel_breakdown["enc_gemm_frac"]
-    print(f"\n  Last decode step (NVTX-bounded):")
-    print(f"    encoder (kernel sum): {encoder_ms_v:.4f} ms ({len(enc_evts)} kernels)")
+    print(f"\n  Last decode step (NVTX + graphNodeId):")
+    print(f"    encoder (CUDA graph): {encoder_ms_v:.4f} ms ({len(enc_evts)} kernels)")
     print(f"    lm_head:              {lm_head_ms_v:.4f} ms")
-    print(f"    sampling (kernel sum):{sampling_ms_v:.4f} ms ({len(samp_evts)} kernels)")
+    print(f"    sampling:             {sampling_ms_v:.4f} ms ({len(samp_evts)} kernels)")
     print(f"    step wall:            {tpot_ms_v:.4f} ms")
     print(f"  Encoder breakdown:")
     print(f"    gemm (INT4-able):     {kernel_breakdown['enc_gemm_ms']:.4f} ms ({gf*100:.0f}%)")
