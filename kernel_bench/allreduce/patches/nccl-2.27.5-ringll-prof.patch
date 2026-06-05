@@ -1,0 +1,209 @@
+NCCL Ring LL instrumentation patch.
+
+Base: NVIDIA NCCL v2.27.5-1
+Working tree used for measurement: /root/autodl-tmp/nccl-ringll-prof
+
+This patch adds aggregate thread-cycle counters around NCCL's LL primitive
+operations. It is for diagnosis only; `clock64()` and atomics perturb the
+kernel.
+
+diff --git a/src/device/ll_prof.h b/src/device/ll_prof.h
+new file mode 100644
+index 0000000..90cd14f
+--- /dev/null
++++ b/src/device/ll_prof.h
+@@ -0,0 +1,32 @@
++/*************************************************************************
++ * Copyright (c) 2016-2022, NVIDIA CORPORATION. All rights reserved.
++ *
++ * See LICENSE.txt for license information
++ ************************************************************************/
++
++#ifndef NCCL_LL_PROF_H_
++#define NCCL_LL_PROF_H_
++
++enum ncclLlProfCounter {
++  ncclLlProfGenericCycles = 0,
++  ncclLlProfGenericCalls,
++  ncclLlProfWaitSendCycles,
++  ncclLlProfWaitSendCalls,
++  ncclLlProfWaitSendPolls,
++  ncclLlProfReadCycles,
++  ncclLlProfReadCalls,
++  ncclLlProfReadPolls,
++  ncclLlProfStoreCycles,
++  ncclLlProfStoreCalls,
++  ncclLlProfBarrierCycles,
++  ncclLlProfBarrierCalls,
++  ncclLlProfCounterCount
++};
++
++extern __device__ unsigned long long ncclLlProfCounters[ncclLlProfCounterCount];
++
++__device__ __forceinline__ void ncclLlProfAdd(int index, unsigned long long value) {
++  if (value != 0) atomicAdd(&ncclLlProfCounters[index], value);
++}
++
++#endif
+diff --git a/src/device/common.cu b/src/device/common.cu
+index a8b5ed5..5155c6f 100644
+--- a/src/device/common.cu
++++ b/src/device/common.cu
+@@ -9,0 +10,3 @@
++#include "ll_prof.h"
++#include <cuda_runtime.h>
++#include <stdio.h>
+@@ -15,0 +19,72 @@ __shared__ ncclShmemData ncclShmem;
++__device__ unsigned long long ncclLlProfCounters[ncclLlProfCounterCount];
++
++static const char* ncclLlProfName(int i) {
++  switch (i) {
++  case ncclLlProfGenericCycles: return "generic_cycles";
++  case ncclLlProfGenericCalls: return "generic_calls";
++  case ncclLlProfWaitSendCycles: return "waitSend_cycles";
++  case ncclLlProfWaitSendCalls: return "waitSend_calls";
++  case ncclLlProfWaitSendPolls: return "waitSend_polls";
++  case ncclLlProfReadCycles: return "readLL_cycles";
++  case ncclLlProfReadCalls: return "readLL_calls";
++  case ncclLlProfReadPolls: return "readLL_polls";
++  case ncclLlProfStoreCycles: return "storeLL_cycles";
++  case ncclLlProfStoreCalls: return "storeLL_calls";
++  case ncclLlProfBarrierCycles: return "barrier_cycles";
++  case ncclLlProfBarrierCalls: return "barrier_calls";
++  default: return "unknown";
++  }
++}
++
++extern "C" __attribute__((visibility("default"))) int ncclLlProfResetAll(int ndevs, const int* devs) {
++  unsigned long long zero[ncclLlProfCounterCount] = {};
++  for (int i = 0; i < ndevs; i++) {
++    cudaError_t err = cudaSetDevice(devs[i]);
++    if (err != cudaSuccess) return (int)err;
++    err = cudaMemcpyToSymbol(ncclLlProfCounters, zero, sizeof(zero));
++    if (err != cudaSuccess) return (int)err;
++  }
++  return 0;
++}
++
++extern "C" __attribute__((visibility("default"))) int ncclLlProfDumpAll(int ndevs, const int* devs, const char* tag) {
++  unsigned long long total[ncclLlProfCounterCount] = {};
++  for (int d = 0; d < ndevs; d++) {
++    unsigned long long one[ncclLlProfCounterCount] = {};
++    cudaError_t err = cudaSetDevice(devs[d]);
++    if (err != cudaSuccess) return (int)err;
++    err = cudaMemcpyFromSymbol(one, ncclLlProfCounters, sizeof(one));
++    if (err != cudaSuccess) return (int)err;
++    for (int i = 0; i < ncclLlProfCounterCount; i++) total[i] += one[i];
++  }
++
++  unsigned long long generic = total[ncclLlProfGenericCycles];
++  unsigned long long known =
++      total[ncclLlProfWaitSendCycles] + total[ncclLlProfReadCycles] +
++      total[ncclLlProfStoreCycles] + total[ncclLlProfBarrierCycles];
++  long long other = (long long)generic - (long long)known;
++
++  fprintf(stderr, "\nNCCL_LL_PROF tag=%s devices=%d\n", tag ? tag : "", ndevs);
++  for (int i = 0; i < ncclLlProfCounterCount; i++) {
++    fprintf(stderr, "  %-18s %llu\n", ncclLlProfName(i), total[i]);
++  }
++  if (generic != 0) {
++    fprintf(stderr,
++            "  phase_pct_vs_generic waitSend=%.2f readLL=%.2f storeLL=%.2f barrier=%.2f other=%.2f\n",
++            100.0 * (double)total[ncclLlProfWaitSendCycles] / (double)generic,
++            100.0 * (double)total[ncclLlProfReadCycles] / (double)generic,
++            100.0 * (double)total[ncclLlProfStoreCycles] / (double)generic,
++            100.0 * (double)total[ncclLlProfBarrierCycles] / (double)generic,
++            100.0 * (double)other / (double)generic);
++  }
++  if (total[ncclLlProfReadCalls] != 0) {
++    fprintf(stderr, "  avg_readLL_polls_per_call %.3f\n",
++            (double)total[ncclLlProfReadPolls] / (double)total[ncclLlProfReadCalls]);
++  }
++  if (total[ncclLlProfWaitSendCalls] != 0) {
++    fprintf(stderr, "  avg_waitSend_polls_per_call %.3f\n",
++            (double)total[ncclLlProfWaitSendPolls] / (double)total[ncclLlProfWaitSendCalls]);
++  }
++  return 0;
++}
++
+diff --git a/src/device/primitives.h b/src/device/primitives.h
+index 3b9f169..c91bdef 100644
+--- a/src/device/primitives.h
++++ b/src/device/primitives.h
+@@ -13,0 +14 @@
++#include "ll_prof.h"
+diff --git a/src/device/prims_ll.h b/src/device/prims_ll.h
+index 2a0f556..6efc331 100644
+--- a/src/device/prims_ll.h
++++ b/src/device/prims_ll.h
+@@ -6,0 +7,2 @@
++#include "ll_prof.h"
++
+@@ -46,0 +49 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    uint64_t profStart = clock64();
+@@ -51,0 +55,2 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    profBarrierCycles += clock64() - profStart;
++    profBarrierCalls += 1;
+@@ -54,0 +60,12 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++  uint64_t profGenericCycles = 0;
++  uint64_t profGenericCalls = 0;
++  uint64_t profWaitSendCycles = 0;
++  uint64_t profWaitSendCalls = 0;
++  uint64_t profWaitSendPolls = 0;
++  uint64_t profReadCycles = 0;
++  uint64_t profReadCalls = 0;
++  uint64_t profReadPolls = 0;
++  uint64_t profStoreCycles = 0;
++  uint64_t profStoreCalls = 0;
++  uint64_t profBarrierCycles = 0;
++  uint64_t profBarrierCalls = 0;
+@@ -56,0 +74,2 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    uint64_t profStart = clock64();
++    uint64_t profPolls = 0;
+@@ -59,0 +79 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++        profPolls++;
+@@ -68,0 +89,3 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    profWaitSendCycles += clock64() - profStart;
++    profWaitSendCalls += 1;
++    profWaitSendPolls += profPolls;
+@@ -93,0 +117,2 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    uint64_t profStart = clock64();
++    uint64_t profPolls = 0;
+@@ -94,0 +120 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++      profPolls++;
+@@ -97,0 +124,3 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    profReadCycles += clock64() - profStart;
++    profReadCalls += 1;
++    profReadPolls += profPolls;
+@@ -117,0 +147,2 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    uint64_t profStart = clock64();
++    uint64_t profPolls = 0;
+@@ -118,0 +150 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++      profPolls++;
+@@ -121,0 +154,3 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    profReadCycles += clock64() - profStart;
++    profReadCalls += 1;
++    profReadPolls += profPolls;
+@@ -126,0 +162 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    uint64_t profStart = clock64();
+@@ -127,0 +164,2 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    profStoreCycles += clock64() - profStart;
++    profStoreCalls += 1;
+@@ -225,0 +264 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    uint64_t profStart = clock64();
+@@ -297,0 +337,2 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    profGenericCycles += clock64() - profStart;
++    profGenericCalls += 1;
+@@ -361,0 +403,12 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload>:
++    ncclLlProfAdd(ncclLlProfGenericCycles, profGenericCycles);
++    ncclLlProfAdd(ncclLlProfGenericCalls, profGenericCalls);
++    ncclLlProfAdd(ncclLlProfWaitSendCycles, profWaitSendCycles);
++    ncclLlProfAdd(ncclLlProfWaitSendCalls, profWaitSendCalls);
++    ncclLlProfAdd(ncclLlProfWaitSendPolls, profWaitSendPolls);
++    ncclLlProfAdd(ncclLlProfReadCycles, profReadCycles);
++    ncclLlProfAdd(ncclLlProfReadCalls, profReadCalls);
++    ncclLlProfAdd(ncclLlProfReadPolls, profReadPolls);
++    ncclLlProfAdd(ncclLlProfStoreCycles, profStoreCycles);
++    ncclLlProfAdd(ncclLlProfStoreCalls, profStoreCalls);
++    ncclLlProfAdd(ncclLlProfBarrierCycles, profBarrierCycles);
++    ncclLlProfAdd(ncclLlProfBarrierCalls, profBarrierCalls);

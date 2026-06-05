@@ -1,0 +1,66 @@
+{
+  "world_size": 2,
+  "backend": "nccl",
+  "results": [
+    {
+      "size_bytes": 1024,
+      "median_us": 91.2,
+      "mean_us": 107.6,
+      "p99_us": 190.6
+    },
+    {
+      "size_bytes": 4096,
+      "median_us": 66.1,
+      "mean_us": 71.8,
+      "p99_us": 258.9
+    },
+    {
+      "size_bytes": 8192,
+      "median_us": 88.8,
+      "mean_us": 78.3,
+      "p99_us": 102.0
+    },
+    {
+      "size_bytes": 16384,
+      "median_us": 56.5,
+      "mean_us": 55.8,
+      "p99_us": 67.9
+    },
+    {
+      "size_bytes": 32768,
+      "median_us": 49.2,
+      "mean_us": 48.0,
+      "p99_us": 55.2
+    },
+    {
+      "size_bytes": 65536,
+      "median_us": 58.3,
+      "mean_us": 54.2,
+      "p99_us": 174.3
+    },
+    {
+      "size_bytes": 131072,
+      "median_us": 37.1,
+      "mean_us": 35.1,
+      "p99_us": 185.0
+    },
+    {
+      "size_bytes": 262144,
+      "median_us": 40.9,
+      "mean_us": 40.9,
+      "p99_us": 93.5
+    },
+    {
+      "size_bytes": 524288,
+      "median_us": 51.2,
+      "mean_us": 51.3,
+      "p99_us": 53.5
+    },
+    {
+      "size_bytes": 1048576,
+      "median_us": 74.3,
+      "mean_us": 74.5,
+      "p99_us": 299.4
+    }
+  ]
+}

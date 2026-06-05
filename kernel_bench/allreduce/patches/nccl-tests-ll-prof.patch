@@ -1,0 +1,66 @@
+nccl-tests hook for NCCL Ring LL instrumentation.
+
+Base: nccl-tests master as checked out in /tmp/nccl-tests
+
+This patch uses `dlsym()` to call optional exported helpers from the
+instrumented NCCL build when `NCCL_LL_PROF=1` is set. Timing captures
+`deltaSec` before the dump so the printed `all_reduce_perf` time does not
+include the dump cost.
+
+diff --git a/src/common.cu b/src/common.cu
+index b14c3d5..d8d3c3b 100644
+--- a/src/common.cu
++++ b/src/common.cu
+@@ -15,0 +16 @@
++#include <dlfcn.h>
+@@ -108,0 +110,39 @@ int deviceCtaCount = 16; // Default number of CTAs for device implementation
++typedef int (*ncclLlProfResetAllFn)(int, const int*);
++typedef int (*ncclLlProfDumpAllFn)(int, const int*, const char*);
++
++static int ncclLlProfEnabled() {
++  const char* env = getenv("NCCL_LL_PROF");
++  return env && atoi(env) != 0;
++}
++
++static ncclLlProfResetAllFn ncclLlProfResetAllPtr() {
++  return (ncclLlProfResetAllFn)dlsym(RTLD_DEFAULT, "ncclLlProfResetAll");
++}
++
++static ncclLlProfDumpAllFn ncclLlProfDumpAllPtr() {
++  return (ncclLlProfDumpAllFn)dlsym(RTLD_DEFAULT, "ncclLlProfDumpAll");
++}
++
++static void ncclLlProfResetIfEnabled(struct threadArgs* args) {
++  if (!ncclLlProfEnabled() || args->thread != 0) return;
++  ncclLlProfResetAllFn fn = ncclLlProfResetAllPtr();
++  if (fn) {
++    int ret = fn(args->nGpus, args->gpus);
++    if (ret != 0) fprintf(stderr, "NCCL_LL_PROF reset failed: %d\n", ret);
++  } else {
++    fprintf(stderr, "NCCL_LL_PROF requested, but instrumented NCCL API was not found\n");
++  }
++}
++
++static void ncclLlProfDumpIfEnabled(struct threadArgs* args, size_t count, ncclDataType_t type, int in_place) {
++  if (!ncclLlProfEnabled() || args->thread != 0) return;
++  ncclLlProfDumpAllFn fn = ncclLlProfDumpAllPtr();
++  if (fn) {
++    char tag[128];
++    snprintf(tag, sizeof(tag), "bytes=%zu type=%d in_place=%d iters=%d agg=%d graph=%d",
++             count * wordSize(type), (int)type, in_place, iters, agg_iters, cudaGraphLaunches);
++    int ret = fn(args->nGpus, args->gpus, tag);
++    if (ret != 0) fprintf(stderr, "NCCL_LL_PROF dump failed: %d\n", ret);
++  }
++}
++
+@@ -584,0 +625,4 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
++  Barrier(args);
++  ncclLlProfResetIfEnabled(args);
++  Barrier(args);
++
+@@ -618,0 +662,5 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
++
++  Barrier(args);
++  ncclLlProfDumpIfEnabled(args, count, type, in_place);
++  Barrier(args);
++

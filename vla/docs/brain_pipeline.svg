@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 560" font-family="Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#555"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="460" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#2B2B2B">Brain Models</text>
+  <text x="460" y="56" text-anchor="middle" font-size="12" fill="#777">CLIPDINO and Qwen3-VL-30B-A3B are independent model paths</text>
+
+  <!-- Left path: CLIPDINO -->
+  <rect x="55" y="110" width="345" height="365" rx="12" fill="#F8FBFF" stroke="#2166AC" stroke-width="2"/>
+  <text x="227" y="140" text-anchor="middle" font-size="16" font-weight="bold" fill="#2166AC">CLIPDINO</text>
+  <text x="227" y="164" text-anchor="middle" font-size="12" fill="#555">single visual model</text>
+
+  <rect x="115" y="205" width="210" height="70" rx="8" fill="#FFFFFF" stroke="#888" stroke-width="1.5"/>
+  <text x="220" y="232" text-anchor="middle" font-size="13" font-weight="bold" fill="#444">Image Input</text>
+  <text x="220" y="254" text-anchor="middle" font-size="12" fill="#555">1 image</text>
+
+  <line x1="220" y1="275" x2="220" y2="315" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="105" y="320" width="240" height="88" rx="10" fill="#EBF2FA" stroke="#2166AC" stroke-width="2"/>
+  <text x="225" y="350" text-anchor="middle" font-size="15" font-weight="bold" fill="#2166AC">CLIPDINO Model</text>
+  <text x="225" y="374" text-anchor="middle" font-size="12" fill="#555">one model, one image input</text>
+  <text x="225" y="396" text-anchor="middle" font-size="11" fill="#555">no feature handoff to Qwen3-VL</text>
+
+  <line x1="220" y1="408" x2="220" y2="438" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="105" y="443" width="240" height="42" rx="7" fill="#EAF4FF" stroke="#77A9D8" stroke-width="1.3"/>
+  <text x="225" y="469" text-anchor="middle" font-size="12" fill="#444">independent image embedding / score</text>
+
+  <!-- Separation -->
+  <line x1="460" y1="95" x2="460" y2="500" stroke="#BDBDBD" stroke-width="1.2" stroke-dasharray="6 6"/>
+  <text x="460" y="520" text-anchor="middle" font-size="11" fill="#777">independent execution paths</text>
+
+  <!-- Right path: Qwen3-VL -->
+  <rect x="520" y="110" width="345" height="365" rx="12" fill="#F8FFF8" stroke="#3D8B3D" stroke-width="2"/>
+  <text x="692" y="140" text-anchor="middle" font-size="16" font-weight="bold" fill="#3D8B3D">Qwen3-VL-30B-A3B</text>
+  <text x="692" y="164" text-anchor="middle" font-size="12" fill="#555">VLM reasoning model</text>
+
+  <rect x="550" y="205" width="135" height="70" rx="8" fill="#FFFFFF" stroke="#888" stroke-width="1.5"/>
+  <text x="617" y="232" text-anchor="middle" font-size="13" font-weight="bold" fill="#444">Text Input</text>
+  <text x="617" y="254" text-anchor="middle" font-size="12" fill="#555">200 tokens</text>
+
+  <rect x="705" y="205" width="135" height="70" rx="8" fill="#FFFFFF" stroke="#888" stroke-width="1.5"/>
+  <text x="772" y="232" text-anchor="middle" font-size="13" font-weight="bold" fill="#444">Image Input</text>
+  <text x="772" y="254" text-anchor="middle" font-size="12" fill="#555">4 images</text>
+
+  <line x1="617" y1="275" x2="665" y2="315" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="772" y1="275" x2="725" y2="315" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="570" y="320" width="250" height="88" rx="10" fill="#EBF7EB" stroke="#3D8B3D" stroke-width="2"/>
+  <text x="695" y="350" text-anchor="middle" font-size="15" font-weight="bold" fill="#3D8B3D">VLM Forward</text>
+  <text x="695" y="374" text-anchor="middle" font-size="12" fill="#555">text + 4 image inputs only</text>
+  <text x="695" y="396" text-anchor="middle" font-size="11" fill="#555">not conditioned on CLIPDINO output</text>
+
+  <line x1="695" y1="408" x2="695" y2="438" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="570" y="443" width="250" height="42" rx="7" fill="#FAEBEB" stroke="#B52B27" stroke-width="1.3"/>
+  <text x="695" y="469" text-anchor="middle" font-size="12" fill="#444">reasoning tokens / high-level plan</text>
+</svg>
