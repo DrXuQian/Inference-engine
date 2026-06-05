@@ -165,7 +165,7 @@ def extract_decode_from_nvtx(sqlite_path: str,
     nvtx_start, nvtx_end = row
 
     # Find prefill marker for TTFT
-    c.execute(f'SELECT "{start_col}", "{end_col}" FROM "{nvtx_table}" '
+    c.execute(f'SELECT "{start_col}", "{end_col}", "{text_col}" FROM "{nvtx_table}" '
               f'WHERE "{text_col}" LIKE \'%prefill%\'')
     prefill_rows = c.fetchall()
     conn.close()
@@ -176,16 +176,23 @@ def extract_decode_from_nvtx(sqlite_path: str,
 
     print(f"  Total kernels: {len(all_evts)}")
 
-    # Prefill kernel time (from standalone prefill NVTX marker)
+    # Prefill: use the standalone "prefill" marker (exact match), not inner "prefill bs=..." markers
     ttft_ms = 0.0
     ttft_wall_ms = 0.0
     if prefill_rows:
-        pf_start, pf_end = prefill_rows[-1]
+        print(f"  Prefill markers found ({len(prefill_rows)}):")
+        for i, row in enumerate(prefill_rows):
+            wall = (row[1] - row[0]) / 1e6
+            print(f"    [{i}] '{row[2]}'  wall={wall:.2f}ms")
+        # Prefer exact "prefill" marker from main process
+        exact = [r for r in prefill_rows if r[2].strip() == 'prefill']
+        chosen = exact[0] if exact else prefill_rows[0]
+        pf_start, pf_end = chosen[0], chosen[1]
         pf_kernels = [e for e in all_evts if e[0] >= pf_start and e[2] <= pf_end]
         ttft_ms = sum(e[1] for e in pf_kernels) / 1e6
         ttft_wall_ms = (pf_end - pf_start) / 1e6
-        print(f"  Prefill (NVTX, {len(pf_kernels)} kernels): "
-              f"kernel={ttft_ms:.2f}ms, wall={ttft_wall_ms:.2f}ms")
+        print(f"  Using '{chosen[2]}': kernel={ttft_ms:.2f}ms, wall={ttft_wall_ms:.2f}ms, "
+              f"{len(pf_kernels)} kernels")
 
     # Kernels within decode_0 NVTX range
     dec_evts = [e for e in all_evts if e[0] >= nvtx_start and e[2] <= nvtx_end]
