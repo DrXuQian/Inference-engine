@@ -263,37 +263,8 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1,
     return total_weight + total_kv, total_weight, total_kv
 
 
-def _find_hidden_size(comp_path: str) -> int:
-    """Try to find hidden_size from model config near a compensated.json."""
-    import glob as _glob
-    base = os.path.dirname(comp_path)
-    for pattern in [
-        os.path.join(base, "model", "rank_0_*", "config.json"),
-        os.path.join(base, "model", "split", "rank_0", "config.json"),
-        os.path.join(base, "..", "model", "rank_0_*", "config.json"),
-        os.path.join(base, "..", "model", "split", "rank_0", "config.json"),
-    ]:
-        for p in _glob.glob(pattern):
-            cfg = load_model_config(p.replace("/config.json", ""))
-            if cfg:
-                return cfg["hidden_size"]
-    meta_path = os.path.join(base, "model", "split_meta.json")
-    if not os.path.exists(meta_path):
-        meta_path = os.path.join(base, "..", "model", "split_meta.json")
-    if os.path.exists(meta_path):
-        with open(meta_path) as f:
-            meta = json.load(f)
-        orig = meta.get("original_model", "")
-        if orig:
-            cfg = load_model_config(orig)
-            if cfg:
-                return cfg["hidden_size"]
-    return 0
-
-
 def apply_comm_model(data: dict, bw_gbps: float, lat_us: float,
-                     input_len: int, batch: int = 1,
-                     comp_path: str = "") -> None:
+                     input_len: int, batch: int = 1) -> None:
     """Recompute compensated metrics with modeled communication.
 
     Per-operation latency = lat_us + data_bytes / (bw_gbps * 1e9).
@@ -309,14 +280,8 @@ def apply_comm_model(data: dict, bw_gbps: float, lat_us: float,
     hidden = data.get("hidden_size", 0)
     tail = data.get("tail", {})
 
-    if not hidden and comp_path:
-        hidden = _find_hidden_size(comp_path)
-        if hidden:
-            data["hidden_size"] = hidden
-
     if not hidden:
-        print(f"  WARNING: no hidden_size in {os.path.basename(comp_path or '?')}, "
-              f"re-run compensate_ppu.py to add it")
+        print(f"  ERROR: no hidden_size in compensated.json, re-run compensate_ppu.py")
         return
     if not tail.get("encoder_ms"):
         return
@@ -455,7 +420,7 @@ def main():
             bw = comm_bw_map.get(tp, comm_bw_map.get(0, 0))
             lat = comm_lat_map.get(tp, comm_lat_map.get(0, 0))
             if bw > 0:
-                apply_comm_model(d, bw, lat, input_len, batch, comp_path=path)
+                apply_comm_model(d, bw, lat, input_len, batch)
         return d
 
     if comm_override and fmt == "markdown":

@@ -9,14 +9,14 @@ Combines:
 
 Usage:
     python compensate_ppu.py \
-        --bench-results bench.json \
-        --model-dir /path/to/model \
-        --asys-sqlite trace.sqlite
-
-    python compensate_ppu.py \
-        --bench-results bench.json \
         --model-dir /path/to/model \
         --asys-sqlite trace.sqlite \
+        --output-len 1024
+
+    python compensate_ppu.py \
+        --model-dir /path/to/model \
+        --asys-sqlite trace.sqlite \
+        --output-len 1024 \
         --comm-json comm.json \
         --pruned-layers 4 --original-layers 24 --tp-size 2
 """
@@ -316,13 +316,11 @@ def extract_decode_from_nvtx(sqlite_path: str,
 
 def main():
     ap = argparse.ArgumentParser(description="PPU compensation")
-    ap.add_argument("--bench-results", default=None,
-                    help="bench.json (optional if --asys-sqlite provided, reads TTFT/TPOT from trace)")
     ap.add_argument("--model-dir", required=True)
-    ap.add_argument("--output-len", type=int, default=None)
+    ap.add_argument("--output-len", type=int, required=True)
     ap.add_argument("--comm-json", default=None,
                     help="comm.json from comm_bench.sh (AR/AG latency)")
-    ap.add_argument("--asys-sqlite", default=None,
+    ap.add_argument("--asys-sqlite", required=True,
                     help="asys trace sqlite for tail extraction")
     ap.add_argument("--pruned-layers", type=int, default=None)
     ap.add_argument("--original-layers", type=int, default=None)
@@ -341,12 +339,6 @@ def main():
     ap.add_argument("--output-json", default="compensated_ppu.json")
     args = ap.parse_args()
 
-    # Load bench results (optional — can read from trace instead)
-    bench = None
-    if args.bench_results and os.path.exists(args.bench_results):
-        with open(args.bench_results) as f:
-            bench = json.load(f)
-
     # Load config + meta
     cfg = load_model_config(args.model_dir)
     meta = load_meta(args.model_dir)
@@ -358,18 +350,7 @@ def main():
     original = args.original_layers or (meta and meta.get("original_layers")) or pruned
     layer_scale = original / pruned if pruned > 0 else 1
 
-    if bench:
-        results_list = bench.get("results", [bench])
-    else:
-        results_list = []
-
-    # Auto-read output_len
     output_len = args.output_len
-    if output_len is None and bench:
-        output_len = bench.get("output_len") or next(
-            (r.get("output_len") or r.get("output_tokens") for r in results_list if "error" not in r), 64)
-    if output_len is None:
-        output_len = 64
 
     print(f"Model: hidden={hidden}, vocab={vocab}")
     print(f"Layers: {pruned} pruned / {original} original (scale={layer_scale:.2f}x), TP={tp_size}")
@@ -402,18 +383,14 @@ def main():
     print()
 
     # === b) Tail from trace (lm_head + sampling) ===
-    tail = None
-    if args.asys_sqlite:
-        print("=== b) Tail from trace (lm_head + sampling) ===")
-        tail = extract_decode_from_nvtx(args.asys_sqlite, args.lm_head_kernel)
-        if not tail:
-            print("ERROR: NVTX decode extraction failed. "
-                  "Ensure trace has 'decode_0' NVTX marker and lm_head kernels.")
-            sys.exit(1)
-        print(f"  lm_head: {tail['lm_head_ms']:.4f} ms, "
-              f"sampling: {tail['sampling_ms']:.4f} ms")
-    else:
-        tail = {"tail_per_step_ms": 0, "lm_head_ms": 0, "sampling_ms": 0}
+    print("=== b) Tail from trace (lm_head + sampling) ===")
+    tail = extract_decode_from_nvtx(args.asys_sqlite, args.lm_head_kernel)
+    if not tail:
+        print("ERROR: NVTX decode extraction failed. "
+              "Ensure trace has 'decode_0' NVTX marker and lm_head kernels.")
+        sys.exit(1)
+    print(f"  lm_head: {tail['lm_head_ms']:.4f} ms, "
+          f"sampling: {tail['sampling_ms']:.4f} ms")
 
     lm_head_ms = tail.get("lm_head_ms", 0)
     sampling_ms = tail.get("sampling_ms", 0)
@@ -440,19 +417,11 @@ def main():
     else:
         lm_head_final = lm_head_ms
 
-    # COMP_MODE env: "trace" (precise, default) or "tpot" (old method)
-    comp_mode = os.environ.get("COMP_MODE", "trace").lower()
-    use_trace_encoder = encoder_ms > 0 and comp_mode == "trace"
-    if use_trace_encoder:
-        print(f"\n  Mode: trace-based (COMP_MODE=trace)")
-        print(f"  encoder (from trace): {encoder_ms:.4f} ms/step ({pruned} layers)")
-        print(f"  overhead (not scaled): {overhead_ms:.4f} ms")
-    else:
-        if comp_mode == "tpot" and encoder_ms > 0:
-            print(f"\n  Mode: TPOT-based (COMP_MODE=tpot, forced)")
-        else:
-            print(f"\n  Mode: TPOT-based (no encoder from trace)")
-    print()
+    if encoder_ms <= 0:
+        print("ERROR: encoder_ms is 0 — trace extraction returned no encoder timing.")
+        sys.exit(1)
+    print(f"\n  encoder (from trace): {encoder_ms:.4f} ms/step ({pruned} layers)")
+    print(f"  overhead (not scaled): {overhead_ms:.4f} ms")
     print()
 
     # === d) KV cache compensation (for prefix cache hit scenarios) ===
@@ -476,33 +445,25 @@ def main():
     # === Compensated Results ===
     print("=== Compensated Results ===")
     print()
-    if use_trace_encoder:
-        print("Formula (trace-based, precise):")
-        print(f"  comp_TPOT = encoder({encoder_ms:.4f}) × {layer_scale:.2f} "
-              f"+ lm_head({lm_head_final:.4f}) + sampling({sampling_ms:.4f}) "
-              f"+ overhead({overhead_ms:.4f}) + comm({decode_comm:.3f})")
-    else:
-        tail_subtract = lm_head_ms + sampling_ms
-        tail_add = lm_head_final + sampling_ms
-        print("Formula (TPOT-based, fallback):")
-        print(f"  comp_TPOT = (raw_TPOT - {tail_subtract:.4f}) × {layer_scale:.2f} "
-              f"+ {tail_add:.4f} + {decode_comm:.3f}")
+    print("Formula (trace-based):")
+    print(f"  comp_TPOT = encoder({encoder_ms:.4f}) × {layer_scale:.2f} "
+          f"+ lm_head({lm_head_final:.4f}) + sampling({sampling_ms:.4f}) "
+          f"+ overhead({overhead_ms:.4f}) + comm({decode_comm:.3f})")
     print()
     print(f"{'input':>8} {'raw_ttft':>10} {'comp_ttft':>10} "
           f"{'raw_tpot':>10} {'comp_tpot':>10} {'comp_total':>10}")
     print("-" * 65)
 
-    # If no bench results, create one entry from trace data
-    if not results_list and use_trace_encoder:
-        trace_ttft = tail.get("ttft_ms", 0)
-        trace_tpot = tail.get("tpot_ms", 0)
-        print(f"  (No bench.json — using trace: TTFT={trace_ttft:.2f}ms, TPOT={trace_tpot:.4f}ms)")
-        results_list = [{
-            "input_len": 0,  # unknown from trace
-            "ttft_median_ms": trace_ttft,
-            "tpot_median_ms": trace_tpot,
-            "output_tokens": output_len,
-        }]
+    # Create results from trace data
+    trace_ttft = tail.get("ttft_ms", 0)
+    trace_tpot = tail.get("tpot_ms", 0)
+    print(f"  (trace: TTFT={trace_ttft:.2f}ms, TPOT={trace_tpot:.4f}ms)")
+    results_list = [{
+        "input_len": 0,
+        "ttft_median_ms": trace_ttft,
+        "tpot_median_ms": trace_tpot,
+        "output_tokens": output_len,
+    }]
 
     compensated = []
     for r in results_list:
@@ -512,25 +473,14 @@ def main():
         il = r.get("input_len", 0)
         output_tokens = r.get("output_tokens", output_len)
 
-        if use_trace_encoder:
-            # All from trace — ignore bench.json values
-            raw_tpot = tail.get("tpot_ms", 0)
-            raw_ttft = tail.get("ttft_ms", 0)
+        raw_tpot = tail.get("tpot_ms", 0)
+        raw_ttft = tail.get("ttft_ms", 0)
 
-            # comp_TPOT = encoder × scale + lm_head/tp + sampling + comm
-            comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + decode_comm
-            # comp_TTFT = prefill_encoder × scale + lm_head/tp + sampling + comm
-            prefill_encoder = max(raw_ttft - lm_head_ms - sampling_ms, 0)
-            comp_ttft = prefill_encoder * layer_scale + lm_head_final + sampling_ms + prefill_comm
-        else:
-            raw_ttft = r.get("ttft_median_ms", 0)
-            raw_tpot = r.get("tpot_median_ms", 0)
-            tail_subtract = lm_head_ms + sampling_ms
-            tail_add = lm_head_final + sampling_ms
-            decode_encoder = max(raw_tpot - tail_subtract, 0)
-            prefill_encoder = max(raw_ttft - tail_subtract, 0)
-            comp_tpot = decode_encoder * layer_scale + tail_add + decode_comm
-            comp_ttft = prefill_encoder * layer_scale + tail_add + prefill_comm
+        # comp_TPOT = encoder × scale + lm_head/tp + sampling + comm
+        comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + decode_comm
+        # comp_TTFT = prefill_encoder × scale + lm_head/tp + sampling + comm
+        prefill_encoder = max(raw_ttft - lm_head_ms - sampling_ms, 0)
+        comp_ttft = prefill_encoder * layer_scale + lm_head_final + sampling_ms + prefill_comm
 
         # KV cache compensation: bench tested with input_len=il, but actual
         # decode reads KV for actual_seq_len tokens. Add extra KV read time.

@@ -18,7 +18,7 @@ for TP in 1 2; do
     python3 "$SCRIPT_DIR/compensate_ppu.py" \
         --model-dir "$MODEL_TP" \
         --asys-sqlite "$DIR/trace/trace.sqlite" \
-        --output-len 3072 \
+        --output-len 1024 \
         $COMM_ARG \
         --output-json "$DIR/compensated.json"
     echo ""
