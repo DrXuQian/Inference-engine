@@ -571,6 +571,7 @@ def main():
         "pruned_layers": pruned,
         "original_layers": original,
         "layer_scale": layer_scale,
+        "hidden_size": hidden,
         "communication": comm,
         "tail": tail,
         "results": compensated,

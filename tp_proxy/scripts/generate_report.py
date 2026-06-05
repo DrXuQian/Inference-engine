@@ -263,6 +263,65 @@ def compute_decode_bytes(cfg: dict, seq_len: int, tp_size: int = 1,
     return total_weight + total_kv, total_weight, total_kv
 
 
+def apply_comm_model(data: dict, bw_gbps: float, lat_us: float,
+                     input_len: int, batch: int = 1) -> None:
+    """Recompute compensated metrics with modeled communication.
+
+    Per-operation latency = lat_us + data_bytes / (bw_gbps * 1e9).
+    Two AllReduce ops per layer (attn output + MLP output).
+    Modifies data["results"] in place.
+    """
+    if not data or data.get("tp_size", 1) <= 1:
+        return
+
+    tp = data["tp_size"]
+    original_layers = data.get("original_layers", 1)
+    layer_scale = data.get("layer_scale", 1)
+    hidden = data.get("hidden_size", 0)
+    tail = data.get("tail", {})
+    if not hidden or not tail.get("encoder_ms"):
+        return
+
+    encoder_ms = tail["encoder_ms"]
+    lm_head_ms = tail.get("lm_head_ms", 0)
+    sampling_ms = tail.get("sampling_ms", 0)
+    lm_head_final = lm_head_ms / tp
+
+    n_ops = original_layers * 2
+    lat_ms = lat_us / 1000.0
+    bw_bytes_per_ms = bw_gbps * 1e6
+
+    decode_data = hidden * batch * 2
+    decode_comm = n_ops * (lat_ms + decode_data / bw_bytes_per_ms)
+
+    prefill_data = hidden * input_len * batch * 2
+    prefill_comm = n_ops * (lat_ms + prefill_data / bw_bytes_per_ms)
+
+    comp_tpot = encoder_ms * layer_scale + lm_head_final + sampling_ms + decode_comm
+
+    ttft = tail.get("ttft_ms", 0)
+    prefill_enc = max(ttft - lm_head_ms - sampling_ms, 0)
+    comp_ttft = prefill_enc * layer_scale + lm_head_final + sampling_ms + prefill_comm
+
+    for r in data.get("results", []):
+        if "error" in r:
+            continue
+        kv_extra = r.get("kv_extra_tpot_ms", 0)
+        ot = r.get("output_tokens", 64)
+        tpot = comp_tpot + kv_extra
+        r["comp_tpot_ms"] = round(tpot, 3)
+        r["comp_ttft_ms"] = round(comp_ttft, 3)
+        r["comp_total_ms"] = round(comp_ttft + (ot - 1) * tpot, 3)
+
+    data["communication"] = {
+        "method": "model",
+        "bw_gbps": bw_gbps,
+        "latency_us": lat_us,
+        "decode_comm_ms": round(decode_comm, 4),
+        "prefill_comm_ms": round(prefill_comm, 4),
+    }
+
+
 def get_metrics(data: dict) -> dict | None:
     """Extract comp_ttft, comp_tpot, tps, total from compensated json."""
     results = data.get("results", [])
@@ -325,6 +384,10 @@ def main():
                     help="Source platform peak BW GB/s (for rescaling decode)")
     ap.add_argument("--tgt-bw", type=float, default=0,
                     help="Target platform peak BW GB/s")
+    ap.add_argument("--comm-bw", type=float, default=0,
+                    help="Target interconnect bandwidth GB/s (overrides measured comm)")
+    ap.add_argument("--comm-latency", type=float, default=0,
+                    help="Fixed per-operation latency in microseconds")
     ap.add_argument("--label", choices=["ai_station", "vla"], default=None,
                     help="Filter scenarios: ai_station=01-06 only, vla=07 only")
     args = ap.parse_args()
@@ -332,6 +395,17 @@ def main():
     fmt = args.format
     show_ai = args.label != "vla"
     show_vla = args.label != "ai_station"
+    comm_override = args.comm_bw > 0
+
+    def _load(path, input_len=0, batch=1):
+        d = load_json(path)
+        if d and comm_override:
+            apply_comm_model(d, args.comm_bw, args.comm_latency, input_len, batch)
+        return d
+
+    if comm_override and fmt == "markdown":
+        print(f"\n> **Communication model**: latency = {args.comm_latency}us + data / {args.comm_bw} GB/s  ")
+        print(f"> (2 AllReduce per layer, bf16 activations)\n")
 
     if fmt == "csv":
         print("场景,模型,TTFT(ms),TPOT(ms),TPS(tok/s),总延迟(ms)")
@@ -340,7 +414,7 @@ def main():
     # 1. Code Completion (1.5K input, 50 output)
     # =========================================================================
     if show_ai:
-        d01 = load_json(os.path.join(rd, "01_code_completion_35B", "compensated.json"))
+        d01 = _load(os.path.join(rd, "01_code_completion_35B", "compensated.json"), 1536)
         m01 = get_metrics(d01) if d01 else None
         print_scenario(
             "Code Completion (1.5K input, 50 output)",
@@ -352,13 +426,13 @@ def main():
     # 2. Chat Q&A (25K input, 1K output)
     # =========================================================================
     if show_ai:
-        d02 = load_json(os.path.join(rd, "02_chat_27B", "compensated.json"))
+        d02 = _load(os.path.join(rd, "02_chat_27B", "compensated.json"), 25600)
         m02 = get_metrics(d02) if d02 else None
 
-        d03_tp1 = load_json(os.path.join(rd, "03_chat_122B", "tp1", "compensated.json"))
+        d03_tp1 = _load(os.path.join(rd, "03_chat_122B", "tp1", "compensated.json"), 25600)
         m03_tp1 = get_metrics(d03_tp1) if d03_tp1 else None
 
-        d03_tp2 = load_json(os.path.join(rd, "03_chat_122B", "tp2", "compensated.json"))
+        d03_tp2 = _load(os.path.join(rd, "03_chat_122B", "tp2", "compensated.json"), 25600)
         m03_tp2 = get_metrics(d03_tp2) if d03_tp2 else None
 
         print_scenario(
@@ -379,14 +453,14 @@ def main():
         agent_first = {}
         for scenario, tp_list in [("04_agent_122B", [1, 2]), ("05_agent_397B", [2, 4])]:
             for tp in tp_list:
-                d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
+                d = _load(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"), 102400)
                 agent_first[(scenario, tp)] = get_metrics(d) if d else None
 
         # Hit calls (20K input, 3K output)
         agent_hit = {}
         for scenario, tp_list in [("04b_agent_hit_122B", [1, 2]), ("05b_agent_hit_397B", [2, 4])]:
             for tp in tp_list:
-                d = load_json(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"))
+                d = _load(os.path.join(rd, scenario, f"tp{tp}", "compensated.json"), 20480)
                 agent_hit[(scenario, tp)] = get_metrics(d) if d else None
 
         # Map hit scenarios to first-call scenarios
@@ -467,13 +541,13 @@ def main():
         batch_rows_397b = []
         for b in [1, 2, 4, 8]:
             for tp, rows in [(1, batch_rows_122b), (2, batch_rows_122b)]:
-                d = load_json(os.path.join(rd, "04c_agent_batch_122B", f"tp{tp}",
-                                           f"compensated_batch{b}.json"))
+                d = _load(os.path.join(rd, "04c_agent_batch_122B", f"tp{tp}",
+                                       f"compensated_batch{b}.json"), 102400, b)
                 m = get_metrics(d) if d else None
                 rows.append((f"TP={tp} batch={b}", m))
             for tp in [2, 4]:
-                d = load_json(os.path.join(rd, "05c_agent_batch_397B", f"tp{tp}",
-                                           f"compensated_batch{b}.json"))
+                d = _load(os.path.join(rd, "05c_agent_batch_397B", f"tp{tp}",
+                                       f"compensated_batch{b}.json"), 102400, b)
                 m = get_metrics(d) if d else None
                 batch_rows_397b.append((f"TP={tp} batch={b}", m))
 
@@ -490,7 +564,7 @@ def main():
     # 5. RAG Repo Understanding (800K input, 3K output)
     # =========================================================================
     if show_ai:
-        d06 = load_json(os.path.join(rd, "06_rag_35B", "compensated.json"))
+        d06 = _load(os.path.join(rd, "06_rag_35B", "compensated.json"), 819200)
         m06 = get_metrics(d06) if d06 else None
         print_scenario(
             "RAG Repo Understanding (800K input, 3K output)",
@@ -521,7 +595,7 @@ def main():
                 path = os.path.join(
                     rd, "07_qwen3_30b_a3b", f"tp{tp}",
                     f"compensated_{out_len}.json")
-                data = load_json(path)
+                data = _load(path, 1536)
                 d07[(tp, out_len)] = data
 
         bf16_rows = []
@@ -670,7 +744,7 @@ def main():
                 comp_file = os.path.join(base, f"compensated_batch{batch}.json")
             else:
                 comp_file = os.path.join(base, "compensated.json")
-            comp = load_json(comp_file)
+            comp = _load(comp_file, input_len, batch)
             m = get_metrics(comp) if comp else None
 
             # Find model config (batch scenarios reuse model from parent scenario)
