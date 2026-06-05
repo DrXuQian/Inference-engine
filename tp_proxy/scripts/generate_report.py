@@ -348,6 +348,7 @@ def get_metrics(data: dict) -> dict | None:
         "tps": tps,
         "total": total,
         "output_tokens": output_tokens,
+        "trace_time": data.get("trace_time", ""),
     }
 
 
@@ -357,19 +358,20 @@ def print_scenario(title: str, rows: list[tuple[str, dict | None]], fmt: str):
         for model_name, m in rows:
             if m:
                 print(f"{title},{model_name},{m['ttft']:.2f},{m['tpot']:.3f},"
-                      f"{m['tps']:.1f},{m['total']:.1f}")
+                      f"{m['tps']:.1f},{m['total']:.1f},{m.get('trace_time','')}")
             else:
-                print(f"{title},{model_name},N/A,N/A,N/A,N/A")
+                print(f"{title},{model_name},N/A,N/A,N/A,N/A,")
     else:
         print(f"\n### {title}\n")
-        print(f"| 模型 | TTFT | TPOT | TPS | 总延迟 |")
-        print(f"|------|------|------|-----|--------|")
+        print(f"| 模型 | TTFT | TPOT | TPS | 总延迟 | trace时间 |")
+        print(f"|------|------|------|-----|--------|-----------|")
         for model_name, m in rows:
             if m:
+                tt = m.get("trace_time", "")
                 print(f"| {model_name} | {fmt_ms(m['ttft'])} | {fmt_ms(m['tpot'])} | "
-                      f"{m['tps']:.1f} tok/s | {fmt_ms(m['total'])} |")
+                      f"{m['tps']:.1f} tok/s | {fmt_ms(m['total'])} | {tt} |")
             else:
-                print(f"| {model_name} | N/A | N/A | N/A | N/A |")
+                print(f"| {model_name} | N/A | N/A | N/A | N/A | |")
 
 
 def main():

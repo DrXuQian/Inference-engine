@@ -541,8 +541,12 @@ def main():
         compensated.append(entry)
 
     # Save
+    from datetime import datetime
+    trace_mtime = os.path.getmtime(args.asys_sqlite)
+    trace_time = datetime.fromtimestamp(trace_mtime).strftime("%Y-%m-%d %H:%M:%S")
     output = {
         "platform": "ppu",
+        "trace_time": trace_time,
         "tp_size": tp_size,
         "pruned_layers": pruned,
         "original_layers": original,
