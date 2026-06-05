@@ -231,7 +231,11 @@ def main():
     print(f"  Max layers for {args.gpu_memory_gb}GB: {max_layers} / {num_layers}")
 
     # Build expected metadata for this run
+    # Bump this version when split_tp2.py logic changes to invalidate cached results
+    SPLIT_VERSION = 2  # v2: GPTQ attention + KV head replication fix
+
     meta = {
+        "split_version": SPLIT_VERSION,
         "original_model": os.path.abspath(args.model_dir),
         "tp_size": args.tp_size,
         "gpu_memory_gb": args.gpu_memory_gb,
@@ -254,7 +258,7 @@ def main():
         # Compare key fields
         match = all(
             existing_meta.get(k) == meta.get(k)
-            for k in ["original_model", "tp_size", "original_layers", "pruned_layers", "max_seq_len"]
+            for k in ["split_version", "original_model", "tp_size", "original_layers", "pruned_layers", "max_seq_len"]
         )
         if match and os.path.exists(existing_meta.get("output_dir", "")):
             rank0_pruned = existing_meta["output_dir"]
