@@ -329,9 +329,11 @@ def main():
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--sampling-trace", default=None,
                     help="Batch=1 trace sqlite for sampling time (used when --batch-size>=2)")
+    ap.add_argument("--input-len", type=int, default=0,
+                    help="Input token count used during trace capture (for KV delta calculation)")
     ap.add_argument("--actual-seq-len", type=int, default=None,
                     help="Actual decode seq_len (e.g. 100K for agent hit with 80%% prefix cache). "
-                         "If set and > bench input_len, compensates extra KV cache read time.")
+                         "If set and > input_len, compensates extra KV cache read time.")
     ap.add_argument("--peak-bw", type=float, default=680,
                     help="Peak memory bandwidth GB/s (default: 680)")
     ap.add_argument("--kv-bw-util", type=float, default=0.8,
@@ -459,7 +461,7 @@ def main():
     trace_tpot = tail.get("tpot_ms", 0)
     print(f"  (trace: TTFT={trace_ttft:.2f}ms, TPOT={trace_tpot:.4f}ms)")
     results_list = [{
-        "input_len": 0,
+        "input_len": args.input_len,
         "ttft_median_ms": trace_ttft,
         "tpot_median_ms": trace_tpot,
         "output_tokens": output_len,
