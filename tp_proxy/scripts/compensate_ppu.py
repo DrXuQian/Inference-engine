@@ -223,17 +223,13 @@ def extract_decode_from_nvtx(sqlite_path: str,
           f"({len(enc_evts)} kernels)")
     print(f"  Tail (after graph): {len(tail_evts)} kernels")
 
-    # Tail: find lm_head by --lm-head-kernel substring match, rest = sampling
-    lm_dur = 0
-    samp_evts = []
+    # Tail: lm_head = max-duration kernel (vocab projection matmul), rest = sampling
+    lm_idx = max(range(len(tail_evts)), key=lambda i: tail_evts[i][1]) if tail_evts else -1
+    lm_dur = tail_evts[lm_idx][1] if lm_idx >= 0 else 0
+    samp_evts = [e for i, e in enumerate(tail_evts) if i != lm_idx]
     print(f"  Tail kernels ({len(tail_evts)}):")
     for i, e in enumerate(tail_evts):
-        if lm_head_kernel in e[3]:
-            lm_dur += e[1]
-            tag = "lm_head"
-        else:
-            samp_evts.append(e)
-            tag = "sampling"
+        tag = "lm_head" if i == lm_idx else "sampling"
         print(f"    [{i}] {tag}: {e[3][:90]}  dur={e[1]/1e6:.4f}ms  gid={e[4]}")
 
     encoder_ns = sum(e[1] for e in enc_evts)
