@@ -6,7 +6,7 @@ BASE_04=./results/04_agent_122B
 OUT=./results/04d_agent_batch_hit_122B
 INPUT_LEN=${INPUT_LEN:-20480}
 OUTPUT_LEN=${OUTPUT_LEN:-3072}
-BATCH_LIST="${BATCH_LIST:-1 2 4 8}"
+BATCH_LIST="${BATCH_LIST:-2 4 8}"
 
 for TP in 1 2; do
     echo "--- TP=$TP ---"
