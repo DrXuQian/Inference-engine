@@ -47,6 +47,7 @@ for TP in 1 2; do
             --batch-size $B \
             --lm-head-kernel "$LM_HEAD" \
             --output-len 3072 \
+            --input-len 20480 \
             $COMP_ARGS \
             $COMM_ARG \
             --actual-seq-len 102400 \
