@@ -354,6 +354,7 @@ def get_metrics(data: dict) -> dict | None:
     total = r.get("comp_total_ms", ttft + (r.get("output_tokens", 64) - 1) * tpot)
     output_tokens = r.get("output_tokens", data.get("results", [{}])[0].get("output_len", 64))
 
+    comm = data.get("communication", {})
     return {
         "ttft": ttft,
         "tpot": tpot,
@@ -361,6 +362,8 @@ def get_metrics(data: dict) -> dict | None:
         "total": total,
         "output_tokens": output_tokens,
         "trace_time": data.get("trace_time", ""),
+        "decode_comm_ms": comm.get("decode_comm_ms", 0),
+        "prefill_comm_ms": comm.get("prefill_comm_ms", 0),
     }
 
 
@@ -822,12 +825,15 @@ def main():
             if not d or "int4" not in d:
                 return None
             i = d["int4"]
+            comm = d.get("communication", {})
             return {
                 "ttft": i["comp_ttft_ms"],
                 "tpot": i["comp_tpot_ms"],
                 "tps": i["tps"],
                 "total": i["total_ms"],
                 "output_tokens": d.get("results", [{}])[0].get("output_tokens", 64),
+                "decode_comm_ms": comm.get("decode_comm_ms", 0),
+                "prefill_comm_ms": comm.get("prefill_comm_ms", 0),
             }
 
         d07 = {}

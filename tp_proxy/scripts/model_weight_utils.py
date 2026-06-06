@@ -257,14 +257,16 @@ def rescale_metrics(metrics: dict, info: dict,
     ttft = metrics["ttft"]
     tpot = metrics["tpot"]
     output_tokens = metrics.get("output_tokens", 64)
+    decode_comm = metrics.get("decode_comm_ms", 0)
+    prefill_comm = metrics.get("prefill_comm_ms", 0)
 
-    # TTFT: compute-bound → scale with FLOPS ratio
+    # TTFT: compute-bound → scale compute portion, keep comm fixed
     if src_flops > 0 and tgt_flops > 0:
-        ttft = ttft * (src_flops / tgt_flops)
+        ttft = (ttft - prefill_comm) * (src_flops / tgt_flops) + prefill_comm
 
-    # TPOT: BW-bound → scale with BW ratio
+    # TPOT: BW-bound → scale BW portion, keep comm fixed
     if src_bw > 0 and tgt_bw > 0:
-        tpot = tpot * (src_bw / tgt_bw)
+        tpot = (tpot - decode_comm) * (src_bw / tgt_bw) + decode_comm
 
     tps = 1000 / tpot if tpot > 0 else 0
     total = ttft + (output_tokens - 1) * tpot
@@ -275,6 +277,8 @@ def rescale_metrics(metrics: dict, info: dict,
         "tps": tps,
         "total": total,
         "output_tokens": output_tokens,
+        "decode_comm_ms": decode_comm,
+        "prefill_comm_ms": prefill_comm,
     }
 
 
