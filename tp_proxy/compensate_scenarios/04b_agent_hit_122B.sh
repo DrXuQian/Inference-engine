@@ -1,19 +1,22 @@
 #!/bin/bash
 # Agent hit: Qwen3.5-122B-A10B, TP=1 and TP=2
+# Reuses split model and comm.json from 04_agent_122B
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
-BASE=./results/04b_agent_hit_122B
+BASE_04=./results/04_agent_122B
+OUT=./results/04b_agent_hit_122B
 
 for TP in 1 2; do
     echo "--- TP=$TP ---"
-    DIR="$BASE/tp${TP}"
-    MODEL_TP=${MODEL:-$(bash "$SCRIPT_DIR/get_model_path.sh" "$DIR/model" 2>/dev/null || echo "")}
+    DIR="$OUT/tp${TP}"
+
+    MODEL_TP=${MODEL:-$(bash "$SCRIPT_DIR/get_model_path.sh" "$BASE_04/tp${TP}/model" 2>/dev/null || echo "")}
     if [ -z "$MODEL_TP" ]; then
         echo "ERROR: Model not found for TP=$TP, skipping"
         continue
     fi
 
-    COMM="$DIR/comm.json"; [ -f "$COMM" ] && COMM_ARG="--comm-json $COMM" || COMM_ARG=""
+    COMM="$BASE_04/tp${TP}/comm.json"; [ -f "$COMM" ] && COMM_ARG="--comm-json $COMM" || COMM_ARG=""
 
     python3 "$SCRIPT_DIR/compensate_ppu.py" \
         --model-dir "$MODEL_TP" \
