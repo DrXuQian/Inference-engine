@@ -451,6 +451,19 @@ def main():
     if fmt == "csv":
         print("场景,模型,TTFT(ms),TPOT(ms),TPS(tok/s),总延迟(ms)")
 
+    has_rescale = (args.src_flops > 0 and args.tgt_flops > 0) or \
+                  (args.src_bw > 0 and args.tgt_bw > 0)
+    if has_rescale:
+        from model_weight_utils import rescale_metrics, decode_weight_bytes
+        sf, tf = args.src_flops, args.tgt_flops
+        sb, tb = args.src_bw, args.tgt_bw
+        tgt_parts = []
+        if tf > 0:
+            tgt_parts.append(f"{tf}T")
+        if tb > 0:
+            tgt_parts.append(f"{tb}GB/s")
+        tgt_label = f"→ Target ({'/'.join(tgt_parts)})"
+
     # =========================================================================
     # 1. Code Completion (1.5K input, 50 output)
     # =========================================================================
@@ -602,6 +615,75 @@ def main():
                 batch_rows_397b, fmt)
 
     # =========================================================================
+    # 4b. Batch Hit Sweep (04d/05d) + Full Task with Batch
+    # =========================================================================
+    if show_ai:
+        batch_hit_rows_122b = []
+        batch_hit_rows_397b = []
+        for b in [1, 2, 4, 8]:
+            for tp, rows in [(1, batch_hit_rows_122b), (2, batch_hit_rows_122b)]:
+                d = _load(os.path.join(rd, "04d_agent_batch_hit_122B", f"tp{tp}",
+                                       f"compensated_batch{b}.json"), 20480, b)
+                m = get_metrics(d) if d else None
+                rows.append((f"TP={tp} batch={b}", m))
+            for tp in [2, 4]:
+                d = _load(os.path.join(rd, "05d_agent_batch_hit_397B", f"tp{tp}",
+                                       f"compensated_batch{b}.json"), 20480, b)
+                m = get_metrics(d) if d else None
+                batch_hit_rows_397b.append((f"TP={tp} batch={b}", m))
+
+        if any(m for _, m in batch_hit_rows_122b):
+            print_scenario(
+                "Agent Batch Hit Sweep 122B (20K input@80%hit, 3K output)",
+                batch_hit_rows_122b, fmt)
+        if any(m for _, m in batch_hit_rows_397b):
+            print_scenario(
+                "Agent Batch Hit Sweep 397B (20K input@80%hit, 3K output)",
+                batch_hit_rows_397b, fmt)
+
+        # Combined: first call batch (04c/05c) + 9 × hit batch (04d/05d)
+        first_dict_122b = {name: m for name, m in batch_rows_122b}
+        first_dict_397b = {name: m for name, m in batch_rows_397b}
+        hit_dict_122b = {name: m for name, m in batch_hit_rows_122b}
+        hit_dict_397b = {name: m for name, m in batch_hit_rows_397b}
+
+        batch_full_rows = []
+        for model_label, first_d, hit_d, tp_list in [
+            ("122B", first_dict_122b, hit_dict_122b, [1, 2]),
+            ("397B", first_dict_397b, hit_dict_397b, [2, 4]),
+        ]:
+            for tp in tp_list:
+                for b in [1, 2, 4, 8]:
+                    key = f"TP={tp} batch={b}"
+                    mf = first_d.get(key)
+                    mh = hit_d.get(key)
+                    batch_full_rows.append((f"{model_label} {key}", mf, mh))
+
+        if any(mf and mh for _, mf, mh in batch_full_rows):
+            if fmt == "markdown":
+                print(f"\n### Agent Batch Full Task (100K first + 9×20K@80%hit, 3K output)")
+                print(f"\n| 模型 | 第一次(100K) TPOT | 后续(20K) TPOT | 第一次总延迟 | 后续×9总延迟 | 全任务总延迟 |")
+                print(f"|------|------------------|----------------|-------------|-------------|-------------|")
+            else:
+                print()
+
+            for label, mf, mh in batch_full_rows:
+                if mf and mh:
+                    full_total = mf["total"] + 9 * mh["total"]
+                    if fmt == "csv":
+                        print(f"Agent Batch全任务,{label},"
+                              f"{mf['tpot']:.3f},{mh['tpot']:.3f},"
+                              f"{mf['total']:.1f},{mh['total']:.1f},{full_total:.1f}")
+                    else:
+                        print(f"| {label} | {fmt_ms(mf['tpot'])} | {fmt_ms(mh['tpot'])} "
+                              f"| {fmt_ms(mf['total'])} | {fmt_ms(mh['total'])} | {fmt_ms(full_total)} |")
+                else:
+                    if fmt == "csv":
+                        print(f"Agent Batch全任务,{label},N/A,N/A,N/A,N/A,N/A")
+                    else:
+                        print(f"| {label} | N/A | N/A | N/A | N/A | N/A |")
+
+    # =========================================================================
     # 5. RAG Repo Understanding (800K input, 3K output)
     # =========================================================================
     if show_ai:
@@ -610,6 +692,124 @@ def main():
         print_scenario(
             "RAG Repo Understanding (800K input, 3K output)",
             [("Qwen3.5-35B-A3B-GPTQ-INT4", m06)],
+            fmt,
+        )
+
+    # =========================================================================
+    # AI Station → Target Platform (rescaled)
+    # =========================================================================
+    if show_ai and has_rescale:
+        _rs = lambda m: rescale_metrics(m, {}, sf, tf, sb, tb)
+
+        print_scenario(
+            f"Code Completion {tgt_label} (1.5K input, 50 output)",
+            [("Qwen3.5-35B-A3B-GPTQ-INT4", _rs(m01))],
+            fmt,
+        )
+
+        print_scenario(
+            f"Chat Q&A {tgt_label} (25K input, 1K output)",
+            [
+                ("Qwen3.5-27B", _rs(m02)),
+                ("Qwen3.5-122B-A10B-GPTQ-INT4 TP=1", _rs(m03_tp1)),
+                ("Qwen3.5-122B-A10B-GPTQ-INT4 TP=2", _rs(m03_tp2)),
+            ],
+            fmt,
+        )
+
+        af_rs = {k: _rs(v) for k, v in agent_first.items()}
+        ah_rs = {k: _rs(v) for k, v in agent_hit.items()}
+
+        if fmt == "markdown":
+            print(f"\n### Agent Full Task {tgt_label} (1M tokens = 100K first + 9×100K@80%hit)")
+            print(f"\n**全任务总延迟:**\n")
+            print(f"| 模型 | 第一次(100K) | 后续×9(20K) | 全任务总延迟 |")
+            print(f"|------|-------------|-------------|-------------|")
+        else:
+            print()
+
+        for first_key in [("04_agent_122B", 1), ("04_agent_122B", 2),
+                           ("05_agent_397B", 2), ("05_agent_397B", 4)]:
+            hit_key = [hk for hk, fk in hit_map.items() if fk == first_key]
+            hit_key = hit_key[0] if hit_key else None
+            mf = af_rs.get(first_key)
+            mh = ah_rs.get(hit_key) if hit_key else None
+            name = model_names[first_key]
+
+            if mf and mh:
+                full_total = mf["total"] + 9 * mh["total"]
+                if fmt == "csv":
+                    print(f"Agent全任务{tgt_label},{name},{mf['total']:.1f},{mh['total']:.1f},{full_total:.1f},")
+                else:
+                    print(f"| {name} | {fmt_ms(mf['total'])} | {fmt_ms(mh['total'])} | {fmt_ms(full_total)} |")
+            else:
+                if fmt == "csv":
+                    print(f"Agent全任务{tgt_label},{name},N/A,N/A,N/A,")
+                else:
+                    print(f"| {name} | N/A | N/A | N/A |")
+
+        print_scenario(
+            f"Agent 第一次调用 {tgt_label} (100K input, 3K output)",
+            [(model_names[k], af_rs[k]) for k in
+             [("04_agent_122B", 1), ("04_agent_122B", 2),
+              ("05_agent_397B", 2), ("05_agent_397B", 4)]],
+            fmt,
+        )
+
+        print_scenario(
+            f"Agent 后续调用 {tgt_label} (20K input@80%hit, 3K output)",
+            [(hit_names[k], ah_rs[k]) for k in
+             [("04b_agent_hit_122B", 1), ("04b_agent_hit_122B", 2),
+              ("05b_agent_hit_397B", 2), ("05b_agent_hit_397B", 4)]],
+            fmt,
+        )
+
+        if any(m for _, m in batch_rows_122b):
+            print_scenario(
+                f"Agent Batch Sweep 122B {tgt_label} (100K input, 3K output)",
+                [(name, _rs(m)) for name, m in batch_rows_122b], fmt)
+        if any(m for _, m in batch_rows_397b):
+            print_scenario(
+                f"Agent Batch Sweep 397B {tgt_label} (100K input, 3K output)",
+                [(name, _rs(m)) for name, m in batch_rows_397b], fmt)
+
+        if any(m for _, m in batch_hit_rows_122b):
+            print_scenario(
+                f"Agent Batch Hit Sweep 122B {tgt_label} (20K input@80%hit, 3K output)",
+                [(name, _rs(m)) for name, m in batch_hit_rows_122b], fmt)
+        if any(m for _, m in batch_hit_rows_397b):
+            print_scenario(
+                f"Agent Batch Hit Sweep 397B {tgt_label} (20K input@80%hit, 3K output)",
+                [(name, _rs(m)) for name, m in batch_hit_rows_397b], fmt)
+
+        # Batch full task rescaled
+        bf_rs_rows = [(label, _rs(mf), _rs(mh)) for label, mf, mh in batch_full_rows]
+        if any(mf and mh for _, mf, mh in bf_rs_rows):
+            if fmt == "markdown":
+                print(f"\n### Agent Batch Full Task {tgt_label} (100K first + 9×20K@80%hit, 3K output)")
+                print(f"\n| 模型 | 第一次(100K) TPOT | 后续(20K) TPOT | 第一次总延迟 | 后续×9总延迟 | 全任务总延迟 |")
+                print(f"|------|------------------|----------------|-------------|-------------|-------------|")
+            else:
+                print()
+            for label, mf, mh in bf_rs_rows:
+                if mf and mh:
+                    full_total = mf["total"] + 9 * mh["total"]
+                    if fmt == "csv":
+                        print(f"Agent Batch全任务{tgt_label},{label},"
+                              f"{mf['tpot']:.3f},{mh['tpot']:.3f},"
+                              f"{mf['total']:.1f},{mh['total']:.1f},{full_total:.1f}")
+                    else:
+                        print(f"| {label} | {fmt_ms(mf['tpot'])} | {fmt_ms(mh['tpot'])} "
+                              f"| {fmt_ms(mf['total'])} | {fmt_ms(mh['total'])} | {fmt_ms(full_total)} |")
+                else:
+                    if fmt == "csv":
+                        print(f"Agent Batch全任务{tgt_label},{label},N/A,N/A,N/A,N/A,N/A")
+                    else:
+                        print(f"| {label} | N/A | N/A | N/A | N/A | N/A |")
+
+        print_scenario(
+            f"RAG Repo Understanding {tgt_label} (800K input, 3K output)",
+            [("Qwen3.5-35B-A3B-GPTQ-INT4", _rs(m06))],
             fmt,
         )
 
@@ -667,11 +867,7 @@ def main():
         )
 
         # BF16/INT4 → target platform (if --src/tgt given)
-        has_rescale = args.src_flops > 0 and args.tgt_flops > 0
         if has_rescale:
-            from model_weight_utils import decode_weight_bytes, rescale_metrics
-            sf = args.src_flops; tf = args.tgt_flops
-            sb = args.src_bw; tb = args.tgt_bw
             bf16_tgt_rows = []
             int4_tgt_rows = []
             for tp in SCENARIO_07_TPS:
@@ -692,14 +888,13 @@ def main():
                         if int4 else None,
                     ))
 
-            tgt = f"→ Target ({tf}T/{tb}GB/s)"
             print_scenario(
-                f"Qwen3-30B-A3B BF16 {tgt} (1.5K input)",
+                f"Qwen3-30B-A3B BF16 {tgt_label} (1.5K input)",
                 bf16_tgt_rows,
                 fmt,
             )
             print_scenario(
-                f"Qwen3-30B-A3B INT4 {tgt} (1.5K input)",
+                f"Qwen3-30B-A3B INT4 {tgt_label} (1.5K input)",
                 int4_tgt_rows,
                 fmt,
             )
@@ -734,7 +929,7 @@ def main():
                     1,
                     f"compensated_{out_len}.json",
                 ))
-        # Add batch scenarios (04c/05c)
+        # Add batch scenarios (04c/05c first call, 04d/05d hit call)
         for b in [1, 2, 4, 8]:
             scenario_defs.append(
                 (f"04c 122B TP=1 B={b}", "04c_agent_batch_122B", "tp1", 102400, 3072, 1, b))
@@ -744,6 +939,14 @@ def main():
                 (f"05c 397B TP=2 B={b}", "05c_agent_batch_397B", "tp2", 102400, 3072, 2, b))
             scenario_defs.append(
                 (f"05c 397B TP=4 B={b}", "05c_agent_batch_397B", "tp4", 102400, 3072, 4, b))
+            scenario_defs.append(
+                (f"04d 122B TP=1 B={b} hit", "04d_agent_batch_hit_122B", "tp1", 20480, 3072, 1, b))
+            scenario_defs.append(
+                (f"04d 122B TP=2 B={b} hit", "04d_agent_batch_hit_122B", "tp2", 20480, 3072, 2, b))
+            scenario_defs.append(
+                (f"05d 397B TP=2 B={b} hit", "05d_agent_batch_hit_397B", "tp2", 20480, 3072, 2, b))
+            scenario_defs.append(
+                (f"05d 397B TP=4 B={b} hit", "05d_agent_batch_hit_397B", "tp4", 20480, 3072, 4, b))
 
         # Filter scenario_defs based on --label
         if not show_vla:
@@ -793,9 +996,11 @@ def main():
             model_dirs = _glob.glob(os.path.join(base, "model", "rank_0_*L"))
             if not model_dirs:
                 model_dirs = _glob.glob(os.path.join(base, "model", "split", "rank_0"))
-            # Fallback: batch scenarios (04c/05c) reuse model from 04/05
+            # Fallback: batch scenarios (04c/05c/04d/05d) reuse model from 04/05
             if not model_dirs:
-                parent = sc_dir.replace("04c_agent_batch_122B", "04_agent_122B") \
+                parent = sc_dir.replace("04d_agent_batch_hit_122B", "04_agent_122B") \
+                               .replace("05d_agent_batch_hit_397B", "05_agent_397B") \
+                               .replace("04c_agent_batch_122B", "04_agent_122B") \
                                .replace("05c_agent_batch_397B", "05_agent_397B")
                 if parent != sc_dir:
                     parent_base = os.path.join(rd, parent, sub) if sub else os.path.join(rd, parent)
